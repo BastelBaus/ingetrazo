@@ -3504,7 +3504,8 @@ class ScenesPanel(QWidget):
     def __init__(self, window) -> None:
         super().__init__()
         from PySide6.QtWidgets import (QHBoxLayout, QLabel, QListWidget,
-                                       QPushButton, QVBoxLayout)
+                                       QPushButton, QVBoxLayout, QLineEdit,
+                                       QAbstractItemView )
         self._window = window
         self._updating = False
         lay = QVBoxLayout(self)
@@ -3515,7 +3516,10 @@ class ScenesPanel(QWidget):
         self.list = QListWidget()
         self.list.itemDoubleClicked.connect(self._on_activate)
         self.list.itemChanged.connect(self._on_item_changed)
+        self.list.itemPressed.connect(self._on_pressed)        
         lay.addWidget(self.list)
+        self.list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+
         row = QHBoxLayout()
         add_btn = QPushButton(tr("+ Scene"))
         add_btn.setToolTip(tr("Save the current view and layer visibility"))
@@ -3526,11 +3530,31 @@ class ScenesPanel(QWidget):
         del_btn = QPushButton(tr("−"))
         del_btn.setToolTip(tr("Delete the selected scene"))
         del_btn.clicked.connect(self._on_delete)
+        up_btn = QPushButton(tr("↑"))
+        up_btn.setToolTip(tr("Move the selected scene up"))
+        up_btn.clicked.connect(self._on_move_up)
+        down_btn = QPushButton(tr("↓"))
+        down_btn.setToolTip(tr("Move the selected scene down"))
+        down_btn.clicked.connect(self._on_move_down)
         row = FlowLayout(spacing=4)          # wraps in a narrow tray (see Layers)
         row.addWidget(add_btn)
         row.addWidget(upd_btn)
         row.addWidget(del_btn)
+        row.addWidget(up_btn)
+        row.addWidget(down_btn)
         lay.addLayout(row)
+        
+       
+        name_row = QHBoxLayout()
+        self._name_caption = QLabel(tr("Name:"))
+        self._name_edit = QLineEdit()
+        self._name_edit.setToolTip(
+            tr("The name of the scene — Enter keeps it"))
+        self._name_edit.editingFinished.connect(self._on_name_edited)
+        name_row.addWidget(self._name_caption)
+        name_row.addWidget(self._name_edit, 1)
+        lay.addLayout(name_row)
+
         self.refresh()
 
     def _scene(self):
@@ -3581,6 +3605,41 @@ class ScenesPanel(QWidget):
             view.name = new_name
         self.refresh()
         self._touch()
+
+    def _on_pressed(self, item) -> None:
+        if self._updating:
+            return 
+        new_name = item.text().strip()
+        if new_name:
+            self._name_edit.setText(new_name)
+
+    def _on_name_edited(self) -> None:
+        new_name = self._name_edit.text().strip()
+        item = self.list.currentItem()
+        if item:
+            view = item.data(Qt.UserRole)
+            current_name = item.text().strip()
+            if view is not None and new_name and new_name != current_name:
+                #view.name = new_name
+                from core.history import RenameViewCommand
+                self._window.viewport.history.execute(RenameViewCommand(view, new_name))
+                self._window.viewport.update()
+
+    def __move(self,step:int):
+        currentRow = self.list.currentRow()
+        if currentRow < 0: return # nothing selected
+        count = self.list.count()
+        currentItem = self.list.takeItem(currentRow)
+        newRow = currentRow + step
+        newRow = max(0,min(newRow,  count - 1))
+        self.list.insertItem(newRow, currentItem)
+        self.list.setCurrentRow(newRow)
+
+    def _on_move_down(self):
+        self.__move(1)
+
+    def _on_move_up(self):
+        self.__move(-1)
 
     def _on_add(self) -> None:
         from core.saved_views import SavedView

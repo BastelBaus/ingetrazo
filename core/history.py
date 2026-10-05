@@ -54,6 +54,8 @@ def _plog(tag: str, ms: float, extra: str = "", floor: float = 100.0) -> None:
 from PySide6.QtGui import QVector3D
 
 from core.group import Group
+from core.saved_views import SavedView
+
 from core.materials import has_own_material
 from core.mesh import (PAINT_KEYS, Edge, Face, Mesh, Vertex, edge_flags,
                        edge_is_plain, stamp_edge_flags)
@@ -3431,6 +3433,21 @@ class RenameGroupCommand(Command):
         self.group.name = self.old
         scene.version += 1
 
+class RenameViewCommand(Command):
+    """Give a scene a new name (the Scenes tray's edit)."""
+    def __init__(self, view: SavedView, name: str) -> None:
+        self.view = view
+        self.name = name
+        self.old: Optional[str] = None
+
+    def do(self, scene) -> None:
+        self.old = self.view.name
+        self.view.name = self.name
+        scene.version += 1
+
+    def undo(self, scene) -> None:
+        self.view.name = self.old
+        scene.version += 1
 
 class ExplodeViewCommand(Command):
     """Pull a component's parts apart to ``factor`` along ``mode`` — or put
