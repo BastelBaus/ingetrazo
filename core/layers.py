@@ -29,15 +29,16 @@ class Layer:
     """A named tag with display state."""
 
     def __init__(self, name: str, visible: bool = True,
-                 locked: bool = False, folder_id=None, position=0) -> None:
+                 locked: bool = False, folder_id=None, position=0, color=None) -> None:
         self.name = name
+        self.color = tuple(color) if color is not None else default_layer_color(name)
         self.visible = visible
         self.locked = locked
         self.folder_id = folder_id if name != DEFAULT_LAYER else None
         self.position = int(position)
 
     def to_dict(self) -> dict:
-        entry: dict = {"name": self.name}
+        entry: dict = {"name": self.name, "color": list(self.color)}
         if not self.visible:
             entry["visible"] = False
         if self.locked:
@@ -53,7 +54,8 @@ class Layer:
         return cls(raw.get("name", DEFAULT_LAYER),
                    visible=raw.get("visible", True),
                    locked=raw.get("locked", False),
-                   folder_id=raw.get("folder_id"), position=raw.get("position", 0))
+                   folder_id=raw.get("folder_id"), position=raw.get("position", 0),
+                   color=raw.get("color"))
 
 
 def layer_of(entity) -> str:
@@ -102,3 +104,18 @@ class LayerFolder:
                    parent_id=raw.get("parent_id"), position=raw.get("position", 0),
                    expanded=raw.get("expanded", True),
                    visible=raw.get("visible", True), locked=raw.get("locked", False))
+
+
+def default_layer_color(name):
+    """Stable, distinct colours for new tags; RGB floats like materials."""
+    if name == DEFAULT_LAYER:
+        return (0.78, 0.78, 0.78)
+    from colorsys import hsv_to_rgb
+    from zlib import crc32
+    return hsv_to_rgb((crc32(name.encode("utf-8")) % 360) / 360, 0.55, 0.85)
+
+
+def display_layer_name(entity, inherited=DEFAULT_LAYER):
+    """Untagged geometry inherits its container's tag for colour display."""
+    name = layer_of(entity)
+    return inherited if name == DEFAULT_LAYER else name
