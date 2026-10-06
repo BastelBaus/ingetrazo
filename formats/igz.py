@@ -344,13 +344,15 @@ def save_scene(scene, path: Path) -> dict:
     if layers is not None and (len(layers) > 1 or any(
             not ly.visible or ly.locked for ly in layers)):
         payload["layers"] = [ly.to_dict() for ly in layers]
-    if scene.layer_folders:
-        payload["layer_folders"] = [f.to_dict() for f in scene.layer_folders]
+    layer_folders = getattr(scene, "layer_folders", None)
+    if layer_folders:
+        payload["layer_folders"] = [f.to_dict() for f in layer_folders]
     views = getattr(scene, "saved_views", None)
     if views:
         payload["saved_views"] = [v.to_dict() for v in views]
-    if scene.scene_folders:
-        payload["scene_folders"] = [f.to_dict() for f in scene.scene_folders]
+    scene_folders = getattr(scene, "scene_folders", None)
+    if scene_folders:
+        payload["scene_folders"] = [f.to_dict() for f in scene_folders]
     comps = getattr(scene, "compositions", None)
     if comps:
         payload["compositions"] = [c.to_dict() for c in comps]

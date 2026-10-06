@@ -13,11 +13,14 @@ the single seam that decouples the app from *how* a `.skp` is read.
 
 ## Backends
 
-- **OpenSKP** (pure Python, MIT — https://github.com/iamahsanmehmood/openskp).
-  Offline, Linux-native, no Wine, no proprietary DLL. **Wired and working** (see
-  "What works / what's missing"). An **optional dependency**: `pip install
-  openskp` (pulls `trimesh`). Not in `requirements.txt` yet — the seam falls
-  back gracefully when it's absent.
+- **OpenSKP** (pure Python, MIT). IngeTrazo installs it from our
+  [GWydouw/openskp fork](https://github.com/GWydouw/openskp), based on
+  [iamahsanmehmood/openskp](https://github.com/iamahsanmehmood/openskp).
+  `requirements.txt` and the Linux/Windows release workflows pin commit
+  `291700bc213655a00461838de71e5f206311e619`, which is present in the fork.
+  This switches repository ownership while preserving the validated parser
+  version. Install with `python -m pip install -r requirements.txt`.
+  The backend reports itself unavailable when the package cannot be imported.
 
 ## The seam — `formats/skp.py`
 
@@ -159,14 +162,57 @@ and inherited visibility/locking. These are stored in `.igz` as
 `layer_folders`; each layer records its `folder_id` and `position`.
 Saved views also record hidden folder IDs. Layer 0 remains at the root.
 
-Native SketchUp tag-folder interchange is currently unsupported. The pinned
-OpenSKP Python model exposes a flat `Layer(name, color_r, color_g, color_b,
-hidden)` list, with no folder IDs, parent relationships or folder records.
-Its writer exposes `add_layer(name, color=None, hidden=False)` and writes
-legacy files, with no tag-folder creation API. The application still has
-no SKP export menu. Import continues to preserve the flat tags and their
-own visibility; SketchUp folder membership and folder visibility are not
-available through this backend. Folder support must first be added to
-OpenSKP's parser/model and a writer supporting the relevant SketchUp format.
-No folder names are inferred from tag names, since these are independent
-SketchUp data.
+Native tag-folder support is implemented in the local OpenSKP feature commit
+`61abde1ed6ae1829b926ad3f371bdac619b40057`, based on the currently pinned
+commit. The complete source change is preserved in
+`patches/openskp-tagfolders.patch`; it has not yet been published, so the
+dependency pins remain at the existing public commit until publication is
+approved. To test locally, apply the patch to a checkout of that pinned
+OpenSKP commit and install its `packages/python` package in your development
+environment (or put `packages/python/src` on `PYTHONPATH`).
+
+The local macOS installation at `/Applications/IngeTrazo.app` has been
+rebuilt with this patched OpenSKP package. The build is also available in
+`dist/tagfolders/IngeTrazo.app`, with the previous installed app preserved in
+`dist/tagfolders/previous/IngeTrazo.app`. Restart a running app to load the
+updated parser. The installed build uses the initial feature commit
+`60775ddeae81b054be361d08eb9d7f0573565e9e`; the later test audit only adds
+formatting, type annotations and an internal invariant assertion. This local
+installation does not change the public dependency
+pin or publish the patch.
+
+The extended Python model exposes `layer_folders`, tag `folder_id`/`position`,
+and per-scene `hidden_layer_folder_ids`. Both modern VFF and classic files
+carrying native folder records are read. The adapter translates source IDs
+to new IngeTrazo folder IDs per import, preserving duplicate names, nesting,
+empty folders, individual tag switches and inherited folder visibility.
+Saved-view hidden-folder references use that same mapping.
+
+The writer adds `add_layer_folder` and `set_layer_folder`. It extends the
+classic container with native `CLayerManager` schema 7 / `CLayerGroup`
+version 3 records, including the implicit managers inside definitions; a
+complete new VFF geometry writer is not required. Files with folders require
+SketchUp 2021+ for tag-folder support. The existing `skp_out` backend forwards
+the hierarchy and retains geometry hidden by tags/folders, unused tags and
+empty folders. Older writers report unsupported folder export explicitly.
+The application still has no SKP export menu and no SDK runtime dependency.
+Its existing packaging exclusion of the third-party scaffold is unchanged.
+
+The OpenSKP patch includes regression tests and an optional local C API
+oracle: SDK-created classic/VFF folders, native writer geometry and folder
+tree verification, new-scene visibility and VFF scene-specific hidden folders.
+SDK binaries and SDK-produced fixture files are not included. Classic scene
+folder visibility export, locking and expansion state are not implemented as
+native SketchUp fields. No folder names are inferred from tag names.
+
+Validation of the final patch on macOS / Python 3.12: the full OpenSKP
+suite passed 618 tests with 34 skips. Running the existing create/edit SDK
+tests against the local macOS SDK passed the 33 previously skipped SDK
+tests too (263 tests in that run); only the optional `ifcopenshell` test
+remains skipped. IngeTrazo import/export/history regression coverage passed
+165 tests. Ruff 0.15.13 passes for all Python sources/tests; the new parser
+and tests pass Black/isort, and the new parser passes standalone strict
+mypy. Repository-wide Black/isort/mypy still fail on existing code: 69
+formatting files, 45 import-sorting files and 1,307 type errors, versus
+69 / 45 / 1,342 in the pinned baseline. No additional mypy diagnostics
+remain. Detailed logs and coverage are in `dist/tagfolders/validation/`.

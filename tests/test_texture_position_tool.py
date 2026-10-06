@@ -313,8 +313,6 @@ def test_the_snap_keeps_the_scale_the_cursor_asked_for(viewport):
     tool.on_release(viewport)
 
 
-# TODO(MAC-08): Baseline float radius difference is 2.98e-08, above the 1e-9 tolerance.
-# See docs/macos-test-failures.md; confirmed on the baseline commit, not fixed yet.
 def test_the_protractor_sits_on_the_red_pin_with_its_zero_on_the_start_arm(viewport):
     face = _textured_square(viewport)
     tool = _begin(viewport, face)
@@ -332,7 +330,9 @@ def test_the_protractor_sits_on_the_red_pin_with_its_zero_on_the_start_arm(viewp
     a, b = disc["diameter"]
     assert _close(((a + b) * 0.5).toTuple(), R.toTuple())
     sq_base, sq_cur = disc["squares"]
-    assert abs((sq_base - R).length() - (sq_cur - R).length()) < 1e-9
+    # QVector3D stores float32 components; allow a few relative rounding units.
+    assert math.isclose((sq_base - R).length(), (sq_cur - R).length(),
+                        rel_tol=5e-7, abs_tol=1e-8)
     assert disc["base_stub"] == (R, sq_base)
     c, d = disc["current_arm"]
     assert c == R

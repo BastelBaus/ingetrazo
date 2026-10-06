@@ -3063,7 +3063,8 @@ class EntityInfoPanel(QWidget):
 
     # ---- Layer field --------------------------------------------------------
     def _refresh_layer(self, sel: list) -> None:
-        from core.layers import layer_of
+        from core.layers import DEFAULT_LAYER, layer_of
+        from PySide6.QtCore import QCollator, QLocale
         tagged = [e for e in sel if isinstance(e, _TAGGABLE)]
         show = bool(tagged)
         self._layer_caption.setVisible(show)
@@ -3071,7 +3072,17 @@ class EntityInfoPanel(QWidget):
         if not show:
             return
         scene = self._window.viewport.scene
-        names = [ly.name for ly in scene.layers]
+        # SketchUp-style tag list: default first, then natural name order.
+        locale = QLocale()
+        if locale.language() == QLocale.Language.C:
+            locale = QLocale("en_US")
+        collator = QCollator(locale)
+        collator.setCaseSensitivity(Qt.CaseInsensitive)
+        collator.setNumericMode(True)
+        collator.setIgnorePunctuation(True)
+        names = sorted((ly.name for ly in scene.layers),
+                       key=lambda name: (name != DEFAULT_LAYER,
+                                         collator.sortKey(name)))
         current = {layer_of(e) for e in tagged}
         self._updating = True
         try:
@@ -3371,13 +3382,23 @@ class LayersPanel(QWidget):
         lay.addLayout(row)
         self.refresh()
 
+    @staticmethod
+    def _item_value(item):
+        name = item.data(0, Qt.UserRole + 1)
+        return name[0] if name is not None else item.data(0, Qt.UserRole)
+
     # ---- Model → view --------------------------------------------------------
     def refresh(self) -> None:
         from PySide6.QtWidgets import QTreeWidgetItem
         from core.layers import DEFAULT_LAYER, LayerFolder
+        from PySide6.QtCore import QCollator
+        collator = QCollator()
+        collator.setCaseSensitivity(Qt.CaseInsensitive)
+        collator.setNumericMode(True)
+        collator.setIgnorePunctuation(True)
         current = self.tree.currentItem()
-        current_value = current.data(0, Qt.UserRole) if current else None
-        selected = [item.data(0, Qt.UserRole) for item in self.tree.selectedItems()]
+        current_value = self._item_value(current) if current else None
+        selected = [self._item_value(item) for item in self.tree.selectedItems()]
         self._updating = True
         self.tree.clear()
         scene = self._scene()
@@ -3405,6 +3426,9 @@ class LayersPanel(QWidget):
             item.setData(3, Qt.UserRole + 2, QColor.fromRgbF(*ly.color))
             item.setToolTip(3, tr("Double-click to change layer color"))
             item.setData(0, Qt.UserRole, ly.name)
+            # QString strips a leading U+FEFF (present in imported SKP tags).
+            # A Python tuple keeps the exact model key through Qt's item data.
+            item.setData(0, Qt.UserRole + 1, (ly.name,))
             item.setFlags((item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsDropEnabled)
             if ly.name != DEFAULT_LAYER:
                 item.setFlags(item.flags() | Qt.ItemIsEditable)
@@ -3416,10 +3440,14 @@ class LayersPanel(QWidget):
         def order(parent):
             children = [parent.takeChild(0) for _ in range(parent.childCount())]
             def obj(item):
-                value = item.data(0, Qt.UserRole)
+                value = self._item_value(item)
                 return value if isinstance(value, LayerFolder) else scene.layer(value)
-            children.sort(key=lambda item: (-1 if item.data(0, Qt.UserRole) == DEFAULT_LAYER
-                                             else obj(item).position))
+            def sort_key(item):
+                value = obj(item)
+                category = (0 if self._item_value(item) == DEFAULT_LAYER
+                            else 1 if isinstance(value, LayerFolder) else 2)
+                return category, collator.sortKey(value.name)
+            children.sort(key=sort_key)
             parent.addChildren(children)
             for item in children:
                 value = obj(item)
@@ -3428,10 +3456,10 @@ class LayersPanel(QWidget):
                 if isinstance(value, LayerFolder):
                     order(item)
                     item.setExpanded(value.expanded)
-                if item.data(0, Qt.UserRole) == current_value:
+                if self._item_value(item) == current_value:
                     from PySide6.QtCore import QItemSelectionModel
                     self.tree.setCurrentItem(item, 0, QItemSelectionModel.NoUpdate)
-                if item.data(0, Qt.UserRole) in selected:
+                if self._item_value(item) in selected:
                     item.setSelected(True)
         order(self.tree.invisibleRootItem())
         self._fit_tree()
@@ -3451,9 +3479,9 @@ class LayersPanel(QWidget):
     def _selected_folder(self):
         from core.layers import LayerFolder
         item = self.tree.currentItem()
-        if item is not None and not isinstance(item.data(0, Qt.UserRole), LayerFolder):
+        if item is not None and not isinstance(self._item_value(item), LayerFolder):
             item = item.parent()
-        return item.data(0, Qt.UserRole) if item else None
+        return self._item_value(item) if item else None
 
     def _next_position(self, folder):
         parent_id = folder.uid if folder else None
@@ -3465,7 +3493,7 @@ class LayersPanel(QWidget):
     def _on_add_folder(self):
         from core.layers import LayerFolder
         parent_item, selected = self.tree.folder_selection()
-        parent = parent_item.data(0, Qt.UserRole) if parent_item else None
+        parent = self._item_value(parent_item) if parent_item else None
         names = {f.name for f in self._scene().layer_folders}
         base, n = tr("Folder"), 1
         while f"{base} {n}" in names:
@@ -3474,13 +3502,13 @@ class LayersPanel(QWidget):
                              position=self._next_position(parent))
         self._scene().layer_folders.append(folder)
         if selected:
-            folder.position = min((item.data(0, Qt.UserRole).position
-                                   if isinstance(item.data(0, Qt.UserRole), LayerFolder)
-                                   else self._scene().layer(item.data(0, Qt.UserRole)).position
+            folder.position = min((self._item_value(item).position
+                                   if isinstance(self._item_value(item), LayerFolder)
+                                   else self._scene().layer(self._item_value(item)).position
                                    for item in selected if item.parent() is parent_item),
                                   default=folder.position)
         for position, item in enumerate(selected):
-            value = item.data(0, Qt.UserRole)
+            value = self._item_value(item)
             if isinstance(value, LayerFolder):
                 value.parent_id = folder.uid
             else:
@@ -3493,7 +3521,7 @@ class LayersPanel(QWidget):
         def select(item):
             for i in range(item.childCount()):
                 child = item.child(i)
-                if child.data(0, Qt.UserRole) is folder:
+                if self._item_value(child) is folder:
                     self.tree.clearSelection()
                     self.tree.setCurrentItem(child)
                     self.tree.editItem(child, 0)
@@ -3506,7 +3534,7 @@ class LayersPanel(QWidget):
 
     def _on_expansion(self, item):
         if not self._updating:
-            item.data(0, Qt.UserRole).expanded = item.isExpanded()
+            self._item_value(item).expanded = item.isExpanded()
             self._fit_tree()
             self._touch()
 
@@ -3517,7 +3545,7 @@ class LayersPanel(QWidget):
         def visit(parent, parent_id=None):
             for index in range(parent.childCount()):
                 item = parent.child(index)
-                value = item.data(0, Qt.UserRole)
+                value = self._item_value(item)
                 if isinstance(value, LayerFolder):
                     value.parent_id = parent_id
                     value.position = index
@@ -3564,9 +3592,9 @@ class LayersPanel(QWidget):
             self.tree.setCurrentItem(item)
         menu = QMenu(self)
         menu.addAction(tr("New folder"), self._on_add_folder)
-        if item is not None and item.data(0, Qt.UserRole) != DEFAULT_LAYER:
+        if item is not None and self._item_value(item) != DEFAULT_LAYER:
             menu.addAction(tr("Rename"), lambda: self.tree.editItem(item, 0))
-        if any(row.data(0, Qt.UserRole) != DEFAULT_LAYER for row in self.tree.selectedItems()):
+        if any(self._item_value(row) != DEFAULT_LAYER for row in self.tree.selectedItems()):
             menu.addAction(tr("Move to root"), self._on_move_to_root)
             menu.addAction(tr("Delete"), self._on_delete)
         menu.exec(self.tree.viewport().mapToGlobal(point))
@@ -3580,7 +3608,7 @@ class LayersPanel(QWidget):
     def _on_color_clicked(self, item, column):
         if column != 3:
             return
-        layer = self._scene().layer(item.data(0, Qt.UserRole))
+        layer = self._scene().layer(self._item_value(item))
         if layer is None:
             return
         chosen = get_color(QColor.fromRgbF(*layer.color),
@@ -3604,7 +3632,7 @@ class LayersPanel(QWidget):
             self._updating = True
             try:
                 for selected in self.tree.selectedItems():
-                    value = selected.data(0, Qt.UserRole)
+                    value = self._item_value(selected)
                     target = value if isinstance(value, LayerFolder) else scene.layer(value)
                     if column == 1:
                         target.visible = checked
@@ -3616,7 +3644,7 @@ class LayersPanel(QWidget):
             self._prune_selection()
             self._touch()
             return
-        old_name = item.data(0, Qt.UserRole)
+        old_name = self._item_value(item)
         if isinstance(old_name, LayerFolder):
             if column == 0:
                 old_name.name = item.text(0).strip() or old_name.name
@@ -3638,6 +3666,7 @@ class LayersPanel(QWidget):
                 blocked = self.tree.blockSignals(True)
                 try:
                     item.setData(0, Qt.UserRole, new_name)
+                    item.setData(0, Qt.UserRole + 1, (new_name,))
                 finally:
                     self.tree.blockSignals(blocked)
             self.refresh()
@@ -3693,11 +3722,11 @@ class LayersPanel(QWidget):
         selected = self.tree.selectedItems()
         if not selected:
             return
-        names = {item.data(0, Qt.UserRole) for item in selected
-                 if not isinstance(item.data(0, Qt.UserRole), LayerFolder)
-                 and item.data(0, Qt.UserRole) != DEFAULT_LAYER}
+        names = {self._item_value(item) for item in selected
+                 if not isinstance(self._item_value(item), LayerFolder)
+                 and self._item_value(item) != DEFAULT_LAYER}
         folders = [item for item in selected
-                   if isinstance(item.data(0, Qt.UserRole), LayerFolder)]
+                   if isinstance(self._item_value(item), LayerFolder)]
         if not names and not folders:
             return
         # Every mesh in the document, nested placements included — walking
@@ -3718,7 +3747,7 @@ class LayersPanel(QWidget):
         # Keep unselected contents when removing a folder. Selected descendants
         # remain valid items after their parent has been removed.
         for item in selected:
-            if item.data(0, Qt.UserRole) == DEFAULT_LAYER:
+            if self._item_value(item) == DEFAULT_LAYER:
                 continue
             parent = item.parent() or self.tree.invisibleRootItem()
             index = parent.indexOfChild(item)
@@ -3766,7 +3795,7 @@ class LayersPanel(QWidget):
             self._window.statusBar().showMessage(
                 tr("Click a layer in the list first, then Assign."), 3000)
             return
-        name = item.data(0, Qt.UserRole)
+        name = self._item_value(item)
         from core.layers import LayerFolder
         if isinstance(name, LayerFolder):
             self._window.statusBar().showMessage(tr("Click a layer in the list first, then Assign."), 3000)

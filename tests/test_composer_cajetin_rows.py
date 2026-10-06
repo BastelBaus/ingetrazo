@@ -74,11 +74,11 @@ def test_the_long_row_grows_and_the_others_pay_for_it():
     assert hs[0] <= base * CAJETIN_ROW_GROW + 1e-9          # bounded
 
 
-# TODO(MAC-01): Baseline macOS font metrics do not demonstrate the old sizing defect.
-# See docs/macos-test-failures.md; confirmed on the baseline commit, not fixed yet.
 def test_every_value_now_reads_at_about_one_size():
-    grown = _value_sizes(ROWS, _heights(ROWS))
-    equal = _value_sizes(ROWS, [H / 5] * 5)
+    # Narrow enough to force several wrapped lines with macOS and Linux fonts.
+    w = 150.0
+    grown = _value_sizes(ROWS, _heights(ROWS, w=w), w=w)
+    equal = _value_sizes(ROWS, [H / 5] * 5, w=w)
     assert min(equal) < max(equal) * 0.85       # the defect: the odd one out
     assert grown[0] > equal[0]                  # the project name got bigger
     assert min(grown) >= max(grown) * 0.95      # …and now they match
