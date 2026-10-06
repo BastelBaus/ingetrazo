@@ -1,11 +1,34 @@
-# Existing macOS test failures — 2026-10-06
+# macOS test regressions — 2026-10-06
 
 Recorded while implementing macOS SpaceMouse input. All eight failures below
 were reproduced individually on the **unmodified baseline commit**
 `6be29fe437a7cd992d4e079f71720821b25216b9`, exported to a temporary directory.
-They predate the SpaceMouse changes. They remain unfixed; some may require
-platform-aware test expectations rather than changes to application behavior.
-Each failing test has a matching `TODO(MAC-xx)` comment linking here.
+They predate the SpaceMouse changes. All eight have now been addressed; the
+original observations below are retained as reproduction history.
+
+## Fixes
+
+- MAC-01: use a narrower title-block fixture that demonstrates the original
+  shrinkage with macOS font metrics, keeping the size assertions intact.
+- MAC-02: reinterpret copied FBO bytes as straight RGB before dropping alpha,
+  avoiding Qt unpremultiplication overflow. Regression coverage checks white,
+  blue and yellow in ARGB32, premultiplied ARGB32 and premultiplied RGBA8888.
+- MAC-03: compare native shortcut labels before and after translation and
+  assert English names independently through portable serialization.
+- MAC-04/05/06: derive expected native labels from the configured shortcuts;
+  preserve the repeat-state and live toolbar-update assertions.
+- MAC-07: shape the complete line through QTextLayout and use its glyph
+  positions and fallback fonts for each mesh. Additional tests cover kerning,
+  ligatures, combining marks, supplementary Unicode and right-to-left layout.
+- MAC-08: use a float32-aware relative tolerance for QVector3D marker radii,
+  preserving the pivot, angle and screen-size assertions.
+
+Validation after these fixes: **111 passed** on macOS with Qt 6.11.2,
+covering all seven originally failing test modules plus text-tool, frame
+background, raster pen and shortcut integration tests. Before publication,
+the fast suite passed in a clean checkout: **3,579 passed, 29 skipped,
+805 deselected**. The nine theme tests ran in a separate process to avoid
+the accumulated-window slowdown observed during the original investigation.
 
 ## Reproduction environment
 

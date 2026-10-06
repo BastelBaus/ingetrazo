@@ -11976,6 +11976,15 @@ class ComposerWindow(QMainWindow):
             # the canvas's smooth scaling turns into red and yellow blotches
             # on the water (Marco, 2026-09-02). The render already composed
             # its own background: on paper it is simply opaque.
+            image = image.copy()
+            # Treat the already composed RGB bytes as opaque BEFORE conversion:
+            # unpremultiplying invalid bright texels can overflow on some Qt builds.
+            straight = {
+                QImage.Format_ARGB32_Premultiplied: QImage.Format_ARGB32,
+                QImage.Format_RGBA8888_Premultiplied: QImage.Format_RGBA8888,
+            }.get(image.format())
+            if straight is not None:
+                image.reinterpretAsFormat(straight)
             image = image.convertToFormat(QImage.Format_RGB32)
         if image is not None:
             self.render_cache[id(frame)] = image
