@@ -347,6 +347,8 @@ def save_scene(scene, path: Path) -> dict:
     views = getattr(scene, "saved_views", None)
     if views:
         payload["saved_views"] = [v.to_dict() for v in views]
+    if scene.scene_folders:
+        payload["scene_folders"] = [f.to_dict() for f in scene.scene_folders]
     comps = getattr(scene, "compositions", None)
     if comps:
         payload["compositions"] = [c.to_dict() for c in comps]
@@ -697,7 +699,9 @@ def _load_into_inner(scene, path: Path, progress=None) -> None:
         mat = Material.from_dict(raw)
         if mat.name:
             scene.materials[mat.name] = mat
-    from core.saved_views import SavedView
+    from core.saved_views import SavedView, SceneFolder
+    scene.scene_folders = [SceneFolder.from_dict(r)
+                           for r in payload.get("scene_folders", [])]
     scene.saved_views = [SavedView.from_dict(r)
                          for r in payload.get("saved_views", [])]
     from core.composition import Composicion

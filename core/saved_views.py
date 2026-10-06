@@ -23,8 +23,10 @@ class SavedView:
                  fov_deg: float = 45.0, perspective: bool = True,
                  two_point: bool = False, hidden_layers=None, style=None, section=None,
                  georef=None, shadows=None, hidden_objects=None,
-                 hidden_shown=None) -> None:
+                 hidden_shown=None, folder_id=None, position=0) -> None:
         self.name = name
+        self.folder_id = folder_id
+        self.position = int(position)
         self.target = tuple(target)
         self.distance = float(distance)
         self.yaw = float(yaw)
@@ -112,6 +114,8 @@ class SavedView:
     def recapture(self, scene, camera) -> None:
         """Update this view in place from the live state (keeps the name)."""
         fresh = SavedView.capture(self.name, scene, camera)
+        fresh.folder_id = self.folder_id
+        fresh.position = self.position
         self.__dict__.update(fresh.__dict__)
 
     def apply(self, scene, camera) -> None:
@@ -166,6 +170,9 @@ class SavedView:
             "yaw": self.yaw,
             "pitch": self.pitch,
         }
+        if self.folder_id is not None:
+            entry["folder_id"] = self.folder_id
+        entry["position"] = self.position
         if self.fov_deg != 45.0:
             entry["fov"] = self.fov_deg
         if not self.perspective:
@@ -205,7 +212,9 @@ class SavedView:
                    georef=raw.get("georef"),
                    shadows=raw.get("shadows"),
                    hidden_objects=raw.get("hidden_objects"),
-                   hidden_shown=raw.get("hidden_shown"))
+                   hidden_shown=raw.get("hidden_shown"),
+                   folder_id=raw.get("folder_id"),
+                   position=raw.get("position", 0))
 
 
 def apply_shadow_state(scene, raw: dict) -> None:
@@ -267,3 +276,26 @@ def from_lookat(name: str, eye, target, up, fov_deg: float = 45.0,
     return SavedView(name, target=tuple(target), distance=distance, yaw=yaw,
                      pitch=pitch, fov_deg=fov_deg, perspective=perspective,
                      hidden_layers=hidden_layers)
+
+
+class SceneFolder:
+    """Document-owned folder; parent IDs allow arbitrary nested folders."""
+
+    def __init__(self, name, uid=None, parent_id=None, position=0, expanded=True):
+        from uuid import uuid4
+        self.name = name
+        self.uid = uid or str(uuid4())
+        self.parent_id = parent_id
+        self.position = int(position)
+        self.expanded = bool(expanded)
+
+    def to_dict(self):
+        return dict(name=self.name, uid=self.uid, parent_id=self.parent_id,
+                    position=self.position, expanded=self.expanded)
+
+    @classmethod
+    def from_dict(cls, raw):
+        return cls(raw.get("name", "Folder"), uid=raw.get("uid"),
+                   parent_id=raw.get("parent_id"),
+                   position=raw.get("position", 0),
+                   expanded=raw.get("expanded", True))
