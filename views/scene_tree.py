@@ -28,6 +28,33 @@ class SceneTree(QTreeWidget):
         if event.isAccepted():
             self.moved.emit()
 
+    def folder_selection(self):
+        """Selected roots in display order and their closest common parent.
+
+        A selected folder carries its descendants; permanent rows cannot move.
+        """
+        selected = []
+
+        def visit(parent):
+            for index in range(parent.childCount()):
+                item = parent.child(index)
+                if item.isSelected() and item.flags() & Qt.ItemIsDragEnabled:
+                    selected.append(item)
+                else:
+                    visit(item)
+
+        visit(self.invisibleRootItem())
+        parent = selected[0].parent() if selected else None
+        for item in selected[1:]:
+            ancestors = []
+            ancestor = item.parent()
+            while ancestor is not None:
+                ancestors.append(ancestor)
+                ancestor = ancestor.parent()
+            while parent is not None and parent not in ancestors:
+                parent = parent.parent()
+        return parent, selected
+
 
 class LayerTree(SceneTree):
     """Keep the row selection when clicking a selected layer's checkboxes."""

@@ -117,7 +117,8 @@ def test_new_subfolder_rename_and_update_keep_selection(panel):
     panel.list.setCurrentItem(panel.list.topLevelItem(0).child(0))
     panel._on_add_folder()
     created = scene.scene_folders[-1]
-    assert created.parent_id == child.uid
+    assert created.parent_id == root.uid
+    assert child.parent_id == created.uid
     item = panel.list.currentItem()
     item.setText(0, "Details")
     assert created.name == "Details"

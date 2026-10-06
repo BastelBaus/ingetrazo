@@ -120,7 +120,8 @@ def test_add_and_collapse(panel):
     assert not tree.topLevelItem(1).isExpanded()
     tree.setCurrentItem(tree.topLevelItem(1))
     panel._on_add_folder()
-    assert scene.layer_folders[-1].parent_id == root.uid
+    assert scene.layer_folders[-1].parent_id is None
+    assert root.parent_id == scene.layer_folders[-1].uid
 
 
 def test_legacy_order_and_invalid_parents(panel):
@@ -366,7 +367,8 @@ def test_selected_folder_and_layer_toggle_without_changing_unselected_children(p
     assert scene.layer_state('Walls')[0]
 
 
-def test_click_selected_visibility_checkbox_applies_to_whole_selection(panel):
+@pytest.mark.parametrize('column', [1, 2])
+def test_click_selected_checkbox_applies_to_whole_selection(panel, column):
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem
     scene, root, child, layer = populate(panel)
@@ -377,13 +379,53 @@ def test_click_selected_visibility_checkbox_applies_to_whole_selection(panel):
     furniture = tree.topLevelItem(2)
     tree.setCurrentItem(walls)
     furniture.setSelected(True)
-    index = tree.indexFromItem(walls, 1)
+    index = tree.indexFromItem(walls, column)
     option = QStyleOptionViewItem()
     option.initFrom(tree)
     option.rect = tree.visualRect(index)
     option.features |= QStyleOptionViewItem.HasCheckIndicator
-    option.checkState = Qt.Checked
+    option.checkState = walls.checkState(column)
     rect = tree.style().subElementRect(QStyle.SE_ItemViewItemCheckIndicator, option, tree)
+    edge = scene.mesh.add_edge(QVector3D(), QVector3D(1, 0, 0))
+    assign_layer(edge, 'Walls')
+    scene.selection.add(edge)
+    version = scene.version
     QTest.mouseClick(tree.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
-    assert not layer.visible and not scene.layer('Furniture').visible
+    for target in (layer, scene.layer('Furniture')):
+        assert target.visible == (column == 2)
+        assert target.locked == (column == 2)
+    assert not scene.selection
+    assert scene.version == version + 1
     assert len(tree.selectedItems()) == 2
+    QTest.mouseClick(tree.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
+    for target in (layer, scene.layer('Furniture')):
+        assert target.visible and not target.locked
+    assert len(tree.selectedItems()) == 2
+
+
+def test_selected_folder_and_layer_lock_together_preserving_visibility(panel):
+    scene, root, child, layer = populate(panel)
+    tree = panel.tree
+    building = tree.topLevelItem(1)
+    furniture = tree.topLevelItem(2)
+    scene.layer('Furniture').visible = False
+    panel.refresh()
+    building = tree.topLevelItem(1)
+    furniture = tree.topLevelItem(2)
+    tree.setCurrentItem(building)
+    furniture.setSelected(True)
+    building.setCheckState(2, Qt.Checked)
+    assert root.locked and scene.layer('Furniture').locked
+    assert not child.locked and not layer.locked
+    assert scene.layer_state('Walls') == (True, True)
+    assert root.visible and not scene.layer('Furniture').visible
+    assert furniture.checkState(2) == Qt.Checked
+    # Unselected rows still change individually.
+    walls = building.child(0).child(0)
+    walls.setCheckState(2, Qt.Checked)
+    walls.setCheckState(2, Qt.Unchecked)
+    assert root.locked and scene.layer('Furniture').locked
+    furniture.setCheckState(2, Qt.Unchecked)
+    assert not root.locked and not scene.layer('Furniture').locked
+    assert scene.layer_state('Walls') == (True, False)
+    assert root.visible and not scene.layer('Furniture').visible

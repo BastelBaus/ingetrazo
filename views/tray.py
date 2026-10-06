@@ -3434,7 +3434,8 @@ class LayersPanel(QWidget):
 
     def _on_add_folder(self):
         from core.layers import LayerFolder
-        parent = self._selected_folder()
+        parent_item, selected = self.tree.folder_selection()
+        parent = parent_item.data(0, Qt.UserRole) if parent_item else None
         names = {f.name for f in self._scene().layer_folders}
         base, n = tr("Folder"), 1
         while f"{base} {n}" in names:
@@ -3442,6 +3443,20 @@ class LayersPanel(QWidget):
         folder = LayerFolder(f"{base} {n}", parent_id=parent.uid if parent else None,
                              position=self._next_position(parent))
         self._scene().layer_folders.append(folder)
+        if selected:
+            folder.position = min((item.data(0, Qt.UserRole).position
+                                   if isinstance(item.data(0, Qt.UserRole), LayerFolder)
+                                   else self._scene().layer(item.data(0, Qt.UserRole)).position
+                                   for item in selected if item.parent() is parent_item),
+                                  default=folder.position)
+        for position, item in enumerate(selected):
+            value = item.data(0, Qt.UserRole)
+            if isinstance(value, LayerFolder):
+                value.parent_id = folder.uid
+            else:
+                value = self._scene().layer(value)
+                value.folder_id = folder.uid
+            value.position = position
         if parent:
             parent.expanded = True
         self.refresh()
@@ -3449,12 +3464,14 @@ class LayersPanel(QWidget):
             for i in range(item.childCount()):
                 child = item.child(i)
                 if child.data(0, Qt.UserRole) is folder:
+                    self.tree.clearSelection()
                     self.tree.setCurrentItem(child)
                     self.tree.editItem(child, 0)
                     return True
                 if select(child):
                     return True
         select(self.tree.invisibleRootItem())
+        self._prune_selection()
         self._touch()
 
     def _on_expansion(self, item):
@@ -3533,15 +3550,18 @@ class LayersPanel(QWidget):
             return
         scene = self._scene()
         from core.layers import LayerFolder
-        if column == 1 and item.isSelected():
-            visible = item.checkState(1) == Qt.Checked
+        if column in (1, 2) and item.isSelected():
+            checked = item.checkState(column) == Qt.Checked
             self._updating = True
             try:
                 for selected in self.tree.selectedItems():
                     value = selected.data(0, Qt.UserRole)
                     target = value if isinstance(value, LayerFolder) else scene.layer(value)
-                    target.visible = visible
-                    selected.setCheckState(1, Qt.Checked if visible else Qt.Unchecked)
+                    if column == 1:
+                        target.visible = checked
+                    else:
+                        target.locked = checked
+                    selected.setCheckState(column, Qt.Checked if checked else Qt.Unchecked)
             finally:
                 self._updating = False
             self._prune_selection()
@@ -3911,7 +3931,8 @@ class ScenesPanel(QWidget):
 
     def _on_add_folder(self):
         from core.saved_views import SceneFolder
-        parent = self._selected_folder()
+        parent_item, selected = self.list.folder_selection()
+        parent = parent_item.data(0, Qt.UserRole) if parent_item else None
         base, n = tr("Folder"), 1
         taken = {f.name for f in self._scene().scene_folders}
         while f"{base} {n}" in taken:
@@ -3919,6 +3940,16 @@ class ScenesPanel(QWidget):
         folder = SceneFolder(f"{base} {n}", parent_id=parent.uid if parent else None,
                              position=self._next_position(parent))
         self._scene().scene_folders.append(folder)
+        if selected:
+            folder.position = min((item.data(0, Qt.UserRole).position for item in selected
+                                   if item.parent() is parent_item), default=folder.position)
+        for position, item in enumerate(selected):
+            value = item.data(0, Qt.UserRole)
+            if isinstance(value, SceneFolder):
+                value.parent_id = folder.uid
+            else:
+                value.folder_id = folder.uid
+            value.position = position
         if parent:
             parent.expanded = True
         self.refresh()
@@ -3927,6 +3958,7 @@ class ScenesPanel(QWidget):
             for i in range(item.childCount()):
                 child = item.child(i)
                 if child.data(0, Qt.UserRole) is folder:
+                    self.list.clearSelection()
                     self.list.setCurrentItem(child)
                     self.list.editItem(child, 0)
                     return True
