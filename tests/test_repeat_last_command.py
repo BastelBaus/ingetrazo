@@ -205,8 +205,6 @@ def test_right_click_has_no_repeat_before_anything_was_done(win, monkeypatch):
     assert not any(t.startswith("Repeat") for t in texts)
 
 
-# TODO(MAC-04): Baseline macOS shows the Shift symbol in the repeat hint.
-# See docs/macos-test-failures.md; confirmed on the baseline commit, not fixed yet.
 def test_the_status_bar_says_what_would_repeat_only_in_select(win):
     lab = win._repeat_label
     assert lab.isHidden(), "nothing to repeat yet"
@@ -214,7 +212,9 @@ def test_the_status_bar_says_what_would_repeat_only_in_select(win):
     assert lab.isHidden(), "inside a tool the corner is the VCB's"
     win._activate_tool("select")
     assert not lab.isHidden()
-    assert lab.text() == "Shift+R: repeat Line"
+    from PySide6.QtGui import QKeySequence
+    keys = QKeySequence("Shift+R").toString(QKeySequence.NativeText)
+    assert lab.text() == f"{keys}: repeat Line"
 
 
 def test_the_shortcut_editor_keeps_one_key_for_it_whatever_it_says(win):
@@ -233,8 +233,6 @@ def test_shift_r_is_not_a_key_the_viewport_reads_itself():
     assert reserved_reason(QKeySequence("Shift+R")) is None
 
 
-# TODO(MAC-05): Baseline macOS shows native symbols for the customized repeat shortcut.
-# See docs/macos-test-failures.md; confirmed on the baseline commit, not fixed yet.
 def test_the_hint_names_the_keys_it_has_now(win):
     """Remapped in the shortcut editor (#138), the hint follows; with no
     key at all it still names what would repeat."""
@@ -243,7 +241,8 @@ def test_the_hint_names_the_keys_it_has_now(win):
     win._activate_tool("select")
     win._repeat_action.setShortcut(QKeySequence("Ctrl+Shift+Y"))
     win._refresh_repeat_hint()
-    assert win._repeat_label.text() == "Ctrl+Shift+Y: repeat Line"
+    keys = QKeySequence("Ctrl+Shift+Y").toString(QKeySequence.NativeText)
+    assert win._repeat_label.text() == f"{keys}: repeat Line"
     win._repeat_action.setShortcut(QKeySequence())
     win._refresh_repeat_hint()
     assert win._repeat_label.text() == "Repeat Line"
