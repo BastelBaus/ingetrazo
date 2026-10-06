@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Scene tree with native internal moves and folder-only drop targets."""
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import QEvent, QItemSelectionModel, Signal, Qt
 from PySide6.QtWidgets import QAbstractItemView, QTreeWidget
 
 
@@ -27,3 +27,16 @@ class SceneTree(QTreeWidget):
             self.blockSignals(blocked)
         if event.isAccepted():
             self.moved.emit()
+
+
+class LayerTree(SceneTree):
+    """Keep the row selection when clicking a selected layer's checkboxes."""
+
+    def selectionCommand(self, index, event=None):
+        if (event is not None
+                and event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease)
+                and index.column() in (1, 2)):
+            item = self.itemFromIndex(index)
+            if item is not None and item.isSelected():
+                return QItemSelectionModel.NoUpdate
+        return super().selectionCommand(index, event)

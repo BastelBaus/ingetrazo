@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QVector3D
 
 from core.camera import OrbitCamera
-from core.layers import DEFAULT_LAYER, Layer, LayerFolder, assign_layer
+from core.layers import DEFAULT_LAYER, Layer, LayerFolder, assign_layer, layer_of
 from core.saved_views import SavedView
 from core.scene import Scene
 from formats.igz import load_into, save_scene
@@ -203,3 +203,187 @@ def test_rename_nested_layer_updates_geometry_and_saved_views(panel):
     assert edge.layer == label.layer == "Structure"
     assert scene.saved_views[0].hidden_layers == ["Structure"]
     assert layer.folder_id == child.uid
+
+
+def test_multiple_selection_survives_refresh_and_rename(panel):
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+    scene, root, child, layer = populate(panel)
+    tree = panel.tree
+    panel.show()
+    QApplication.processEvents()
+    walls = tree.topLevelItem(1).child(0).child(0)
+    furniture = tree.topLevelItem(2)
+    QTest.mouseClick(tree.viewport(), Qt.LeftButton, Qt.NoModifier,
+                     tree.visualItemRect(walls).center())
+    QTest.mouseClick(tree.viewport(), Qt.LeftButton, Qt.ShiftModifier,
+                     tree.visualItemRect(furniture).center())
+    assert {i.data(0, Qt.UserRole) for i in tree.selectedItems()} == {'Walls', 'Furniture'}
+    panel.refresh()
+    assert {i.data(0, Qt.UserRole) for i in tree.selectedItems()} == {'Walls', 'Furniture'}
+    assert tree.currentItem().data(0, Qt.UserRole) == 'Furniture'
+    tree.topLevelItem(1).child(0).child(0).setText(0, 'Structure')
+    assert {i.data(0, Qt.UserRole) for i in tree.selectedItems()} == {'Structure', 'Furniture'}
+    assert tree.currentItem().data(0, Qt.UserRole) == 'Furniture'
+
+
+def test_move_multiple_layers_and_parent_to_root(panel):
+    scene, root, child, layer = populate(panel)
+    tree = panel.tree
+    ground = tree.topLevelItem(1).child(0)
+    furniture = tree.takeTopLevelItem(2)
+    ground.addChild(furniture)
+    for item in (ground.child(0), furniture):
+        item.setSelected(True)
+    panel._on_tree_moved()
+    assert layer.folder_id == scene.layer('Furniture').folder_id == child.uid
+    assert len(tree.selectedItems()) == 2
+    panel._on_move_to_root()
+    assert layer.folder_id is None and scene.layer('Furniture').folder_id is None
+    assert len(tree.selectedItems()) == 2
+    # A selected descendant must stay inside its selected parent.
+    building = tree.topLevelItem(1)
+    ground = building.child(0)
+    tree.clearSelection()
+    building.setSelected(True)
+    ground.setSelected(True)
+    panel._on_move_to_root()
+    assert child.parent_id == root.uid
+
+
+@pytest.mark.parametrize('parent_first', [True, False])
+def test_delete_multiple_folders_and_layers_keeps_unselected_contents(panel, parent_first):
+    from core.group import Group
+    from core.mesh import Mesh
+    from core.textlabel import TextLabel
+    scene, root, child, layer = populate(panel)
+    scene.layers.append(Layer('Keep', folder_id=child.uid))
+    group = Group(Mesh())
+    edge = group.mesh.add_edge(QVector3D(), QVector3D(1, 0, 0))
+    assign_layer(edge, 'Walls')
+    assign_layer(group, 'Furniture')
+    scene.groups.append(group)
+    label = TextLabel(QVector3D(), QVector3D(1, 1, 0), 'Wall')
+    assign_layer(label, 'Walls')
+    scene.text_labels.append(label)
+    panel.refresh()
+    tree = panel.tree
+    building = tree.topLevelItem(1)
+    ground = building.child(0)
+    walls = ground.child(0)
+    furniture = tree.topLevelItem(2)
+    items = [building, ground, walls, furniture, tree.topLevelItem(0)]
+    for item in items if parent_first else reversed(items):
+        item.setSelected(True)
+    panel._on_delete()
+    assert scene.layer_folders == []
+    assert [ly.name for ly in scene.layers] == [DEFAULT_LAYER, 'Keep']
+    assert scene.layer('Keep').folder_id is None
+    assert layer_of(edge) == layer_of(group) == layer_of(label) == DEFAULT_LAYER
+
+
+def test_context_menu_keeps_multiple_selection(panel, monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    scene, root, child, layer = populate(panel)
+    panel.show()
+    QApplication.processEvents()
+    tree = panel.tree
+    walls = tree.topLevelItem(1).child(0).child(0)
+    furniture = tree.topLevelItem(2)
+    tree.setCurrentItem(furniture)
+    walls.setSelected(True)
+    import views.tray as tray
+    class Menu:
+        def __init__(self, *args):
+            pass
+        def addAction(self, *args):
+            pass
+        def exec(self, *args):
+            pass
+    monkeypatch.setattr(tray, 'QMenu', Menu)
+    panel._on_context_menu(tree.visualItemRect(walls).center())
+    assert {i.data(0, Qt.UserRole) for i in tree.selectedItems()} == {'Walls', 'Furniture'}
+    assert tree.currentItem().data(0, Qt.UserRole) == 'Walls'
+
+
+def test_assign_uses_active_layer_with_multiple_selected(panel):
+    from core.history import History
+    scene, root, child, layer = populate(panel)
+    edge = scene.mesh.add_edge(QVector3D(), QVector3D(1, 0, 0))
+    scene.selection.add(edge)
+    panel._window.viewport.history = History(scene)
+    panel._window.statusBar = lambda: SimpleNamespace(showMessage=lambda *args: None)
+    tree = panel.tree
+    tree.setCurrentItem(tree.topLevelItem(2))
+    tree.topLevelItem(1).child(0).child(0).setSelected(True)
+    panel._on_assign()
+    assert edge.layer == 'Furniture'
+    panel._window.viewport.history.undo()
+    assert layer_of(edge) == DEFAULT_LAYER
+
+
+def test_multiple_selected_layers_toggle_visibility_together(panel):
+    scene, root, child, layer = populate(panel)
+    edge = scene.mesh.add_edge(QVector3D(), QVector3D(1, 0, 0))
+    assign_layer(edge, 'Walls')
+    scene.selection.add(edge)
+    tree = panel.tree
+    walls = tree.topLevelItem(1).child(0).child(0)
+    furniture = tree.topLevelItem(2)
+    tree.setCurrentItem(walls)
+    furniture.setSelected(True)
+    version = scene.version
+    walls.setCheckState(1, Qt.Unchecked)
+    assert not layer.visible and not scene.layer('Furniture').visible
+    assert furniture.checkState(1) == Qt.Unchecked
+    assert root.visible and child.visible and scene.layer(DEFAULT_LAYER).visible
+    assert not scene.selection
+    assert len(tree.selectedItems()) == 2
+    assert scene.version == version + 1
+    furniture.setCheckState(1, Qt.Checked)
+    assert layer.visible and scene.layer('Furniture').visible
+    assert walls.checkState(1) == Qt.Checked
+
+
+def test_selected_folder_and_layer_toggle_without_changing_unselected_children(panel):
+    scene, root, child, layer = populate(panel)
+    tree = panel.tree
+    building = tree.topLevelItem(1)
+    furniture = tree.topLevelItem(2)
+    tree.setCurrentItem(building)
+    furniture.setSelected(True)
+    building.setCheckState(1, Qt.Unchecked)
+    assert not root.visible and not scene.layer('Furniture').visible
+    assert child.visible and layer.visible
+    assert not scene.layer_state('Walls')[0]
+    # Updating an unselected row leaves the selected rows untouched.
+    walls = building.child(0).child(0)
+    walls.setCheckState(1, Qt.Unchecked)
+    walls.setCheckState(1, Qt.Checked)
+    assert not root.visible and not scene.layer('Furniture').visible
+    building.setCheckState(1, Qt.Checked)
+    assert root.visible and scene.layer('Furniture').visible
+    assert scene.layer_state('Walls')[0]
+
+
+def test_click_selected_visibility_checkbox_applies_to_whole_selection(panel):
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem
+    scene, root, child, layer = populate(panel)
+    panel.show()
+    QApplication.processEvents()
+    tree = panel.tree
+    walls = tree.topLevelItem(1).child(0).child(0)
+    furniture = tree.topLevelItem(2)
+    tree.setCurrentItem(walls)
+    furniture.setSelected(True)
+    index = tree.indexFromItem(walls, 1)
+    option = QStyleOptionViewItem()
+    option.initFrom(tree)
+    option.rect = tree.visualRect(index)
+    option.features |= QStyleOptionViewItem.HasCheckIndicator
+    option.checkState = Qt.Checked
+    rect = tree.style().subElementRect(QStyle.SE_ItemViewItemCheckIndicator, option, tree)
+    QTest.mouseClick(tree.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
+    assert not layer.visible and not scene.layer('Furniture').visible
+    assert len(tree.selectedItems()) == 2

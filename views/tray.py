@@ -3295,10 +3295,10 @@ class LayersPanel(QWidget):
         self._updating = False
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 6, 8, 8)
-        from views.scene_tree import SceneTree
-        self.tree = SceneTree()
+        from views.scene_tree import LayerTree
+        self.tree = LayerTree()
         self.tree.setHeaderHidden(False)
-        self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.moved.connect(self._on_tree_moved)
         self.tree.itemExpanded.connect(self._on_expansion)
         self.tree.itemCollapsed.connect(self._on_expansion)
@@ -3349,7 +3349,8 @@ class LayersPanel(QWidget):
         from PySide6.QtWidgets import QTreeWidgetItem
         from core.layers import DEFAULT_LAYER, LayerFolder
         current = self.tree.currentItem()
-        selected = current.data(0, Qt.UserRole) if current else None
+        current_value = current.data(0, Qt.UserRole) if current else None
+        selected = [item.data(0, Qt.UserRole) for item in self.tree.selectedItems()]
         self._updating = True
         self.tree.clear()
         scene = self._scene()
@@ -3397,8 +3398,11 @@ class LayersPanel(QWidget):
                 if isinstance(value, LayerFolder):
                     order(item)
                     item.setExpanded(value.expanded)
-                if item.data(0, Qt.UserRole) == selected:
-                    self.tree.setCurrentItem(item)
+                if item.data(0, Qt.UserRole) == current_value:
+                    from PySide6.QtCore import QItemSelectionModel
+                    self.tree.setCurrentItem(item, 0, QItemSelectionModel.NoUpdate)
+                if item.data(0, Qt.UserRole) in selected:
+                    item.setSelected(True)
         order(self.tree.invisibleRootItem())
         self._fit_tree()
         self._updating = False
@@ -3485,21 +3489,37 @@ class LayersPanel(QWidget):
         self._touch()
 
     def _on_move_to_root(self):
-        item = self.tree.currentItem()
-        if item is not None and item.parent() is not None:
+        selected = self.tree.selectedItems()
+        current = self.tree.currentItem()
+        for item in selected:
             parent = item.parent()
-            parent.takeChild(parent.indexOfChild(item))
-            self.tree.addTopLevelItem(item)
+            ancestor = parent
+            while ancestor is not None and ancestor not in selected:
+                ancestor = ancestor.parent()
+            if parent is not None and ancestor is None:
+                parent.takeChild(parent.indexOfChild(item))
+                self.tree.addTopLevelItem(item)
+        if selected:
+            from PySide6.QtCore import QItemSelectionModel
+            self.tree.setCurrentItem(current, 0, QItemSelectionModel.NoUpdate)
+            for item in selected:
+                item.setSelected(True)
             self._on_tree_moved()
 
     def _on_context_menu(self, point):
         from core.layers import DEFAULT_LAYER
         item = self.tree.itemAt(point)
-        self.tree.setCurrentItem(item)
+        if item is not None and item.isSelected():
+            from PySide6.QtCore import QItemSelectionModel
+            self.tree.setCurrentItem(item, 0, QItemSelectionModel.NoUpdate)
+        else:
+            self.tree.clearSelection()
+            self.tree.setCurrentItem(item)
         menu = QMenu(self)
         menu.addAction(tr("New folder"), self._on_add_folder)
         if item is not None and item.data(0, Qt.UserRole) != DEFAULT_LAYER:
             menu.addAction(tr("Rename"), lambda: self.tree.editItem(item, 0))
+        if any(row.data(0, Qt.UserRole) != DEFAULT_LAYER for row in self.tree.selectedItems()):
             menu.addAction(tr("Move to root"), self._on_move_to_root)
             menu.addAction(tr("Delete"), self._on_delete)
         menu.exec(self.tree.viewport().mapToGlobal(point))
@@ -3513,6 +3533,20 @@ class LayersPanel(QWidget):
             return
         scene = self._scene()
         from core.layers import LayerFolder
+        if column == 1 and item.isSelected():
+            visible = item.checkState(1) == Qt.Checked
+            self._updating = True
+            try:
+                for selected in self.tree.selectedItems():
+                    value = selected.data(0, Qt.UserRole)
+                    target = value if isinstance(value, LayerFolder) else scene.layer(value)
+                    target.visible = visible
+                    selected.setCheckState(1, Qt.Checked if visible else Qt.Unchecked)
+            finally:
+                self._updating = False
+            self._prune_selection()
+            self._touch()
+            return
         old_name = item.data(0, Qt.UserRole)
         if isinstance(old_name, LayerFolder):
             if column == 0:
@@ -3532,6 +3566,11 @@ class LayersPanel(QWidget):
             if new_name and new_name != old_name \
                     and scene.layer(new_name) is None:
                 self._rename(ly, old_name, new_name)
+                blocked = self.tree.blockSignals(True)
+                try:
+                    item.setData(0, Qt.UserRole, new_name)
+                finally:
+                    self.tree.blockSignals(blocked)
             self.refresh()
             self._touch()
             return
@@ -3580,27 +3619,17 @@ class LayersPanel(QWidget):
         self._touch()
 
     def _on_delete(self) -> None:
-        from core.layers import DEFAULT_LAYER, layer_of, assign_layer
+        from core.layers import DEFAULT_LAYER, LayerFolder, layer_of, assign_layer
         scene = self._scene()
-        item = self.tree.currentItem()
-        if item is None:
+        selected = self.tree.selectedItems()
+        if not selected:
             return
-        name = item.data(0, Qt.UserRole)
-        from core.layers import LayerFolder
-        if isinstance(name, LayerFolder):
-            parent = item.parent() or self.tree.invisibleRootItem()
-            index = parent.indexOfChild(item)
-            children = [item.takeChild(0) for _ in range(item.childCount())]
-            for child in children:
-                parent.insertChild(index, child)
-                index += 1
-            parent.takeChild(parent.indexOfChild(item))
-            self._on_tree_moved()
-            return
-        if name == DEFAULT_LAYER:
-            return                                  # the default is permanent
-        ly = scene.layer(name)
-        if ly is None:
+        names = {item.data(0, Qt.UserRole) for item in selected
+                 if not isinstance(item.data(0, Qt.UserRole), LayerFolder)
+                 and item.data(0, Qt.UserRole) != DEFAULT_LAYER}
+        folders = [item for item in selected
+                   if isinstance(item.data(0, Qt.UserRole), LayerFolder)]
+        if not names and not folders:
             return
         # Every mesh in the document, nested placements included — walking
         # scene.groups as a flat list left the faces INSIDE a group tagged
@@ -3608,18 +3637,26 @@ class LayersPanel(QWidget):
         from core.purge import iter_groups, iter_meshes
         for mesh in iter_meshes(scene):
             for ent in list(mesh.faces) + list(mesh.edges):
-                if layer_of(ent) == name:
+                if layer_of(ent) in names:
                     assign_layer(ent, DEFAULT_LAYER)
         for ent in list(iter_groups(scene.groups)) \
                 + list(getattr(scene, "dimensions", []) or []) \
                 + list(getattr(scene, "text_labels", []) or []) \
                 + list(getattr(scene, "image_planes", []) or []) \
                 + list(getattr(scene, "section_planes", []) or []):
-            if layer_of(ent) == name:
+            if layer_of(ent) in names:
                 assign_layer(ent, DEFAULT_LAYER)
-        scene.layers.remove(ly)
-        self.refresh()
-        self._touch()
+        # Keep unselected contents when removing a folder. Selected descendants
+        # remain valid items after their parent has been removed.
+        for item in selected:
+            if item.data(0, Qt.UserRole) == DEFAULT_LAYER:
+                continue
+            parent = item.parent() or self.tree.invisibleRootItem()
+            index = parent.indexOfChild(item)
+            children = item.takeChildren()
+            parent.takeChild(index)
+            parent.insertChildren(index, children)
+        self._on_tree_moved()
 
     def _on_purge(self) -> None:
         """The classic "Purge Unused" for tags: sweep the layers nothing
