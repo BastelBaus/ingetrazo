@@ -344,6 +344,8 @@ def save_scene(scene, path: Path) -> dict:
     if layers is not None and (len(layers) > 1 or any(
             not ly.visible or ly.locked for ly in layers)):
         payload["layers"] = [ly.to_dict() for ly in layers]
+    if scene.layer_folders:
+        payload["layer_folders"] = [f.to_dict() for f in scene.layer_folders]
     views = getattr(scene, "saved_views", None)
     if views:
         payload["saved_views"] = [v.to_dict() for v in views]
@@ -680,6 +682,9 @@ def _load_into_inner(scene, path: Path, progress=None) -> None:
 
     tick(0.35, "Building geometry…")
     _load_mesh(scene.mesh, payload)
+    from core.layers import LayerFolder
+    scene.layer_folders = [LayerFolder.from_dict(r)
+                           for r in payload.get("layer_folders", [])]
     raw_layers = payload.get("layers")
     if raw_layers:
         from core.layers import DEFAULT_LAYER, Layer

@@ -29,10 +29,12 @@ class Layer:
     """A named tag with display state."""
 
     def __init__(self, name: str, visible: bool = True,
-                 locked: bool = False) -> None:
+                 locked: bool = False, folder_id=None, position=0) -> None:
         self.name = name
         self.visible = visible
         self.locked = locked
+        self.folder_id = folder_id if name != DEFAULT_LAYER else None
+        self.position = int(position)
 
     def to_dict(self) -> dict:
         entry: dict = {"name": self.name}
@@ -40,13 +42,18 @@ class Layer:
             entry["visible"] = False
         if self.locked:
             entry["locked"] = True
+        if self.folder_id is not None:
+            entry["folder_id"] = self.folder_id
+        if self.position:
+            entry["position"] = self.position
         return entry
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Layer":
         return cls(raw.get("name", DEFAULT_LAYER),
                    visible=raw.get("visible", True),
-                   locked=raw.get("locked", False))
+                   locked=raw.get("locked", False),
+                   folder_id=raw.get("folder_id"), position=raw.get("position", 0))
 
 
 def layer_of(entity) -> str:
@@ -68,3 +75,30 @@ def assign_layer(entity, name: str) -> None:
             attrs["layer"] = value
     elif hasattr(entity, "layer"):
         entity.layer = value
+
+
+class LayerFolder:
+    """Nested tag organization, with inherited visibility and locking."""
+
+    def __init__(self, name, uid=None, parent_id=None, position=0,
+                 expanded=True, visible=True, locked=False):
+        from uuid import uuid4
+        self.name = name
+        self.uid = uid or str(uuid4())
+        self.parent_id = parent_id
+        self.position = int(position)
+        self.expanded = bool(expanded)
+        self.visible = bool(visible)
+        self.locked = bool(locked)
+
+    def to_dict(self):
+        return dict(name=self.name, uid=self.uid, parent_id=self.parent_id,
+                    position=self.position, expanded=self.expanded,
+                    visible=self.visible, locked=self.locked)
+
+    @classmethod
+    def from_dict(cls, raw):
+        return cls(raw.get("name", "Folder"), uid=raw.get("uid"),
+                   parent_id=raw.get("parent_id"), position=raw.get("position", 0),
+                   expanded=raw.get("expanded", True),
+                   visible=raw.get("visible", True), locked=raw.get("locked", False))

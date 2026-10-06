@@ -23,7 +23,7 @@ class SavedView:
                  fov_deg: float = 45.0, perspective: bool = True,
                  two_point: bool = False, hidden_layers=None, style=None, section=None,
                  georef=None, shadows=None, hidden_objects=None,
-                 hidden_shown=None, folder_id=None, position=0) -> None:
+                 hidden_shown=None, folder_id=None, position=0, hidden_layer_folders=None) -> None:
         self.name = name
         self.folder_id = folder_id
         self.position = int(position)
@@ -38,6 +38,7 @@ class SavedView:
         #: Layer NAMES hidden in this view. Every other layer shows — a layer
         #: created after the view was saved defaults to visible.
         self.hidden_layers = list(hidden_layers or [])
+        self.hidden_layer_folders = list(hidden_layer_folders or [])
         #: Display-style snapshot (core.style.Style.to_dict()) or ``None`` —
         #: a scene remembers the style it was saved with.
         self.style = dict(style) if style else None
@@ -89,6 +90,8 @@ class SavedView:
                    two_point=bool(getattr(camera, "two_point", False)),
                    hidden_layers=[ly.name for ly in scene.layers
                                   if not ly.visible],
+                   hidden_layer_folders=[f.uid for f in scene.layer_folders
+                                         if not f.visible],
                    style=(scene.display_style.to_dict()
                           if getattr(scene, "display_style", None) else None),
                    section={
@@ -132,6 +135,8 @@ class SavedView:
         hidden = set(self.hidden_layers)
         for ly in scene.layers:
             ly.visible = ly.name not in hidden
+        for folder in scene.layer_folders:
+            folder.visible = folder.uid not in self.hidden_layer_folders
         if self.style:
             from core.style import Style
             scene.display_style = Style.from_dict(self.style)
@@ -181,6 +186,8 @@ class SavedView:
             entry["two_point"] = True
         if self.hidden_layers:
             entry["hidden_layers"] = list(self.hidden_layers)
+        if self.hidden_layer_folders:
+            entry["hidden_layer_folders"] = list(self.hidden_layer_folders)
         if self.style:
             entry["style"] = dict(self.style)
         if self.section is not None:
@@ -207,6 +214,7 @@ class SavedView:
                    perspective=not raw.get("parallel", False),
                    two_point=bool(raw.get("two_point", False)),
                    hidden_layers=raw.get("hidden_layers"),
+                   hidden_layer_folders=raw.get("hidden_layer_folders"),
                    style=raw.get("style"),
                    section=raw.get("section"),
                    georef=raw.get("georef"),

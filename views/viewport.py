@@ -2366,7 +2366,7 @@ class Viewport(QOpenGLWidget):
                  getattr(self, "_edit_rest_mode", None),
                  bool(getattr(sc, "show_hidden_objects", False)),
                  bool(getattr(sc, "show_hidden_geometry", False)),
-                 tuple((ly.name, ly.visible, ly.locked) for ly in sc.layers),
+                 tuple((ly.name, sc.layer_state(ly.name)) for ly in sc.layers),
                  len(sc.groups))
         live = getattr(self, "_frozen_cache_version", None) is None
         same = getattr(self, "_epoch_same", None)
@@ -2387,7 +2387,7 @@ class Viewport(QOpenGLWidget):
                        # @pacaeiro).
                        bool(getattr(sc, "show_hidden_objects", False)),
                        bool(getattr(sc, "show_hidden_geometry", False)),
-                       tuple((ly.name, ly.visible, ly.locked) for ly in sc.layers)]
+                       tuple((ly.name, sc.layer_state(ly.name)) for ly in sc.layers)]
 
         loose = sc.mesh
 
