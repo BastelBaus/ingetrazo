@@ -25,7 +25,12 @@ original observations below are retained as reproduction history.
 
 Validation after these fixes: **111 passed** on macOS with Qt 6.11.2,
 covering all seven originally failing test modules plus text-tool, frame
-background, raster pen and shortcut integration tests. A subsequent validation of the current working tree completed every fast
+background, raster pen and shortcut integration tests. Before publication,
+the fast suite passed in a clean checkout: **3,579 passed, 29 skipped,
+805 deselected**. The nine theme tests ran in a separate process to avoid
+the accumulated-window slowdown observed during the original investigation.
+
+A subsequent validation of the current working tree completed every fast
 suite file in nine fresh processes: **3636 passed, 29 skipped, 805 deselected**,
 including the corrected macOS tests. The `.igz` mesh-only folder-field regression
 found during that run was fixed and its batch rerun successfully. See
