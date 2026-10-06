@@ -324,8 +324,8 @@ class MainWindow(QMainWindow):
         return slot
 
     def _connect_ndof(self) -> None:
-        """Listen to the 3D mouse, if the machine has one (spacenavd on
-        Linux, Raw Input on Windows). Silent when there is none."""
+        """Listen to the 3D mouse (spacenavd on Linux, Raw Input on Windows,
+        3DconnexionClient on macOS). Silent when there is no driver."""
         self._ndof_connected = True
         try:
             from views.ndof_input import shared_input
