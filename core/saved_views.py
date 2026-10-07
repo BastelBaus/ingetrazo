@@ -307,3 +307,9 @@ class SceneFolder:
                    parent_id=raw.get("parent_id"),
                    position=raw.get("position", 0),
                    expanded=raw.get("expanded", True))
+
+class CompositionFolder (SceneFolder):
+    """Document-owned folder; parent IDs allow arbitrary nested folders.
+        reuse to allow later customization of composition folders
+    """
+    pass

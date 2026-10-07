@@ -75,6 +75,7 @@ class Scene:
     # snapshots (core.saved_views.SavedView). Presentation state, no geometry.
     saved_views: list = field(default_factory=list)
     scene_folders: list = field(default_factory=list)
+    composition_folders: list = field(default_factory=list)
     layer_folders: list = field(default_factory=list)
     # Sheet compositions (core.composition.Composicion) — the print layouts.
     compositions: list = field(default_factory=list)
@@ -570,7 +571,8 @@ class Scene:
                 or self.groups or self.dimensions or self.georef
                 or self.tile_layer or self.geo_paths or self.terrain
                 or self.guides or self.geo_points or self.text_labels
-                or self.saved_views or self.scene_folders or self.layer_folders
+                or self.saved_views or self.scene_folders or self.layer_folders or
+                self.composition_folders
                 or len(self.layers) > 1 or self.compositions
                 or self.image_planes or self.plugin_data):
             self.mesh.clear()
@@ -583,6 +585,7 @@ class Scene:
             self.image_planes.clear()
             self.saved_views.clear()
             self.scene_folders.clear()
+            self.composition_folders.clear()                
             self.layer_folders.clear()
             self.compositions.clear()
             self.custom_scales.clear()
