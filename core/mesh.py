@@ -306,6 +306,11 @@ class Mesh:
         self.edges: list[Edge] = []
         self.faces: list[Face] = []
 
+    def __str__(self) -> str:  # pragma: no cover - debug aid
+        return (f"Mesh({len(self.vertices)} verts, "
+                f"{len(self.edges)} edges, "
+                f"{len(self.faces)} faces)")
+
     # ---- Vertices -----------------------------------------------------------
     def _lookup(self, position: QVector3D) -> Optional[Vertex]:
         """The registered vertex within weld tolerance of ``position``, or
@@ -1029,7 +1034,8 @@ class Mesh:
         self._chunk_dirty = True
         self._mut_serial += 1
         old = _key(v.position)
-        v.position = v.position + delta
+        #v.position = v.position + delta # this changes ID, the other not!
+        v.position += delta 
         new = _key(v.position)
         if old == new:
             return
@@ -1046,6 +1052,7 @@ class Mesh:
         self._mut_serial += 1
         old = _key(v.position)
         v.position = QVector3D(position)
+        #v.position = position
         new = _key(v.position)
         if old == new:
             return

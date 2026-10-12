@@ -378,7 +378,9 @@ class RotateTool(ProtractorBase):
                 else:
                     snap["gv"].extend((group.mesh, vx, QVector3D(vx.position))
                                       for vx in list(group.mesh.vertices))
-            snap["v"] = [(vx, QVector3D(vx.position)) for vx in self._verts]
+            #snap["v"] = [(vx, QVector3D(vx.position)) for vx in self._verts]
+            snap["v"] = [(vx, vx.position) for vx in self._verts]
+            
         snap["sp"] = [(sp, QVector3D(sp.point), QVector3D(sp.normal))
                       for sp in self._splanes]
         snap["im"] = [(im, QVector3D(im.origin), QVector3D(im.u),

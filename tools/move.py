@@ -44,7 +44,11 @@ from core.topology import _key
 from tools.base import Tool, ToolContext
 from core.units import fmt_len
 
+import logging
 
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 def _dedup(positions: list[QVector3D]) -> list[QVector3D]:
     seen = set()
@@ -53,7 +57,8 @@ def _dedup(positions: list[QVector3D]) -> list[QVector3D]:
         k = _key(p)
         if k not in seen:
             seen.add(k)
-            out.append(QVector3D(p))
+            #out.append(QVector3D(p))
+            out.append(p)
     return out
 
 
@@ -263,6 +268,7 @@ class MoveTool(Tool):
 
     # ---- Keyboard -----------------------------------------------------------
     def on_key(self, viewport, key: int, modifiers) -> bool:
+        print(f"mode: {key=} {modifiers=}")
         if self._grip_rot is not None:
             return self._grip_rot.on_key(viewport, key, modifiers)
         # Ctrl toggles copy mode (move a copy, the original stays).
@@ -736,7 +742,10 @@ class MoveTool(Tool):
         mesh AND the grabbed loose vertex objects (identity-exact: apply and
         revert stay symmetric even when the drag crosses another vertex's
         position)."""
+
+        print("move")
         for group in self._groups:
+            print(" g")
             if getattr(group, "xform", None) is not None:
                 from PySide6.QtGui import QMatrix4x4
                 t = QMatrix4x4()
@@ -746,6 +755,7 @@ class MoveTool(Tool):
                 for v in list(group.mesh.vertices):
                     group.mesh.move_vertex(v, step)
         for v in self._verts:
+            print(f" v {id(v)=}")
             viewport.scene.mesh.move_vertex(v, step)
         for lab in self._labels:
             lab.offset = lab.offset + step

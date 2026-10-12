@@ -22,6 +22,12 @@ from tools.base import AxisMagnet, Tool, ToolContext
 from core.units import fmt_len
 
 
+import logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+
+
 class DimensionTool(AxisMagnet, Tool):
     name = "Dimension"
     shortcut = "D"
@@ -67,19 +73,36 @@ class DimensionTool(AxisMagnet, Tool):
         self.hover_point = self._frontal(ctx, ctx.world)
 
     def on_click(self, ctx: ToolContext) -> None:
-        p = ctx.world
+        p = ctx.world        
+        print("CTX: %s", ctx)
+        print("World point ID: %s", id(ctx.world))
+        print("Snap point ID: %s", id(ctx.snap.point))
+                        
         if self.a is None:
-            self.a = QVector3D(p)
-            self.start_point = self.a
-            return
+
+            if ctx.snap.kind == "on_edge" and ctx.snap.edge is not None and ctx.snap.edge.a is not None and ctx.snap.edge.b is not None:
+                self.a = ctx.snap.edge.a
+                self.b = ctx.snap.edge.b
+                logger.debug(f"created measurement on edge")
+                return
+            else:
+                #self.a = QVector3D(p)
+                self.a = p
+                self.start_point = self.a
+                logger.debug(f"started measurement point")
+                return
         if self.b is None:
             p = self._frontal(ctx, p)
             if (p - self.a).length() < 1e-6:
+                logger.warning(f"distance of two points too small for measurement")
                 return  # need two distinct endpoints
-            self.b = QVector3D(p)
+            #self.b = QVector3D(p)
+            self.b = p            
+            logger.debug(f"finished measurement on second point")
             return
         # Third click: place the dimension where the cursor asks — aligned,
         # or linear along an axis when pulled past the ends (issue #50).
+        logger.debug(f"set measurement with offset 1")
         ctx.viewport.history.execute(AddDimensionCommand(self._proposed(p)))
         self._reset()
         ctx.viewport.update()
@@ -112,7 +135,9 @@ class DimensionTool(AxisMagnet, Tool):
         """The dimension the current cursor would place (preview and
         commit share it, so what you see is what you get)."""
         offset, axis = Dimension.placement_for_cursor(self.a, self.b, cursor)
-        return Dimension(QVector3D(self.a), QVector3D(self.b), offset, axis=axis)
+        #return Dimension(QVector3D(self.a), QVector3D(self.b), offset, axis=axis)
+        print("proposed")
+        return Dimension(self.a, self.b, offset, axis=axis)
 
     def _reset(self) -> None:
         self.a = None

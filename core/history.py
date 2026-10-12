@@ -1206,7 +1206,10 @@ class MoveDimensionsCommand(Command):
     @staticmethod
     def shift(dim, mode: str, step: QVector3D) -> None:
         """Apply one step — the tool's live preview uses it too."""
-        if mode == "line":
+        print("MoveDim:",mode,step)
+        dim.move_by(step, mode)
+        return
+        if mode == "line":            
             ab = dim.b - dim.a
             length = ab.length()
             if length > 1e-9:

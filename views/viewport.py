@@ -7134,6 +7134,8 @@ class Viewport(QOpenGLWidget):
         style = getattr(self.scene, "dimension_style", {})
         col = style.get("color", [45, 55, 75])
         default_ink = QColor(col[0], col[1], col[2])
+        ink_help = QColor(150,150,150)
+                        
         sel_ink = QColor(243, 115, 41)  # selection orange
         selection = self.scene.selection
         font = QFont()
@@ -7145,6 +7147,7 @@ class Viewport(QOpenGLWidget):
             ink = (sel_ink if (dim in selection or dim is self._hover_entity)
                    else default_ink)
             ap, bp = dim.line_points()
+            ap, bp = dim.a_dim, dim.b_dim
             pap = self._world_to_pixel(ap)
             pbp = self._world_to_pixel(bp)
             if pap is None or pbp is None:
@@ -7152,11 +7155,15 @@ class Viewport(QOpenGLWidget):
             # Lines are hidden where solid geometry sits in front of them, so a
             # dimension reads as part of the model instead of floating over it.
             # Each 3D segment is sampled and only its visible runs are drawn.
+            painter.setPen(QPen(ink_help, 0.5,s=Qt.DotLine))
+            self._draw_occluded_segment(painter, dim.a, dim.a_end)      # dottet to anchor
+            self._draw_occluded_segment(painter, dim.b, dim.b_end)
             painter.setPen(QPen(ink, 1.0))
-            self._draw_occluded_segment(painter, dim.a, ap)      # extension
-            self._draw_occluded_segment(painter, dim.b, bp)
+            self._draw_occluded_segment(painter, dim.a_dim, dim.a_end)      # extension
+            self._draw_occluded_segment(painter, dim.b_dim, dim.b_end)
             painter.setPen(QPen(ink, 1.5))
-            self._draw_occluded_segment(painter, ap, bp)         # dimension line
+            self._draw_occluded_segment(painter, dim.a_dim, dim.b_dim)         # dimension line
+
             # The ends, in screen space, drawn only where the end point
             # itself is visible: filled arrows pointing outward (the
             # document's default), oblique ticks, or nothing.
@@ -9478,7 +9485,9 @@ class Viewport(QOpenGLWidget):
         dx, dy = pb[0] - pa[0], pb[1] - pa[1]
         l2 = dx * dx + dy * dy
         if l2 < 1e-12:
-            return QVector3D(edge.a)
+            #return QVector3D(edge.a)
+            return edge.a
+            
         t = ((screen_x - pa[0]) * dx + (screen_y - pa[1]) * dy) / l2
         t = max(0.0, min(1.0, t))
         return edge.a + (edge.b - edge.a) * t
@@ -9552,8 +9561,14 @@ class Viewport(QOpenGLWidget):
         for dim in dims:
             if not self.scene.entity_selectable(dim):   # hidden / locked
                 continue
-            ap, bp = dim.line_points()
-            for s, e in ((dim.a, ap), (dim.b, bp), (ap, bp)):
+            #ap, bp = dim.line_points() 
+            ap, bp = dim.a_dim, dim.b_dim
+            ap, bp = dim.a_dim, dim.b_dim
+
+            print(f"pick: {id(dim.a)=} {id(dim.b)=}")
+            # check all line segments (not the helping lines) and the anchor points
+            #for s, e in ((dim.a_, ap), (dim.b, bp), (ap, bp)):
+            for s, e in ((dim.a, dim.a), (dim.a_end, dim.a_dim), (dim.a_dim, dim.b_dim), (dim.b_dim, dim.b_end),(dim.b, dim.b)  ):            
                 ps = self._world_to_pixel(s)
                 pe = self._world_to_pixel(e)
                 if ps is None or pe is None:
@@ -9562,6 +9577,20 @@ class Viewport(QOpenGLWidget):
                 if d < best_d:
                     best_d = d
                     best = dim
+            # check text label
+            # TODO: pick_text_label should be used here, but it is not implemented yet
+            mid_world = dim.midpoint()
+            mid = self._world_to_pixel(mid_world)
+            if mid is not None and not self._occluded_on_screen(mid_world):
+                #text = dim.display_text(
+                #    self._format_dim_value(dim.value(), style))
+                #painter.setFont(font)
+                #painter.setPen(QPen(QColor(255, 255, 255, 230)))
+                #painter.drawText(QPointF(mid[0] + 5, mid[1] - 4), text)
+                #painter.setPen(QPen(ink))
+                #painter.drawText(QPointF(mid[0] + 4, mid[1] - 5), text)
+                pass
+
         return best
 
     def pick_text_label(self, screen_x: float, screen_y: float,
@@ -9849,7 +9878,7 @@ class Viewport(QOpenGLWidget):
             if groups[i] is moving:
                 continue
             o = QVector3D(*pts[i])
-            out.append(_SnapEdge(o, QVector3D(o), component_origin=True))
+            out.append(_SnapEdge(o, o, component_origin=True))
         return out
 
     def _arc_midpoints(self, px: float, py: float) -> list:
@@ -9953,7 +9982,8 @@ class Viewport(QOpenGLWidget):
                 continue
             c = quad[0]
             feet = (c[0] + c[1]) * 0.5
-            out.append(_SnapEdge(QVector3D(feet), QVector3D(feet), figure=True))
+            #out.append(_SnapEdge(QVector3D(feet), QVector3D(feet), figure=True))
+            out.append(_SnapEdge(feet,feet, figure=True))
         return out
 
     def _snap_scene(self, px: Optional[float] = None,
@@ -9974,7 +10004,8 @@ class Viewport(QOpenGLWidget):
                 if seg is not None:
                     lines.append(_SnapEdge(*seg, guide=True))
             else:
-                lines.append(_SnapEdge(QVector3D(g.point), QVector3D(g.point)))
+                #lines.append(_SnapEdge(QVector3D(g.point), QVector3D(g.point)))
+                lines.append(_SnapEdge(g.point, g.point))
         # Reference-image borders snap like guides: aligning a scan against
         # real geometry (or drawing to its edge) is what tracing needs.
         for im in getattr(self.scene, "image_planes", None) or []:
@@ -10014,7 +10045,8 @@ class Viewport(QOpenGLWidget):
             pc = self._world_to_pixel(ref[0])
             hint = getattr(self, "_center_hint_px", None)
             if pc is not None and (hint is None or hint(ref, pc) > 0.0):
-                near.append(_SnapEdge(QVector3D(ref[0]), QVector3D(ref[0]),
+                #near.append(_SnapEdge(QVector3D(ref[0]), QVector3D(ref[0]),
+                near.append(_SnapEdge(ref[0], ref[0],
                                       center=True))
         sp = _active_cut(self.scene)
         if sp is not None:
@@ -10027,8 +10059,10 @@ class Viewport(QOpenGLWidget):
         # lands EXACTLY on the surveyed coordinate (the municipal flow's whole
         # point); direction-based inferences skip zero-length edges safely.
         for gp in getattr(self.scene, "geo_points", None) or []:
-            near.append(_SnapEdge(QVector3D(gp.position),
-                                  QVector3D(gp.position)))
+            #near.append(_SnapEdge(QVector3D(gp.position),
+            #                      QVector3D(gp.position)))
+            near.append(_SnapEdge(gp.position,
+                                  gp.position))
         big = (px is not None
                and len(self.scene.edges) > _LOOSE_SNAP_CAP)
         if not lines and not near and sp is None and not big and excl is None:
@@ -10042,6 +10076,15 @@ class Viewport(QOpenGLWidget):
             loose = [e for e in loose if id(e) not in excl[0]]
         if sp is not None:
             loose = [e for e in loose if _kept(e)]
+        # 10/Oct/26 added BastelBaus: add snapping to dimension eddges
+        for dim in (self.scene.dimensions if hasattr(self.scene, 'dimensions') else []):
+            if not self.scene.entity_selectable(dim):
+                continue
+            near.append(_SnapEdge(dim.a, dim.a))
+            near.append(_SnapEdge(dim.b, dim.b))
+            near.append(_SnapEdge(dim.a_end, dim.a_end))
+            near.append(_SnapEdge(dim.b_end, dim.b_end))
+            near.append(_SnapEdge(dim.a_dim, dim.b_dim))
         from types import SimpleNamespace
         return SimpleNamespace(edges=loose + lines + near)
 

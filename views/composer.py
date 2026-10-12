@@ -50,6 +50,12 @@ from PySide6.QtWidgets import QGraphicsLineItem, QGridLayout, QWidget as _QWidge
 from views.filedialogs import file_dialogs
 from views.icons import toolbar_icon_px
 
+import logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
 PT_TO_MM = 25.4 / 72.0
 _HANDLE_MM = 3.0          # corner resize handle, in paper mm
 _SNAP_MM = 2.0
@@ -9621,12 +9627,31 @@ class ComposerWindow(QMainWindow):
             for dim in getattr(scene, "dimensions", []) or []:
                 if not scene.entity_visible(dim):
                     continue
-                ap, bp = dim.line_points()
+
                 a, b = pt(dim.a), pt(dim.b)
+                a_end, b_end= pt(dim.a_end), pt(dim.b_end)
+                a_dim, b_dim= pt(dim.a_dim), pt(dim.b_dim)
+                print(f"dim: a={dim.a} b={dim.b} a_end={dim.a_end} b_end={dim.b_end} a_dim={dim.a_dim} b_dim={dim.b_dim}")
+
+                ap, bp = dim.line_points()
                 a2, b2 = pt(ap), pt(bp)
-                out.append(("line", a[0], a[1], a2[0], a2[1]))
-                out.append(("line", b[0], b[1], b2[0], b2[1]))
-                out.append(("line", a2[0], a2[1], b2[0], b2[1]))
+                ank_a, ank_b = pt(dim.anker_a), pt(dim.anker_b)
+                #out.append(("line", a[0], a[1], a2[0], a2[1]))
+                #out.append(("line", b[0], b[1], b2[0], b2[1]))
+                #out.append(("line", a2[0], a2[1], b2[0], b2[1]))
+
+
+                # the (dottet) lines from the end to the snapping point of the arrow
+                out.append(("line", a_end[0], a_end[1], a_dim[0], a_dim[1]))
+                out.append(("line", b_end[0], b_end[1], b_dim[0], b_dim[1]))
+                # the lines from teh arrow to the end of the marker
+                out.append(("line", a_end[0], a_end[1], a[0], a[1]))                
+                out.append(("line", b_end[0], b_end[1], b[0], b[1]))
+                # the arrow
+                out.append(("line", a_dim[0], a_dim[1], b_dim[0], b_dim[1]))                
+
+                                                
+
                 ang = math.atan2(b2[1] - a2[1], b2[0] - a2[0])
                 ends = style.get("ends", "arrow") or "arrow"
                 for (x, y), heading in ((a2, ang), (b2, ang + math.pi)):

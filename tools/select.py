@@ -314,6 +314,7 @@ class SelectTool(Tool):
         else:
             picked = self._expand(viewport, entity)
             viewport.scene.select(picked, mode=mode)
+            print(f"selected: {id(picked[0].a)=} {id(picked[0].b)=}")
         viewport.update()
 
     @staticmethod

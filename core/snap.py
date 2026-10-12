@@ -30,6 +30,12 @@ from typing import Callable, Optional
 
 from PySide6.QtGui import QVector3D
 
+from core.mesh import Edge, Vertex
+
+import logging
+#logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 # Colors used by the rubber band and the 2D snap indicator. RGB floats [0, 1].
 COLOR_ENDPOINT = (0.16, 0.62, 0.36)
@@ -46,6 +52,7 @@ COLOR_EXTENSION = (0.55, 0.55, 0.58)  # grey — collinear extension of an edge
 COLOR_IN_GROUP = (0.85, 0.30, 0.80)   # magenta — a point inside a group / component
 COLOR_TANGENT = (0.20, 0.66, 0.74)    # cyan — an arc tangent to the arc it starts from
 COLOR_NONE = (0.0, 0.0, 0.0)
+COLOR_ON_DIMENSION_ANCHOR = (0.16, 0.62, 0.36)  # green — a dimension endpoint
 
 AXIS_COLORS = {
     "x": COLOR_AXIS_X,
@@ -77,6 +84,8 @@ class SnapResult:
     #: The ScreenTip's own words, already translated — what an extension's
     #: inference says («Level PA»); wins over the kind's built-in label.
     label: Optional[str] = None
+
+    edge: Optional[Edge] = None  # the edge that produced the snap, if any (for a guide line)
 
 
 # ---- Helpers ---------------------------------------------------------------
@@ -243,7 +252,10 @@ def _detect_axis_on_screen(
     cx, cy = candidate_pixel
     best: Optional[tuple[float, str]] = None
     for name in ("x", "y", "z"):
-        ax, ay = world_to_pixel(start + _AXIS_VECTORS[name] * reach)
+        px = world_to_pixel(start + _AXIS_VECTORS[name] * reach)
+        if px is None:
+            continue
+        ax, ay = px
         dx, dy = ax - sx, ay - sy
         span = math.hypot(dx, dy)
         if span < _MIN_AXIS_SCREEN_PX:
@@ -636,8 +648,10 @@ def _first_point_from_point(
     if best is None:
         return None
     _, foot, axis = best
+
     return SnapResult(foot, "from_point", COLOR_ENDPOINT,
                       guide=(QVector3D(ref), foot),
+                      #guide=ref, foot),
                       guide_color=AXIS_COLORS[axis])
 
 
@@ -1212,6 +1226,8 @@ def compute_snap(
     # turned the angle with the cursor's distance (issue #140, @pacaeiro).
     line_inferences = allow_axis and not radial_arm
 
+    #logger.debug(f"snap from {candidate_world=} ({id(candidate_world)=})")
+
     # 1. Explicit axis lock (arrow keys). Use the viewport's camera-aware
     #    projection so locks to Z (vertical) actually move along Z. Existing
     #    vertices that fall on the lock line still get an endpoint snap, so
@@ -1239,7 +1255,9 @@ def compute_snap(
             project_onto_line,
         )
         if hit is not None:
+            logger.debug(f"... to {hit.point=} ({id(hit.point)=})")
             return hit
+        logger.debug(f"... to {locked=} ({id(locked)=})")
         return SnapResult(locked, "axis", AXIS_COLORS[axis_lock], axis=axis_lock)
 
     # 1.5 Sticky inference lock (Shift captured an active inference): hold that
@@ -1271,8 +1289,10 @@ def compute_snap(
             project_onto_line,
         )
         if hit is not None:
+            logger.debug(f"... to {hit.point=} ({id(hit.point)=})")
             return hit
         color = shift_lock_color if shift_lock_color is not None else COLOR_REFERENCE
+        logger.debug(f"... to {locked=} ({id(locked)=})")
         return SnapResult(locked, "reference", color)
 
     # 2. Reference edge lock (Down arrow + edge under cursor).
@@ -1293,9 +1313,11 @@ def compute_snap(
                 candidate_pixel[1], world_to_pixel, threshold_px,
                 is_occluded, acquired_point, chain_first_point,
                 project_onto_line,
-            )
+            )            
             if hit is not None:
+                logger.debug(f"... to {hit.point=} ({id(hit.point)=})")
                 return hit
+            logger.debug(f"... to {locked=} ({id(locked)=})")
             return SnapResult(locked, "reference", COLOR_REFERENCE)
 
     # 3. Shift held + auto axis inference → lock to that axis. This is the
@@ -1320,7 +1342,9 @@ def compute_snap(
                 project_onto_line,
             )
             if hit is not None:
+                logger.debug(f"... to {hit.point=} ({id(hit.point)=})")
                 return hit
+            logger.debug(f"... to {locked=} ({id(locked)=})")
             return SnapResult(locked, "axis", AXIS_COLORS[inferred], axis=inferred)
 
     cx, cy = candidate_pixel
@@ -1378,6 +1402,7 @@ def compute_snap(
         best = chosen
         return chosen
 
+
     # 4. Vertex snaps (close, endpoint) — the highest-priority discrete points.
     if (
         chain_first_point is not None
@@ -1431,7 +1456,9 @@ def compute_snap(
         if best is None:
             _resolve()
     if best is not None:
+        logger.debug(f"... to {best[1]=} ({id(best[1])=})")
         return SnapResult(best[1], best[2], best[3], context=best[4])
+
 
     # 4b. Perpendicular to a wall you started on: drawing square to it locks the
     #     exact perpendicular (magenta) and predicts the connection — where that
@@ -1475,6 +1502,7 @@ def compute_snap(
                     if best_hit is None or dh < best_hit[0]:
                         best_hit = (dh, hit)
                 if best_hit is not None:
+                    logger.debug(f"... to {best_hit[1]=} ({id(best_hit[1])=})")
                     return SnapResult(best_hit[1], "intersection", COLOR_ENDPOINT,
                                       guide=(start_point, best_hit[1]))
                 # Before settling for a bare perpendicular lock, let a corner's
@@ -1488,8 +1516,10 @@ def compute_snap(
                         extra_point=acquired_point,
                     )
                     if fp is not None:
+                        logger.debug(f"... to {fp.point=} ({id(fp.point)=})")
                         return fp
                 locked = project_onto_line(start_point, perp)
+                logger.debug(f"... to {locked=} ({id(locked)=})")
                 return SnapResult(locked, "reference", COLOR_REFERENCE)
 
     # 4e. 'Through point': heading along the line from the start through an
@@ -1523,6 +1553,7 @@ def compute_snap(
                 project_onto_line, inference_angle_deg,
             )
             if tp is not None:
+                logger.debug(f"... to {tp.point=} ({id(tp.point)=})")
                 return tp
 
     # 5. Extension: when drawing collinear with an edge, snap along its dashed
@@ -1537,6 +1568,7 @@ def compute_snap(
             is_occluded, project_onto_line=project_onto_line,
         )
         if ext is not None:
+            logger.debug(f"... to {ext.point=} ({id(ext.point)=})")
             return ext
 
     # 5b. 'From point' ("Desde el punto"): drawing along an axis, line up with a
@@ -1550,6 +1582,7 @@ def compute_snap(
             extra_point=acquired_point,
         )
         if fp is not None:
+            logger.debug(f"... to {fp.point=} ({id(fp.point)=})")
             return fp
 
     # 5c. Edge / guide intersection (the green X): where two edges or
@@ -1559,7 +1592,9 @@ def compute_snap(
     #     so the exact crossing wins, but below every endpoint and lock.
     inter = _intersection_snap(cx, cy, scene, world_to_pixel, et, is_occluded)
     if inter is not None:
+        logger.debug(f"... to {inter.point=} ({id(inter.point)=})")
         return inter
+
 
     # 6. Midpoint + origin.
     best = None
@@ -1571,6 +1606,7 @@ def compute_snap(
     _consider(QVector3D(0.0, 0.0, 0.0), "origin", COLOR_ORIGIN)
     _resolve()
     if best is not None:
+        logger.debug(f"... to {best[1]=} ({id(best[1])=})")
         return SnapResult(best[1], best[2], best[3], context=best[4])
 
     # 7. On-edge: an arbitrary point along an edge. An edge is a big linear
@@ -1612,11 +1648,17 @@ def compute_snap(
                 edge, acquired_point, cx, cy, world_to_pixel, threshold_px,
                 is_occluded)
             if cross is not None:
+                logger.debug(f"... to {cross.point=} ({id(cross.point)=})")
                 return cross
         if getattr(edge, "guide", False):
+            logger.debug(f"... to {on_pt=} ({id(on_pt)=})")
             return SnapResult(on_pt, "on_line", COLOR_ON_EDGE)   # a guide line
+        logger.debug(f"... to {on_pt=} ({id(on_pt)=})")
         return SnapResult(on_pt, "on_edge", COLOR_ON_EDGE,
-                          context=getattr(edge, "context", None))
+                          context=getattr(edge, "context", None),
+                          edge=edge)
+
+
 
     # 8b. Acquired-edge parallel inference. An edge the cursor hovered while
     #     drawing is held as a reference; when the draw runs parallel to it the
@@ -1641,6 +1683,7 @@ def compute_snap(
             par_cos = math.cos(math.radians(inference_angle_deg))
             if abs(QVector3D.dotProduct(draw.normalized(), ev_u)) >= par_cos:
                 locked = project_onto_line(start_point, ev_u)
+                logger.debug(f"... to {locked=} ({id(locked)=})")
                 return SnapResult(locked, "reference", COLOR_REFERENCE)
 
     # 8c. Perpendicular to an encouraged face: heading along its normal locks
@@ -1651,6 +1694,7 @@ def compute_snap(
             project_onto_line, inference_angle_deg,
         )
         if pf is not None:
+            logger.debug(f"... to {pf=} ({id(pf)=})")
             return pf
 
     # 8d. 'From point' from an encouraged point — the dotted line
@@ -1702,6 +1746,7 @@ def compute_snap(
                 threshold_px, is_occluded,
             )
             if tp is not None:
+                logger.debug(f"... to {tp.point=} ({id(tp.point)=})")
                 return tp
         if acquired_point is not None:
             # On a face, the point stays on the face (see the function).
@@ -1711,6 +1756,7 @@ def compute_snap(
                 threshold_px, is_occluded, plane_normal=on_plane,
             )
             if fp is not None:
+                logger.debug(f"... to {fp.point=} ({id(fp.point)=})")
                 return fp
             # 8e. …and level with / in line with it ACROSS this face: the
             #     axis PLANE through the point cut by the face (Rafael's
@@ -1722,7 +1768,9 @@ def compute_snap(
                     world_to_pixel, threshold_px, is_occluded,
                 )
                 if ip is not None:
+                    logger.debug(f"... to {ip.point=} ({id(ip.point)=})")
                     return ip
+
 
     # 9. Axis inference. A soft visual cue when the tool asks for nothing more.
     #    When ``magnetic_axis_deg`` is set (the Move tool), the inference is
@@ -1744,6 +1792,7 @@ def compute_snap(
             )
             if inferred is not None:
                 locked = project_onto_line(start_point, _AXIS_VECTORS[inferred])
+                logger.debug(f"... to {locked=} ({id(locked)=})")
                 return SnapResult(locked, "axis", AXIS_COLORS[inferred], axis=inferred)
         # …and the axes that one CANNOT reach, measured in pixels instead
         # (issue #31). Deliberately placed after it and only consulted when
@@ -1771,6 +1820,7 @@ def compute_snap(
                 # in at some thousands.
                 reach = (candidate_world - start_point).length()
                 if (locked - start_point).length() <= _MAX_AXIS_REACH * reach:
+                    logger.debug(f"... to {locked=} ({id(locked)=})")
                     return SnapResult(locked, "axis", AXIS_COLORS[inferred],
                                       axis=inferred)
         if allow_axis:
@@ -1778,6 +1828,7 @@ def compute_snap(
                 start_point, candidate_world, inference_angle_deg
             )
             if inferred is not None:
+                logger.debug(f"... to {candidate_world=} ({id(candidate_world)=})")
                 return SnapResult(
                     candidate_world, "axis_inference", AXIS_COLORS[inferred],
                     axis=inferred,
@@ -1786,6 +1837,8 @@ def compute_snap(
     # 10. On-face: the cursor hovers a face with nothing closer to snap to.
     #     The candidate already lies on that face's plane (the work plane).
     if face_under_cursor:
+        logger.debug(f"... [face] to {candidate_world=} ({id(candidate_world)=})")
         return SnapResult(candidate_world, "on_face", COLOR_ON_FACE)
 
+    #logger.debug(f"... [end]  to {candidate_world=} ({id(candidate_world)=})")
     return SnapResult(candidate_world, "none", COLOR_NONE)

@@ -22,6 +22,10 @@ from core.edits import build_add_edge
 from core.history import Command
 from tools.base import Tool, ToolContext
 
+import logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 class LineTool(Tool):
     name = "Line"
@@ -92,6 +96,7 @@ class LineTool(Tool):
             self.start_point = clicked
             self.chain_first_point = clicked
             self.chain_vertices = [clicked]
+            logger.debug(f"started line on {clicked=} ({id(clicked)=})")
             return
 
         if (clicked - self.start_point).length() < 1e-9:
@@ -100,12 +105,15 @@ class LineTool(Tool):
             # shows its guide and lands here — and it used to go to the
             # history as a degenerate edge and come back as a noisy
             # rollback.
+            logger.debug(f"clicked on start {clicked=}")
             return
         cmd = self._commit_edge(ctx.viewport, self.start_point, clicked)
         ctx.viewport.history.execute(cmd)
         if ctx.snap.kind == "close":
+            logger.debug(f"closed line tool {clicked=}")
             self._reset()
         else:
+            logger.debug(f"added line segment {clicked=} ({id(clicked)=})")
             self.chain_vertices.append(clicked)
             self.start_point = clicked
         ctx.viewport.update()
