@@ -23,6 +23,13 @@ MIN_DISTANCE = 0.02
 #: Ceiling: past this the model is a dot and the depth buffer is noise.
 MAX_DISTANCE = 10000.0
 
+#: How far behind the orbit target the view still reaches, in orbit
+#: distances. A fixed 10 km far plane cut a large model in half when you
+#: zoomed out to see it — the far side vanished and came back on zooming
+#: in (#340). Framing a model puts the target on it at about its size, so
+#: four distances is the whole model behind the target with room to spare.
+FAR_PER_DISTANCE = 4.0
+
 
 class OrbitCamera:
     """Camera that orbits around a target point."""
@@ -164,16 +171,22 @@ class OrbitCamera:
                 depth = QVector3D.dotProduct(rel, level)
                 shift = rel.z() * near / depth
                 m.frustum(-half_w, half_w, -half_h + shift, half_h + shift,
-                          near, self.zfar)
+                          near, self.far_plane())
                 return m
-            m.perspective(self.fov_deg, self.aspect, near, self.zfar)
+            m.perspective(self.fov_deg, self.aspect, near, self.far_plane())
         else:
             # Parallel projection — size derived from camera distance so the
             # framing matches what the user sees in perspective.
             half_h = self.distance * math.tan(math.radians(self.fov_deg) / 2.0)
             half_w = half_h * self.aspect
-            m.ortho(-half_w, half_w, -half_h, half_h, -self.zfar, self.zfar)
+            far = self.far_plane()
+            m.ortho(-half_w, half_w, -half_h, half_h, -far, far)
         return m
+
+    def far_plane(self) -> float:
+        """The far clipping distance: ``zfar`` at any working distance,
+        growing with the orbit distance when zoomed far out (#340)."""
+        return max(self.zfar, self.distance * FAR_PER_DISTANCE)
 
     # ---- Navigation ---------------------------------------------------------
     def orbit(self, dx_pixels: float, dy_pixels: float, viewport_h: int) -> None:
@@ -217,7 +230,11 @@ class OrbitCamera:
         """
         from PySide6.QtGui import QQuaternion
 
+        if not all(math.isfinite(c) for c in (pivot.x(), pivot.y(), pivot.z())):
+            self.orbit(dx_pixels, dy_pixels, viewport_h)  # about the target
+            return
         old_yaw, old_pitch = self.yaw, self.pitch
+        old_target = QVector3D(self.target)
         self.orbit(dx_pixels, dy_pixels, viewport_h)     # the angles, clamped
         d_yaw = self.yaw - old_yaw
         d_pitch = self.pitch - old_pitch
@@ -237,6 +254,10 @@ class OrbitCamera:
             rot = QQuaternion.fromAxisAndAngle(
                 axis.normalized(), math.degrees(d_pitch)) * rot_yaw
         self.target = pivot + rot.rotatedVector(self.target - pivot)
+        if not self.is_finite():
+            # A pivot so far away that the turn overflowed: keep the pose the
+            # gesture had, never a NaN one (#485).
+            self.yaw, self.pitch, self.target = old_yaw, old_pitch, old_target
 
     def pan(self, dx_pixels: float, dy_pixels: float, viewport_h: int,
             depth: float | None = None) -> None:
@@ -289,19 +310,41 @@ class OrbitCamera:
         retreats the eye by at least ``min_step`` (the viewport passes ~1 %
         of the model's size) — at 2 cm a plain 10 % step was 2 mm per
         notch, dozens of notches to see anything, so users reached for Zoom
-        Extents instead."""
+        Extents instead.
+
+        Zooming OUT has a ceiling, though: once the eye is MAX_DISTANCE
+        from the focus, or the distance is pinned there, the frame stops
+        growing. Until 0.5.7 the target kept scaling away from the focus
+        ×1.11 per notch with the distance already pinned — 125 km after a
+        hundred notches, where float32 can no longer draw the model, then
+        infinity and NaN, and a camera that refused to save (#383)."""
+        eye_before = self.eye()
+        if steps < 0 and (eye_before - focus).length() >= MAX_DISTANCE:
+            self.zoom(steps)
+            return
         factor = 0.9 ** steps
         new_distance = max(MIN_DISTANCE,
                            min(self.distance * factor, MAX_DISTANCE))
-        eye_before = self.eye()
+        if steps < 0 and self.distance > 0.0:
+            # the frame grows only as much as the distance could
+            factor = min(factor, new_distance / self.distance)
+        before = (QVector3D(self.target), self.distance)
         self.target = focus + (self.target - focus) * factor
         self.distance = new_distance
-        if steps < 0 and min_step > 0.0:
+        if steps < 0 and min_step > 0.0 and new_distance < MAX_DISTANCE:
             moved = (self.eye() - eye_before).length()
             if moved < min_step:
                 back = self.eye() - self.target
                 if back.length() > 1e-9:
                     self.target += back.normalized() * (min_step - moved)
+        if not self.is_finite():
+            self.target, self.distance = before
+
+    def is_finite(self) -> bool:
+        """Every number of the pose is a real number (no NaN, no inf)."""
+        t = self.target
+        return all(math.isfinite(v) for v in (
+            t.x(), t.y(), t.z(), self.distance, self.yaw, self.pitch))
 
     def set_aspect(self, w: int, h: int) -> None:
         self.aspect = max(w, 1) / max(h, 1)
@@ -316,6 +359,25 @@ class OrbitCamera:
         self.two_point = not self.two_point
         if self.two_point:
             self.perspective = True
+
+    #: The three projections the View toolbar's quick buttons offer.
+    PROJECTIONS = ("parallel", "perspective", "two_point")
+
+    def projection_mode(self) -> str:
+        """``"parallel"``, ``"perspective"`` or ``"two_point"`` — what the
+        camera is showing, as the quick buttons name it. ``two_point`` set
+        on a parallel camera is no two-point view, so it reads parallel."""
+        if not self.perspective:
+            return "parallel"
+        return "two_point" if self.two_point else "perspective"
+
+    def set_projection(self, mode: str) -> None:
+        """Put the camera in one of :attr:`PROJECTIONS` (an unknown name
+        is ignored). The pose — target, angles, distance — is untouched."""
+        if mode not in self.PROJECTIONS:
+            return
+        self.perspective = mode != "parallel"
+        self.two_point = mode == "two_point"
 
     # ---- Navigation presets ------------------------------------------------
     def fit_to(self, min_pt: QVector3D, max_pt: QVector3D, margin: float = 1.3) -> None:

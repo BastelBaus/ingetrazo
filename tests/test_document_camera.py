@@ -92,3 +92,26 @@ def test_the_loader_reports_progress(tmp_path):
     assert any("groups" in t.lower() for _f, t in seen)
     assert len(back.groups) == 3
     igz.load_into(Scene(), path)                      # no callback: as before
+
+
+def test_a_broken_camera_never_blocks_the_save(tmp_path):
+    # #383: a NaN in the live camera made the save refuse the whole
+    # document («invalid coordinates»), so the user's work could not be
+    # saved. The geometry is what matters; the file keeps its last view.
+    from views.main_window import MainWindow
+    win = MainWindow()
+    try:
+        cam = win.viewport.camera
+        win._saved_version = win.viewport.scene.version
+        path = tmp_path / "doc.igz"
+        win._do_save(path)
+        good = dict(win.viewport.scene.camera_home)
+        cam.target = QVector3D(float("nan"), 0.0, 0.0)
+        win._do_save(path)
+        assert win.viewport.scene.camera_home == good
+        back = Scene()
+        igz.load_into(back, path)
+        assert back.camera_home == good
+    finally:
+        win._saved_version = win.viewport.scene.version
+        win.close()

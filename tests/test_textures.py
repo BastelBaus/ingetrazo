@@ -173,6 +173,31 @@ def test_igz_packs_texture_images_into_the_document(tmp_path, monkeypatch):
     assert live["path"] == str(src)
 
 
+def test_igz_never_embeds_a_file_that_is_not_an_image(tmp_path, monkeypatch):
+    """A crafted document can name any file as a texture; saving it must not
+    copy that file into the container (e.g. an SSH key)."""
+    import json
+    import zipfile
+
+    monkeypatch.setenv("INGETRAZO_TEXTURE_CACHE", str(tmp_path / "cache"))
+    secret = tmp_path / "id_ed25519"
+    secret.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n")
+    crafted = tmp_path / "crafted.igz"
+    crafted.write_text(json.dumps({"igz_format": 1, "scene": {"edges": [],
+        "faces": [{"vertices": [[0, 0, 0], [1, 0, 0], [1, 1, 0]],
+                   "texture": {"path": str(secret), "sw": 1.0, "sh": 1.0}}]}}))
+    scene = Scene()
+    igz.load_into(scene, crafted)
+
+    out = tmp_path / "resaved.igz"
+    assert igz.save_scene(scene, out)["embedded"] == 0
+    raw = out.read_bytes()
+    if raw.startswith(b"PK"):
+        with zipfile.ZipFile(out) as zf:
+            raw = b"".join(zf.read(n) for n in zf.namelist())
+    assert b"secret" not in raw
+
+
 def test_igz_document_opens_on_another_machine(tmp_path, monkeypatch):
     # The whole point: the .igz travels alone — original image gone, texture
     # cache empty (a different computer) — and the texture is still there.

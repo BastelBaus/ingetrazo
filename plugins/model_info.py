@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
 from core import bim
 from core.i18n import tr
 from tools.base import Tool
-from core.units import fmt_area
+from core.units import fmt_area, fmt_volume
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +203,7 @@ def _stats_to_text(stats: dict) -> str:
     if s["bim_objects"]:
         lines += ["", f"--- {tr('BIM objects')} ({len(s['bim_objects'])}) ---"]
         for o in s["bim_objects"]:
-            vol = (f"{o['volume']:.3f} m³" if o["volume"] is not None
+            vol = (fmt_volume(o['volume']) if o["volume"] is not None
                    else "—")
             lines.append(f"  {o['class']}  {o['name']}: "
                          f"{fmt_area(o['area'])}, {vol}")
@@ -415,7 +415,7 @@ class ModelInfoDialog(QDialog):
             self._bim_table.setItem(i, 1, QTableWidgetItem(o["name"]))
             self._bim_table.setItem(
                 i, 2, QTableWidgetItem(f"{fmt_area(o['area'])}"))
-            vol = (f"{o['volume']:.3f} m³" if o["volume"] is not None
+            vol = (fmt_volume(o['volume']) if o["volume"] is not None
                    else tr("(not watertight)"))
             self._bim_table.setItem(i, 3, QTableWidgetItem(vol))
         self._bim_table.resizeRowsToContents()

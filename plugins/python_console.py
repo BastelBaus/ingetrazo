@@ -358,6 +358,7 @@ class PythonConsoleTool(Tool):
     """Extensions-menu entry that opens (or raises) the console."""
     name = "Python Console"
     shortcut = "Ctrl+Shift+P"
+    menu_order = 10              # after Model Info and Solid Inspector
     description = (
         "Open a Python prompt over the open document, to inspect it "
         "or script it.")

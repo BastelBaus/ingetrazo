@@ -33,6 +33,26 @@ def _key(p: QVector3D) -> tuple[float, float, float]:
             round(p.z(), _KEY_DECIMALS))
 
 
+class KeyMemo:
+    """``_key`` memoised per point OBJECT for the length of one scan. A push
+    on a 25 797-face group called ``_key`` 655 000 times (2 M ``round``) —
+    each vertex once per face and edge it belongs to. Only for a scan that
+    moves nothing: a position mutated in place keeps its object."""
+
+    __slots__ = ("_seen",)
+
+    def __init__(self) -> None:
+        self._seen: dict = {}
+
+    def __call__(self, p: QVector3D) -> tuple:
+        hit = self._seen.get(id(p))
+        if hit is not None and hit[0] is p:
+            return hit[1]
+        k = _key(p)
+        self._seen[id(p)] = (p, k)
+        return k
+
+
 def same_position(p: QVector3D, q: QVector3D) -> bool:
     """Whether two points coincide within the welding tolerance (≈ 0.1 mm)."""
     return _key(p) == _key(q)
@@ -80,22 +100,36 @@ def find_smallest_cycle_through(
     ka, kb = _key(a), _key(b)
     if ka == kb:
         return None
+    return _smallest_cycle(_cycle_adjacency(edges, ka, kb), a, b, ka, kb,
+                           max_len)
 
-    # adj[u] -> [(v_key, v_pos), ...]
+
+def _cycle_adjacency(edges, ka, kb, key=_key) -> dict:
+    """``adj[u] -> [(v_key, v_pos), …]`` of the edge graph, in edge order,
+    without an existing copy of segment ``ka``–``kb`` (the cycle would just
+    find itself, a length-2 loop a→b→a)."""
     adj: dict[tuple, list[tuple[tuple, QVector3D]]] = {}
     for edge in edges:
-        ea, eb = _key(edge.a), _key(edge.b)
+        ea, eb = key(edge.a), key(edge.b)
         if ea == eb:
             continue
-        # Skip an existing copy of the same edge, otherwise the cycle just
-        # finds itself (length-2 loop a→b→a).
         if {ea, eb} == {ka, kb}:
             continue
         adj.setdefault(ea, []).append((eb, edge.b))
         adj.setdefault(eb, []).append((ea, edge.a))
+    return adj
 
+
+def _smallest_cycle(adj, a, b, ka, kb, max_len: int = 32,
+                    skip=frozenset()):
+    """Breadth-first search from ``b`` to ``a`` over ``adj``, never entering a
+    node of ``skip`` — the same search ``adj`` built without the edges that
+    touch those nodes would make (adjacency lists keep the edge order)."""
     if ka not in adj or kb not in adj:
         return None
+    if skip and not (any(v not in skip for v, _p in adj[ka])
+                     and any(v not in skip for v, _p in adj[kb])):
+        return None             # an end with no edge left once ``skip`` goes
 
     parent: dict = {kb: None}
     parent_pos: dict = {kb: b}
@@ -107,7 +141,7 @@ def find_smallest_cycle_through(
             found = True
             break
         for v_key, v_pos in adj.get(u, ()):
-            if v_key not in parent:
+            if v_key not in parent and v_key not in skip:
                 parent[v_key] = u
                 parent_pos[v_key] = v_pos
                 q.append(v_key)
@@ -414,15 +448,23 @@ def orphaned_edges_at(
     elsewhere (only those touching the operation's vertices are considered).
     """
     vkeys = {_key(v) for v in vertices}
+    key = KeyMemo()
     face_edges: set = set()
     for f in faces:
-        face_edges.update(_loop_edges(f.vertices))
-        for hole in f.holes:
-            face_edges.update(_loop_edges(hole))
+        loops = [[key(p) for p in lp] for lp in (f.vertices, *f.holes)]
+        # Only an edge with an end in ``vkeys`` is asked about, and a face
+        # can only carry it if it has that corner: the others are skipped
+        # (exact — every face was walked before).
+        if not any(k in vkeys for lk in loops for k in lk):
+            continue
+        for lk in loops:
+            n = len(lk)
+            face_edges.update(frozenset((lk[i], lk[(i + 1) % n]))
+                              for i in range(n))
     out: list[Edge] = []
     for e in edges:
-        ek = frozenset((_key(e.a), _key(e.b)))
-        if (_key(e.a) in vkeys or _key(e.b) in vkeys) and ek not in face_edges:
+        ka, kb = key(e.a), key(e.b)
+        if (ka in vkeys or kb in vkeys) and frozenset((ka, kb)) not in face_edges:
             out.append(e)
     return out
 
@@ -487,9 +529,16 @@ def refine_loop_with_points(
     the existing vertices sitting on it makes each sub-segment carried by one
     face, so push/pull classifies (and consumes) it correctly. Returns a new loop
     with the collinear points inserted in order; the originals are untouched."""
+    import numpy as np
     out: list[QVector3D] = []
     n = len(loop)
     pts = list(points)
+    # A point on a segment's interior lies inside its box (grown by the
+    # tolerance): only those reach the exact test below, in their order. The
+    # pushed face's loop against every vertex of a 25 797-face group was
+    # ~80 000 same_position calls per push (09-10).
+    xyz = (np.array([(p.x(), p.y(), p.z()) for p in pts], dtype=np.float64)
+           if pts else np.zeros((0, 3)))
     for i in range(n):
         a = loop[i]
         b = loop[(i + 1) % n]
@@ -498,8 +547,16 @@ def refine_loop_with_points(
         length = ab.length()
         if length < tol:
             continue
+        g = 2.0 * tol + 1e-6 * max(abs(a.x()), abs(a.y()), abs(a.z()),
+                                   abs(b.x()), abs(b.y()), abs(b.z()))
+        lo = np.array([min(a.x(), b.x()), min(a.y(), b.y()),
+                       min(a.z(), b.z())]) - g
+        hi = np.array([max(a.x(), b.x()), max(a.y(), b.y()),
+                       max(a.z(), b.z())]) + g
+        near = np.flatnonzero(((xyz >= lo) & (xyz <= hi)).all(axis=1))
         on: list[tuple[float, QVector3D]] = []
-        for p in pts:
+        for j in near:
+            p = pts[j]
             if same_position(p, a) or same_position(p, b):
                 continue
             t = QVector3D.dotProduct(p - a, ab) / (length * length)
@@ -939,7 +996,8 @@ def _same_cycle(c1: list[QVector3D], c2: list[QVector3D]) -> bool:
 
 
 def find_cycles_through(
-    edges: Iterable[Edge], a: QVector3D, b: QVector3D, max_results: int = 2
+    edges: Iterable[Edge], a: QVector3D, b: QVector3D, max_results: int = 2,
+    key=None,
 ) -> list[list[QVector3D]]:
     """Up to ``max_results`` distinct minimal cycles through segment ``a``–``b``.
 
@@ -949,19 +1007,24 @@ def find_cycles_through(
     first's interior nodes, which routes the search to the other side. This is
     what stops auto-facing from creating only one of the two triangles.
     """
-    edges = list(edges)
-    first = find_smallest_cycle_through(edges, a, b)
+    # One adjacency for both searches: the second one (the other side)
+    # skips the first cycle's interior nodes instead of rebuilding the graph
+    # without them — the same search, since the lists keep the edge order.
+    # ``key`` (a KeyMemo) keys each vertex once per plan; a 38 700-edge group
+    # rounded every endpoint twice per stroke (09-10).
+    key = key or _key
+    ka, kb = _key(a), _key(b)
+    if ka == kb:
+        return []
+    adj = _cycle_adjacency(edges, ka, kb, key)
+    first = _smallest_cycle(adj, a, b, ka, kb)
     if first is None:
         return []
     cycles = [first]
     if max_results >= 2:
-        interior = {_key(v) for v in first} - {_key(a), _key(b)}
+        interior = {_key(v) for v in first} - {ka, kb}
         if interior:
-            filtered = [
-                e for e in edges
-                if _key(e.a) not in interior and _key(e.b) not in interior
-            ]
-            second = find_smallest_cycle_through(filtered, a, b)
+            second = _smallest_cycle(adj, a, b, ka, kb, skip=interior)
             if second is not None and not _same_cycle(second, first):
                 cycles.append(second)
     return cycles
@@ -1717,3 +1780,156 @@ def heal_overlapping_faces(mesh, coverage: float = 0.5, partial=None,
     return removed
 
 
+
+
+#: The defects :func:`defects_near` counts, worst first — the order a
+#: refusal names them in when a weld leaves more than one.
+DEFECT_KINDS = ("duplicate_face", "overlapping_face", "pinched_face",
+                "crossed_face", "flat_face", "zero_edge")
+
+
+def _loop_crosses_itself(loop, normal: QVector3D) -> bool:
+    """Whether two non-adjacent sides of a closed loop cross or touch, in
+    the loop's own plane — a corner dragged over the far side of its face
+    turns a quad into a bow tie."""
+    count = len(loop)
+    if count < 4:
+        return False
+    n = (normal.x(), normal.y(), normal.z())
+    ax = max(range(3), key=lambda i: abs(n[i]))
+    u, w = [i for i in range(3) if i != ax]
+    pts = []
+    for v in loop:
+        p = (v.position.x(), v.position.y(), v.position.z())
+        pts.append((p[u], p[w]))
+    eps = 1e-9
+
+    def orient(a, b, c):
+        val = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        return 0 if abs(val) < eps else (1 if val > 0 else -1)
+
+    def on_seg(a, b, c):
+        return (min(a[0], b[0]) - eps <= c[0] <= max(a[0], b[0]) + eps and
+                min(a[1], b[1]) - eps <= c[1] <= max(a[1], b[1]) + eps)
+
+    for i in range(count):
+        a, b = pts[i], pts[(i + 1) % count]
+        for j in range(i + 2, count):
+            if i == 0 and j == count - 1:
+                continue                      # the closing side: adjacent
+            c, d = pts[j], pts[(j + 1) % count]
+            o1, o2 = orient(a, b, c), orient(a, b, d)
+            o3, o4 = orient(c, d, a), orient(c, d, b)
+            if o1 != o2 and o3 != o4 and 0 not in (o1, o2, o3, o4):
+                return True
+            if ((o1 == 0 and on_seg(a, b, c)) or (o2 == 0 and on_seg(a, b, d))
+                    or (o3 == 0 and on_seg(c, d, a))
+                    or (o4 == 0 and on_seg(c, d, b))):
+                return True
+    return False
+
+
+def _coplanar_overlap(f, g) -> bool:
+    """Whether two faces lie in one plane and cover some of the same area
+    (more than a shared side or corner): one's inside reaches into the
+    other, or a side of one cuts properly across a side of the other."""
+    nf, ng = f.normal(), g.normal()
+    if abs(QVector3D.dotProduct(nf, ng)) < 1.0 - 1e-6:
+        return False
+    origin = f.loop[0].position
+    if any(abs(QVector3D.dotProduct(v.position - origin, nf)) > _SPLIT_TOLERANCE
+           for v in g.loop):
+        return False
+    for a, b in ((f, g), (g, f)):
+        inner = _interior_point(a.vertices, a.normal())
+        if (inner is not None and _point_in_face_solid(a, inner)
+                and _point_in_face_solid(b, inner)):
+            return True
+    from core.triangulate import plane_axes
+    u, w = plane_axes(nf)
+
+    def proj(v):
+        rel = v.position - origin
+        return (QVector3D.dotProduct(rel, u), QVector3D.dotProduct(rel, w))
+
+    def sides(face):
+        pts = [proj(v) for v in face.loop]
+        return [(pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts))]
+
+    def orient(a, b, c):
+        val = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        return 0 if abs(val) < 1e-9 else (1 if val > 0 else -1)
+
+    for a, b in sides(f):
+        for c, d in sides(g):
+            o1, o2 = orient(a, b, c), orient(a, b, d)
+            o3, o4 = orient(c, d, a), orient(c, d, b)
+            if 0 not in (o1, o2, o3, o4) and o1 != o2 and o3 != o4:
+                return True
+    return False
+
+
+def defects_near(vertices, area_eps: float = 1e-10) -> dict:
+    """Count the topological defects among the edges and faces that touch
+    ``vertices`` (mesh ``Vertex`` objects), by kind (:data:`DEFECT_KINDS`):
+
+    * ``duplicate_face`` — a face over the same edge cycle as another;
+    * ``overlapping_face`` — two faces in one plane covering the same area
+      (a pair counts once);
+    * ``pinched_face`` — a loop that passes twice through one vertex, or an
+      edge that borders the same face twice;
+    * ``crossed_face`` — two sides of one loop cross (a bow tie);
+    * ``flat_face`` — a face with no area left (under three distinct
+      corners, or all of them in a row);
+    * ``zero_edge`` — an edge whose ends are one point.
+
+    Edges with three or more faces are NOT a defect here: a partition
+    inside a box, or a fin on its edge, is normal surface modelling.
+
+    Local on purpose: a move checks the neighbourhood it touched before and
+    after, so a huge model pays for a few faces, and old damage elsewhere
+    never blocks an unrelated edit."""
+    counts = dict.fromkeys(DEFECT_KINDS, 0)
+    edges: dict = {}
+    faces: dict = {}
+    for v in vertices:
+        for e in v.edges:
+            edges[id(e)] = e
+            for f in e.faces:
+                faces[id(f)] = f
+    for e in edges.values():
+        if (e.v0 is e.v1 or
+                (e.v0.position - e.v1.position).lengthSquared() < 1e-18):
+            counts["zero_edge"] += 1
+        if len({id(f) for f in e.faces}) < len(e.faces):
+            counts["pinched_face"] += 1
+    seen: set = set()
+    for f in faces.values():
+        loops = [f.loop, *f.hole_loops]
+        distinct = {id(x) for x in f.loop}
+        if len(distinct) < 3 or f.area() < area_eps:
+            counts["flat_face"] += 1
+        for loop in loops:
+            if len({id(x) for x in loop}) < len(loop):
+                counts["pinched_face"] += 1
+            elif len(loop) >= 4 and _loop_crosses_itself(loop, f.normal()):
+                counts["crossed_face"] += 1
+        sig = frozenset(
+            frozenset((id(f.loop[i]), id(f.loop[(i + 1) % len(f.loop)])))
+            for i in range(len(f.loop)))
+        if sig in seen:
+            counts["duplicate_face"] += 1
+        seen.add(sig)
+    flat = [f for f in faces.values() if len({id(x) for x in f.loop}) >= 3
+            and f.area() >= area_eps]
+    for i, f in enumerate(flat):
+        for g in flat[i + 1:]:
+            if _coplanar_overlap(f, g):
+                counts["overlapping_face"] += 1
+    return counts
+
+
+def new_defects(before: dict, after: dict) -> list:
+    """The defect kinds :func:`defects_near` counts more of ``after`` than
+    ``before``, worst first."""
+    return [k for k in DEFECT_KINDS if after.get(k, 0) > before.get(k, 0)]

@@ -6,7 +6,328 @@ follow [SemVer](https://semver.org).
 
 ## [Sin publicar]
 
+### Añadido
+- **Color de acento de los iconos y las barras** (#393): en Ventana ▸
+  Preferencias ▸ General se elige el color de los detalles de los iconos y
+  del fondo de los botones bajo el ratón: naranja IngeTrazo (el de siempre,
+  por defecto), azul, verde, rojo, morado, amarillo o «Igual que el sistema»,
+  que toma el color de acento del escritorio. Se aplica al instante; la
+  selección en el visor 3D sigue en naranja.
+
+### Corregido
+- **«x5» tras copiar hace la matriz, igual que «5x»** (#542): después de
+  copiar con Mover o Rotar + Ctrl, teclear «x5» abría la herramienta Texto,
+  porque la X sola es su atajo. Justo después de una copia, mientras «3x» o
+  «/3» harían una matriz, la X va a la casilla de valores; en cualquier otro
+  momento sigue abriendo Texto. Esc justo después de copiar cierra esa
+  ventana (y la X vuelve a ser Texto) antes de quitar la selección.
+- **El Asistente IA vuelve a funcionar con OpenAI** (#517, @jb-dev-github):
+  los modelos nuevos de OpenAI rechazaban cada pedido con «HTTP 400:
+  Unsupported parameter: 'max_tokens'». Con OpenAI se manda ahora
+  `max_completion_tokens`, que aceptan todos sus modelos; Groq, Gemini,
+  OpenRouter, DeepSeek y Ollama siguen con el nombre de siempre.
+- **El STL exportado sale en milímetros** (#513, @toSvenson): un STL no
+  guarda la unidad y los programas de impresión 3D lo leen en milímetros,
+  pero IngeTrazo escribía los metros del modelo, así que una pieza de
+  15 × 25 mm entraba al laminador 1000 veces más chica. Ahora Archivo ▸
+  Exportar ▸ STL pregunta la unidad, con milímetros por defecto, y recuerda
+  la elección, igual que la importación.
+- **Un plano de sección ya no deja encajar en lo que oculta** (#384,
+  @jonson7777): solo se quitaban del snap las aristas con los dos extremos
+  en el lado cortado, así que la arista que cruza el corte —la vertical de
+  un muro cortado a media altura— seguía ahí entera, y el cursor encajaba en
+  su extremo y en su tramo ocultos. Ahora lo que el corte oculta cuenta como
+  oculto para todo punto: extremos, puntos medios, «en arista», cruces, y
+  también al pulsar aristas, vértices y grupos. Vale en todos los estilos,
+  también en Rayos X y alambre; con los cortes apagados no cambia nada.
+- **El gestor de extensiones ya no parpadea al cambiar de pestaña, instalar
+  o descargar** (#555): cada cambio entre Explorar e Instaladas reconstruía
+  todas las tarjetas, las viejas seguían pintadas un instante debajo de las
+  nuevas y cada captura se volvía a leer y escalar. Ahora cambiar de pestaña
+  solo muestra la otra página, una reconstrucción se pinta de una vez y las
+  tarjetas nacen con su imagen. Al abrirlo, la ventana ya no se queda en
+  blanco un tercio de segundo: se decodificaban todas las capturas, no solo
+  las visibles, y el catálogo recién descargado, igual al guardado, volvía a
+  reconstruir las dos páginas. En Windows, además, el gestor se abre
+  transparente y aparece en cuanto está pintado, en vez de mostrarse en
+  blanco durante la animación de apertura, y abre mucho antes: cada tarjeta
+  llevaba una docena de hojas de estilo propias, que en Windows costaban
+  24 ms por tarjeta (más de un segundo con el programa congelado); ahora
+  comparten una sola, con el mismo aspecto píxel a píxel. La causa
+  principal estaba en el botón «Repositorio» de cada tarjeta: se mostraba
+  antes de entrar en la tarjeta, y en Windows eso lo convertía un instante en
+  una ventana propia; eran 43 ventanitas que aparecían y desaparecían al
+  abrir el gestor, unos 0,8 s de los 0,9 s que tardaba.
+
+## [0.5.8] — 2026-10-12
+
+**Gestor de extensiones, unidades para todo el documento y un Navegador del
+modelo.** Las extensiones del catálogo se instalan, actualizan y desactivan
+desde el programa; el documento trabaja en metros, milímetros, imperial o a
+medida; y un árbol muestra todos los grupos y componentes. Editar dentro de
+grupos grandes y empujar en terreno es varias veces más rápido, y los modelos
+enormes abren, guardan y pesan bastante menos (formato 3: un modelo grande
+guardado con esta versión no abre en las anteriores). Además, más de cuarenta
+arreglos de herramientas, inferencias y láminas, y los nueve idiomas
+completos.
+
+### Añadido
+- **Gestor de extensiones** (Extensiones → Gestionar extensiones…, #452,
+  @kagehak): explora el catálogo de ingetrazo.com con búsqueda, etiquetas
+  y filtro de revisadas; instala, actualiza, desactiva y desinstala con un
+  clic. Cada descarga se comprueba con el SHA-256 del catálogo antes de
+  instalar nada; se ven la licencia, el repositorio y si esa versión exacta
+  fue revisada por quien mantiene IngeTrazo («Comunidad» si no). Avisa
+  cuando hace falta reiniciar y, si una extensión falla al cargar, ofrece
+  desactivarla o abrir su carpeta. Si la misma extensión ya estaba
+  instalada a mano con otro nombre de carpeta, lo detecta y ofrece apartar
+  esa copia (se renombra, no se borra) para que no se cargue dos veces.
+  Las extensiones **instaladas a mano** con la 0.5.7 o antes también se
+  gestionan: aparecen en «Instaladas», se pueden desinstalar (se apartan
+  con un punto delante del nombre, nunca se borran) y, si están en el
+  catálogo, **reemplazar por la versión del catálogo**, que desde entonces
+  se actualiza, desactiva y desinstala con normalidad.
+  Las **extensiones de ejemplo** (Niveles, Propiedades del polígono,
+  Windowizer) se instalan ahora desde el gestor, no desde un submenú propio:
+  las que están en el catálogo como cualquier otra, y Windowizer como
+  «Incluida con IngeTrazo», desde la copia que trae el programa. Así se
+  activan, desactivan y desinstalan igual que las demás, y el menú
+  Extensiones queda más corto.
+- **Navegador (el Outliner)**: una pestaña nueva de la barra
+  lateral con todos los grupos y componentes del modelo en árbol, a
+  cualquier profundidad, bajo el nombre del documento. Cada fila lleva un
+  icono por tipo (grupo, componente, imagen, texto 3D, elemento con clase
+  IFC), un ojo, un candado, su tipo (con el número de copias de un
+  componente) y su capa; clic derecho en la cabecera muestra además
+  Material, Copias y Clase IFC, y la columna de nombres se ensancha
+  arrastrando su borde (todo se recuerda). Un clic selecciona en la vista
+  y abre los grupos que lo contienen; doble clic o Intro abre el grupo;
+  Espacio oculta; F2 renombra; Esc sale un nivel; lo seleccionado en la
+  vista se encuentra en el árbol y los grupos abiertos se leen en negrita.
+  El filtro busca por nombre, tipo, clase IFC o capa y conserva la ruta
+  hasta cada resultado; el pie cuenta grupos, componentes y ocultos.
+  - **Reorganizar**: arrastrar filas sobre un grupo las mete en él,
+    soltarlas entre filas las deja junto a ellas, Tab / Mayús+Tab meten en
+    el grupo de arriba o sacan un nivel. Nada se mueve en el mundo, aunque
+    el grupo de destino esté movido o girado; los componentes conservan su
+    definición (no se mete ni se saca nada de uno).
+  - **Bloquear** (el candado): un grupo bloqueado se sigue viendo, pero no
+    se puede elegir, seleccionar ni abrir; el bloqueo se guarda en el
+    `.igz`.
+  - **Aislar** oculta todo menos lo seleccionado y lo que lo contiene;
+    **Mostrar todos los grupos** lo devuelve.
+  - **Varias filas a la vez**: llevarlas a una capa (o a una nueva),
+    pintarlas con el material activo o quitarles la pintura.
+  - **Planos de sección**: una carpeta del árbol con cada plano en uno de
+    cuatro modos — corte y cuadro, solo corte (el cuadro oculto, el modelo
+    sigue cortado), solo cuadro o apagado —, F2 para su nombre y su
+    símbolo, y el relleno del corte: el general del estilo (se enciende y
+    cambia de color desde ahí) o uno propio por plano — sólido, achurado a
+    45°, achurado cruzado o ninguno, con su color y la separación del
+    achurado escrita como cualquier medida. La fila de la carpeta lleva
+    los interruptores de Ver ▸ Planos de sección y Cortes de sección.
+  - **Planta de un grupo** (clic derecho ▸ Crear planta de este grupo…):
+    corta a la altura indicada sobre su base (1,20 m por defecto), guarda
+    una escena mirando desde arriba en paralela y, si se quiere, la pone
+    en una lámina nueva que se abre en el compositor. **Vista de un
+    corte** (clic derecho en un plano ▸ Crear vista de este corte…): lo
+    mismo mirando el corte de frente — un corte si el plano es vertical.
+  Cada cambio es un paso de deshacer. Parte del plugin Project Structure
+  de @fafecm (#87) y del alcance que escribió @roymendezcastro (#219)
+  (@canalsecuario-blip).
+- **La barra lateral del modelo, como la del compositor**: las pestañas
+  (Propiedades, BIM, Terreno, Navegador, las de las
+  extensiones) van arriba y con su nombre completo, con flechas cuando no
+  caben; se reordenan arrastrándolas, y al arrastrar una fuera de su barra
+  aparecen dos zonas en los bordes de la vista («Lado izquierdo», «Lado
+  derecho»): soltada en una, se acopla a ese lado junto a las que haya
+  (también sobre las pestañas de ese lado, o con clic derecho ▸ Mover al
+  otro lado). Arrastrando desde la parte vacía de la barra se lleva la
+  barra lateral entera, con todas sus pestañas. Cada lado se pliega con su asa: Ctrl+F5 el derecho, Ctrl+F6
+  el izquierdo; dónde queda cada pestaña se guarda con la ventana.
+  **Paneles por defecto**: un primer arranque abre Propiedades y, en la
+  pestaña siguiente, el Navegador, lo que casi todo el trabajo
+  necesita, con IA y Renderizar detrás; BIM y Terreno esperan en Ventana ▸
+  Paneles, y lo que se abre o cierra ahí se recuerda, como siempre.
+  Ventana ▸ Paneles ▸ Restablecer paneles vuelve a esa disposición de
+  fábrica. Los paneles de una extensión se abren en pestaña junto a
+  Propiedades — también uno que la extensión crea más tarde, que antes
+  quedaba oculto —, y una extensión puede pedir que el suyo empiece
+  cerrado: `app.add_panel(…, start_hidden=True)`.
+- **Pestañas a ambos lados del compositor**: Diseño, la nueva Vistas y
+  láminas, Elementos y Propiedades empiezan juntas a la derecha; se
+  reordenan arrastrándolas y pasan al lado izquierdo arrastradas allí (se
+  abre mientras se arrastra) o con clic derecho ▸ Mover al otro lado.
+  Cada lado se pliega con su asa (Ctrl+F5 y Ctrl+F6), uno que se queda
+  sin pestañas se pliega solo, la disposición se recuerda y clic derecho
+  ▸ Restablecer pestañas la devuelve a la de fábrica.
+- **Vistas y láminas, en el compositor**: una pestaña con
+  las escenas del modelo (con su miniatura) y las láminas con sus vistas.
+  Una escena arrastrada a la página queda colocada donde se suelta, a la
+  escala estándar que la hace caber en el marco (doble clic: en un hueco
+  libre), deshaciéndose con el propio compositor. Cada escena dice en qué
+  láminas está y las que no están en ninguna se ven en cursiva; una vista
+  cuya escena se borró se marca. Las láminas se abren, renombran,
+  duplican, borran y reordenan (Alt+↑/↓) desde ahí, y las seleccionadas se
+  exportan juntas a un PDF. El compositor se entera, abierto, de las
+  láminas y escenas que se crean o se deshacen desde el modelo.
+- **Extensiones**: `app.add_outliner_kind(fn)` deja que una extensión diga
+  qué son sus grupos en el navegador (tipo en la columna Tipo,
+  propiedades en su tooltip, y el filtro lo encuentra); el ejemplo
+  Windowizer muestra sus ventanas como «Window» con paños, ancho, alto y
+  marco (docs/plugins.md).
+- **Panel de unidades** (Ventana ▸ Unidades…, **Ctrl+U**, o Preferencias ▸
+  Unidades): perfil métrico, milimétrico, imperial o a medida; longitud
+  con decimales o con la fracción más chica, área y volumen por la
+  longitud o con unidad propia, ángulo y separador decimal, con vista
+  previa. Las medidas se muestran y se leen en un solo sitio, así que la
+  unidad elegida llega a todas las herramientas y cuadros (giros de Rotar,
+  Transportador y Arco, volúmenes de Info de entidad y del modelo). Se
+  guarda en el documento; los archivos de antes abren igual. Y **al
+  empezar un documento nuevo** se pregunta en qué unidades trabajar
+  (metros, milímetros, imperial o a medida), con «No mostrar al inicio»
+  (#6 de Gabriel Rodríguez, @canalsecuario-blip).
+- **Materiales recientes**: el panel Materiales guarda, bajo «Activo», los
+  seis últimos materiales con los que pintaste, el más nuevo primero. Un
+  clic vuelve a dejarlo activo tal como lo usaste (imagen con su tamaño,
+  giro y tinte, o el color; transparencia; nombre), sin buscar el mismo
+  ladrillo en la biblioteca cada vez (#263, @canalsecuario-blip).
+- **Botones Paralela / Perspectiva / Dos puntos** en la barra de vistas
+  estándar: un clic en vez de ir al menú Cámara. Siguen a la proyección
+  la cambie quien la cambie (Mayús+P, una escena, una vista guardada)
+  (#292, @canalsecuario-blip).
+- **Editar componentes con el resto apartado** (Cámara ▸ Edición de
+  componentes): **Alt+Q** oculta el resto del modelo y lo vuelve a mostrar
+  como estaba, y **Alt+W** quita de la vista y de la selección las otras
+  copias del componente que editas (#237, @canalsecuario-blip).
+- **Arcos: el número de segmentos antes de dibujar**, como los lados del
+  círculo: un número tecleado antes del primer clic fija los segmentos de
+  los arcos de dos y tres puntos, del arco por centro y del sector, y
+  «Ns» lo cambia en cualquier momento; el número se queda para los
+  siguientes arcos. El ángulo del arco por centro ya no se lee como una
+  longitud, y al redondear una esquina la casilla dice «Radio» (#290,
+  @canalsecuario-blip; #298, @pacaeiro).
+- **Reemplazar componente**: con el clic derecho, «Seleccionar ▸ Todas
+  las copias» y «Reemplazar componente…» cambian de una vez todas las
+  copias de un componente por otro (la silla provisional por la
+  definitiva), conservando su posición, giro, escala, capa y material.
+  La lista «En el modelo» de la bandeja trae miniaturas, filtro por
+  nombre, renombrar todas las copias y **Guardar en el archivo** para
+  conservar un componente aunque no quede ninguna copia colocada; y
+  «Componentes de archivo…» trae los de otro `.igz` como biblioteca. Un
+  documento con componentes guardados así los pierde si se abre en una
+  versión anterior (@canalsecuario-blip, ingetrazo-dev#4).
+- **Redondear 3D también bisela** (Mayús+F): chaflán, curva ajustable,
+  perfiles de escalones, cornisa y moldura, o uno dibujado a mano; cuatro
+  formas de medir (radio, distancia en cada cara, ancho o profundidad);
+  esquinas rellenas o en muesca; y biselar solo los vértices. Un panel
+  abajo a la izquierda reúne todos los ajustes con vista previa en vivo.
+  Con los ajustes de siempre redondea exactamente como antes
+  (@canalsecuario-blip, ingetrazo-dev#5).
+- **Edición ▸ Seleccionar nada (Ctrl+T)**, la pareja de Seleccionar todo;
+  no marca el documento como modificado (#367, @pacaeiro, #349).
+- **Mover, Rotar y Voltear muestran un + en el cursor** mientras Ctrl hace
+  una copia, como la Cinta y el Transportador con sus guías: antes solo lo
+  decía la barra de estado y se descubría después del clic si se había
+  movido el original o una copia (#262, @vicc3d).
+- **Compositor: la vista previa de la cota en cadena y desde línea base**
+  es la cota que se va a colocar (líneas de referencia, extremos y valor),
+  también recta cuando Mayús la fuerza horizontal o vertical (#351,
+  @tonfdd).
+- **El Inspector de sólidos repara**, y ahora es una pestaña de la
+  bandeja lateral (Extensiones ▸ Inspector de sólidos la trae al
+  frente), así el modelo queda a la vista: además de bordes abiertos,
+  aristas sueltas y sobreconectadas, ahora encuentra **caras internas**
+  (una cara repetida o un tabique sin marcar) y **caras invertidas** en
+  un objeto cerrado. **Reparar** y **Reparar todo** hacen, en un solo
+  paso que se deshace, lo que tiene una única respuesta: borran aristas
+  sueltas y caras repetidas, cierran los huecos de borde plano, marcan
+  los tabiques como interiores y giran hacia fuera las caras invertidas,
+  también en un grupo sin entrar en él. Un hueco que no es plano queda
+  en la lista y dice por qué. Un clic en un objeto de la lista muestra
+  su primer problema, listo para repararlo; **Resaltar problemas** los
+  pinta todos a la vez, con una leyenda de colores; **Siguiente /
+  Anterior problema** recorren sus problemas uno por uno, encuadrados y
+  pintados en pantalla con un color por tipo (también dentro de un
+  grupo), y **Reparar este problema** arregla solo ese y pasa al
+  siguiente. Con caras invertidas ya no muestra un volumen equivocado.
+
+### Cambiado
+- **Atajos nuevos**: **Ctrl+1…7** para las vistas estándar (Superior,
+  Frontal, Derecha, Isométrica, Posterior, Izquierda, Inferior: las cuatro
+  de cada día bajo la mano izquierda), **Mayús+F** para Redondear 3D (F
+  sigue siendo Equidistancia) y **Ctrl+H / Ctrl+Mayús+H** para Ocultar y
+  Mostrar todo (#258, #259, #261, @canalsecuario-blip).
+- **Empujar/Tirar: el toque de Ctrl se arma al soltar la tecla**, y la
+  barra de estado dice si deja la cara de partida, así Ctrl+Z u otro atajo
+  ya no lo cambian por el camino (#322, #345, @pacaeiro).
+- **Asistente IA con modelos locales** (#461, vídeo de revisión de
+  Rafael): el modelo de Ollama por defecto es ahora `qwen2.5-coder:7b`, un
+  modelo de código, en vez de `llama3.2`; la primera petición avisa de que
+  el servidor local está cargando el modelo y, si el elegido es pequeño,
+  sugiere uno de código. Tras **3 intentos fallidos seguidos** el
+  asistente se detiene y devuelve el control (antes reintentaba hasta 12
+  veces); «continúa» lo retoma. Nueva receta **`box()`** para cajas y
+  cubos, y el recetario pide usar `box` y `house` antes que armar a mano.
+- **Empujar responde al gesto completo**: soltar el botón después de
+  arrastrar confirma la extrusión, como en las herramientas clásicas, y el
+  ritmo clic-clic de siempre sigue intacto; Ctrl (empujar una copia) se lee
+  en el instante exacto de soltar. Cuando la distancia es demasiado pequeña,
+  el intento de confirmar —clic o soltada— avisa una vez por arrastre
+  («Empuje demasiado pequeño — arrastra más o escribe una distancia») en vez
+  de no hacer nada en silencio.
+- **La distancia sigue caliente tras confirmar**: teclear un número y Enter
+  justo después de un empuje lo sustituye — positivo mantiene el sentido,
+  negativo lo invierte — y la operación sigue ocupando un solo paso de
+  deshacer por muchos retipados, el mismo contrato que Rotar y Escalar.
+- **La línea de referencia, a la vista**: durante el arrastre, una línea
+  discontinua del color de su inferencia (verde = vértice, rojo = arista,
+  azul = cara) une el punto de referencia con la tapa que se mueve: se ve
+  por qué la distancia se detiene donde se detiene.
+- **Empujar arranca sobre la cara seleccionada**: con una sola cara
+  seleccionada, activar Push/Pull (P) la deja lista — sombreada, sin que
+  pasar el cursor por otra se la robe — y el primer clic, caiga donde
+  caiga, arranca el empuje sobre ella: el flujo clásico de preselección.
+
 ### Rendimiento
+- **Editar dentro de un grupo grande, casi 3× más rápido**: dibujar una
+  línea dentro de un grupo de 25 000 caras pasa de 1,9 s a unos 0,7 s. El
+  visor ya no vuelve a preparar las caras que la edición no tocó, ni
+  reescribe la caché de disco mientras el grupo está abierto; y el motor
+  solo busca cruces, caras partidas y duplicados entre lo que está cerca de
+  la línea. El resultado es idéntico (comprobado cara a cara).
+- **Empujar/Tirar ya no rehace planos lejos del empuje**: tras cada empuje se
+  rehacían todos los planos con alguna arista abierta del grupo — en un
+  modelo importado, cientos y lejos de donde se empujaba. Ahora solo los que
+  el empuje pudo dejar abiertos: una cara enorme de la plaza pasa de no
+  terminar en 5 minutos a unos 3, y nada lejano se recalcula.
+- **Empujar/Tirar en mallas grandes, hasta 9× más rápido**: en un grupo
+  grande que forma una sola pieza (un terreno o un modelo importado),
+  decidir qué lado de cada cara es «fuera» lanzaba cientos de miles de
+  rayos contra todos los triángulos — un empuje cualquiera podía congelar
+  IngeTrazo 3–4 minutos. Ahora cada rayo solo prueba los triángulos cerca
+  de su trayectoria (un índice por bloques, como el de Blender): 21–31 s en
+  esos casos, y el resto del empuje (aristas sueltas, cosido, cara opuesta)
+  ya no recorre todo el grupo — 1,5 s → 0,8 s en una cara normal. El
+  resultado es idéntico: misma malla, cara a cara, en 12 empujes de prueba.
+- **Editar ya no paga los paneles laterales**: la lista «En el modelo» de
+  Componentes y el Navegador se refrescaban tras cada edición, aunque
+  estuvieran plegados u ocultos (+20 ms por edición en un modelo como la
+  plaza). Ahora, ocultos, esperan a mostrarse; a la vista, se refrescan una
+  vez 300 ms después de la última edición de una ráfaga.
+- **Los modelos enormes abren 3× más rápido, guardan 3,6× más rápido y
+  pesan un tercio**: el `.igz` gana el **formato 3**. En un documento
+  grande (más de 20 000 caras y aristas) cada malla pesada guarda sus
+  puntos una sola vez, en binario dentro del mismo ZIP; la estructura
+  (grupos, capas, materiales) sigue en JSON. Con el modelo de la #158:
+  abrir 61 → 19 s y 9,7 → 4,3 GB de memoria, guardar 51 → 14 s, archivo
+  171 → 54 MB; en la plaza, guardar 2,3 → 0,9 s y abrir 1,9 → 1,1 s.
+  Comprobado malla por malla que se reabre igual que guardado en JSON
+  (vértices, aristas, caras, huecos, atributos y su orden). Los
+  documentos pequeños no cambian y siguen siendo JSON legible; los `.igz`
+  de antes abren igual. Un documento en formato 3 **no abre en versiones
+  anteriores** (avisan de que es más nuevo): actualiza antes de compartir
+  un modelo grande (@pacaeiro).
 - **Orbitar un modelo con miles de componentes es 11× más fluido**: con la
   planta industrial de la #158 (21 406 copias) cada cuadro pasaba de 1,3 s
   a 0,12 s. Las siluetas de las copias se calculan por pieza en una sola
@@ -27,6 +348,305 @@ follow [SemVer](https://semver.org).
   Con el modelo de la #158, pasar el ratón con Seleccionar pasó de colgarse
   por encima de 18 GB a 32 ms por movimiento y 11,7 GB; con Línea, 71 ms.
   Los modelos normales usan el índice de siempre.
+
+- **Pasar el cursor con Línea y arrastrar con Mover, hasta 2× más rápido
+  en modelos grandes**: la distancia a las aristas de los grupos se mide
+  solo en las celdas de pantalla cercanas al cursor, la oclusión de los
+  candidatos se pregunta por lotes y el centro de un círculo se busca en
+  el registro de la malla. En una ciudad de 331 000 caras: pasar el cursor
+  con Línea 103 → 60 ms por movimiento, arrastrar con Mover 101 → 49 ms;
+  los puntos que se enganchan son los mismos (#312, @orianbsilva).
+- **Mover un objeto muy pesado dentro de un modelo grande**: los grupos de
+  más de 8 192 triángulos se dividen en celdas, y un rayo solo prueba las
+  que cruza. Arrastrar un sofá de 107 000 triángulos en una sala de
+  306 000 caras pasó de 565 a 134 ms por paso (mediana) (#346,
+  @orianbsilva).
+- **Primera persona fluida en edificios grandes**: los sensores de pared
+  solo preguntan hasta donde alcanzan. Caminar mirando alrededor en un
+  edificio de 1,1 millones de caras pasó de 38 a 64 fotogramas por
+  segundo, sin tirones (#361, @orianbsilva).
+- **Una escena que solo mueve la cámara ya no redibuja el modelo entero** ni
+  marca el documento como modificado (~120 ms menos por escena en un
+  edificio de 1,1 millones de caras) (#360, @orianbsilva).
+- **La caja de edición de un grupo ya no hunde los fotogramas al acercar
+  mucho la vista**: sus trazos los dibuja el sombreador en vez de
+  recalcularse en cada cuadro (#247, @FG-RVT).
+- **Abrir un documento enorme ya no deja la ventana «sin responder»**: el
+  documento se lee en segundo plano mientras avanza la barra de progreso,
+  el dibujo se prepara bajo el mismo cuadro («Preparando el dibujo…») y el
+  zoom ya no da tirones entre giro y giro de la rueda. Los documentos
+  grandes se guardan compactos y se comprimen más rápido: en la plaza,
+  guardar 2,3 → 1,6 s solo por esto (#158, @pacaeiro).
+
+### Corregido
+- **Trazar siguiendo un eje hasta una arista vuelve a caer justo en la
+  arista**: con el eje enganchado, el punto «En arista» quedaba callado y
+  una línea o un arco de un borde al opuesto de una cara terminaba 1–2 mm
+  dentro o fuera según el píxel, dejando aristas sueltas. Ahora se ofrece el
+  cruce del eje con la arista bajo el cursor: el punto sigue sobre el eje y
+  cae exacto en la arista, como en la 0.5.7.
+- **Activar MultiView (u otra extensión que mueva el visor) cerraba
+  IngeTrazo**: al pasar el visor a otra ventana, Qt recrea su contexto de
+  OpenGL, y los objetos que el visor crea al primer uso (planos de imagen,
+  vista previa, fantasma de los grupos, búferes de escena y de profundidad,
+  componentes instanciados) seguían apuntando al contexto viejo. Ahora se
+  rehacen en el contexto nuevo.
+- **Un atajo con Mayús y un número se guarda como tal** (#493,
+  @pacaeiro): Mayús+5 quedaba como «Mayús+%», el símbolo que escribe la
+  tecla, en vez de la tecla pulsada.
+- **Esc durante un arrastre en el compositor lo deshace** (#504,
+  @pacaeiro): una vista (o cualquier elemento) arrastrada o redimensionada
+  vuelve a donde estaba al pulsar Esc, sin dejar paso de deshacer; antes
+  se quedaba donde la pillaba la tecla.
+- **Importar un GLB hecho con IngeTrazo lo trae a su tamaño**: un modelo
+  de más de 40 m se tomaba por uno en pulgadas y llegaba encogido 39
+  veces. Los GLB de otros programas siguen adivinando la unidad.
+- **El panel de la cota de radio del compositor vuelve a funcionar**:
+  cambiar el radio, el tipo, el texto o el estilo de una cota de radio o
+  diámetro ya colocada daba un error y no hacía nada.
+- **Las herramientas que vienen con IngeTrazo conservan sus atajos**: con
+  la carga diferida de extensiones, una extensión instalada (Point Cloud
+  Splat) le quitaba `Ctrl+Shift+P` a la consola de Python. Ahora los atajos
+  de lo incluido se reservan antes de cargar ninguna extensión.
+- **Empujar/Tirar muestra el resultado real mientras arrastras** (#434,
+  #458, PR #487 de @FG-RVT): al empujar o tirar parte de una cara partida,
+  las caras viejas ya no tapan el hueco ni quedan aristas cruzando las
+  paredes nuevas; la vista previa es la operación misma, aplicada una vez al
+  empezar y estirada en cada cuadro, y al soltar se confirma sin repetir el
+  cálculo.
+- **Orbitar con mucho zoom ya no pierde la cámara ni impide guardar** (#485,
+  #383): muy de cerca, el punto «bajo el cursor» que lee el búfer de
+  profundidad salía a distancias absurdas por falta de precisión; la órbita
+  giraba alrededor de él, la vista se iba al fondo y, con la cámara en NaN,
+  el guardado se negaba («Where: scene › camera › target[0]»). Ahora ese
+  punto se descarta, la órbita nunca deja una cámara inválida y, si la
+  vista llegara a romperse, el modelo se guarda igual: el archivo abre
+  encuadrado en el modelo.
+- **Exportar a GLB, DAE u OBJ fallaba con cualquier modelo hecho por la
+  IA** («too many values to unpack», #462, @blackflash73): el recetario y
+  el puente MCP pintan con `(r, g, b, 1.0)` y los exportadores leían tres
+  canales. Ahora toman el RGB (la transparencia sigue viniendo de la
+  opacidad).
+- **El asistente IA ya no rompe la vista al añadir dos veces un grupo**:
+  si el modelo hacía `groups.append(...)` con lo que `house()` o `box()`
+  ya habían agregado, el grupo quedaba repetido o, con `house()`, entraba
+  una lista y el visor dejaba de dibujar.
+- **Una textura grande ya tiene su miniatura en Materiales** (#460,
+  @tomlai-git): una imagen de más de 256 MB descomprimida se pintaba bien
+  pero no aparecía en el panel, porque la miniatura la leía con el límite
+  de memoria de Qt, que el visor sí quita.
+- **El Flatpak arranca más rápido** (#440, @cdblue999): el programa corre
+  desde su código en una carpeta de solo lectura, así que Python lo volvía
+  a compilar entero en cada arranque. Ahora se compila una vez al construir
+  el paquete (en un portátil antiguo, importar el programa pasa de 1,2 a
+  0,26 s).
+- **La ventana aparece antes aunque tengas muchas extensiones** (#440):
+  las extensiones se cargan justo después de que la ventana está en
+  pantalla, no antes (con 26 extensiones instaladas, el arranque esperaba
+  2,5 s por ellas). Sus paneles y barras vuelven a su sitio guardado, y un
+  archivo abierto con doble clic se abre después de cargarlas, por si una
+  extensión es la que sabe abrirlo.
+- **Información de entidad muestra el área en las unidades del documento**
+  (#432, #406, @dns-0): el área de una cara salía siempre en m², aunque el
+  modelo estuviera en pies y pulgadas; ahora sale en ft² (y en las demás
+  unidades, la que corresponda). El área en planta de un polígono de
+  terreno también, sin perder las hectáreas.
+- **Empujar ya no salta a referencias que no se ven** (#270, #384,
+  @FG-RVT): la distancia que Empujar/Tirar deduce a mitad de arrastre leía
+  cualquier vértice o arista bajo el cursor, aunque estuviera tapado por
+  geometría o cortado por un plano de sección, y la extrusión se lanzaba de
+  pronto a un canto invisible al cruzarlo. Ahora aplica las mismas dos
+  reglas que los enganches: lo que la sección corta no se pulsa ni se
+  encaja, y lo que hay delante esconde; en Rayos X y alambre todo sigue
+  siendo referencia.
+- **Renombrar un elemento en la lista de Elementos del compositor ya no
+  puede cerrar el programa**: la lista se reconstruía dentro del propio
+  cambio de la fila y borraba la fila que Qt seguía editando.
+- **Una vista de lámina cuya escena ya no existe lo dice**: antes dibujaba
+  la cámara del modelo (una axonométrica sin corte, donde iba una planta
+  o un corte), sin explicar por qué; ahora muestra un aviso con el nombre
+  de la escena que falta, en pantalla y al exportar.
+- **El relleno de sección cubre solo la geometría cortada**: antes era un
+  truco por píxel (el plano se pintaba donde se veía la cara trasera de
+  algo) y rellenaba también caras sueltas vistas por detrás, caras
+  invertidas o la figura 2D, aunque el plano no las cortara. Ahora se
+  construye con el propio corte, como el relleno vectorial de las láminas:
+  los segmentos que el plano saca de cada sólido se unen en contornos
+  cerrados, los huecos quedan huecos (un muro hueco, el interior de una
+  habitación) y una superficie abierta no se rellena. Mientras se arrastra
+  un plano, las líneas de corte se mueven en vivo y el relleno aparece al
+  soltarlo.
+- **Renombrar una escena ya no deja huérfanas sus vistas en las láminas**:
+  el marco de una lámina guarda el nombre de la escena que muestra, y al
+  renombrarla (en el panel Escenas o en el Navegador) ahora
+  sus vistas la siguen; antes se quedaban apuntando a un nombre que ya no
+  existía.
+- **Alejar mucho con la rueda dejaba el modelo sin poder guardarse**:
+  pasado el límite de 10 km, el punto al que mira la cámara seguía
+  alejándose un 11 % por paso; la vista se volvía lenta y blanca y al
+  final la cámara tomaba un valor inválido que el guardado rechazaba.
+  Ahora el zoom se detiene en el límite, la cámara nunca toma un valor
+  inválido y, si lo tuviera, el guardado conserva la última vista buena
+  (#383, probablemente también #242).
+- **Al alejar un modelo grande desaparecía su parte del fondo** y volvía
+  al acercar: el visor no dibujaba nada a más de 10 km del ojo. El límite
+  lejano crece ahora con la distancia de la cámara; a distancias normales
+  no cambia nada (#340).
+- **Invertir caras dentro de un grupo no se veía** hasta borrar la cara y
+  deshacer: la cara sí se invertía, pero el visor seguía dibujando el
+  grupo como estaba, porque invertir no cambia ni el número de caras ni
+  sus coordenadas, que es lo que el visor vigilaba. Ahora se ve al
+  instante, también al deshacer (#197, @fafecm, @joejivaros).
+- **Las preferencias de General se perdían al reiniciar**: el tema volvía
+  siempre a oscuro, y si habías desactivado el autoguardado o la copia
+  `.bak`, o cambiado el intervalo, los pasos de deshacer o el servidor
+  gráfico, volvían a su valor por defecto. Se guardaban bien, pero se
+  buscaban con un nombre que Qt solo reconoce dentro de la misma sesión.
+  Ahora se leen también los valores que ya guardaste con versiones
+  anteriores (#266, diagnosticado por @parampreetss).
+- **Una cara suelta delante de un grupo no se podía seleccionar**: el
+  clic se lo llevaba el grupo de detrás (una caja dentro de un componente
+  cóncavo, una pieza suelta delante de un mueble agrupado). Ahora gana lo
+  que se ve, también con el clic derecho, que ya no cambia la selección
+  por el grupo de detrás ni quita «Crear grupo» del menú; igual en Mover y
+  en el Borrador (#276, #363, #378).
+
+- **Un sólido nuevo salía con la cara de abajo invertida si en el modelo
+  había otra pieza abierta** (un cubo al que le borraste una cara): la
+  corrección de orientación miraba si TODO el modelo estaba cerrado, así
+  que una sola pieza abierta la apagaba para todos; agrupar el cubo
+  abierto lo «arreglaba» y explotarlo lo volvía a romper. Ahora se decide
+  por cada sólido. Por prudencia, en un modelo con piezas abiertas una
+  corrección solo se queda si deja el sólido más coherente que antes
+  (probado con la plaza: corrige cuatro sólidos y deja intacto un quinto
+  que habría estropeado) (#230, @Rainjalin).
+- **Restar un tercer sólido a un muro con dos puertas fallaba** con «Ese
+  sólido tiene un fallo que la operación no puede leer»: con dos huecos
+  alineados, la cara del muro se triangula con una arista larga que pasa
+  por las esquinas de los dos huecos, lo que para dibujar está bien pero
+  la operación de sólidos no lo acepta. Ahora, solo cuando la operación lo
+  rechaza, esos triángulos se parten en esas esquinas y se reintenta; lo
+  que ya funcionaba se procesa exactamente igual (#227, @fafecm).
+- **En Windows, «Ir a la ubicación» del panel Terreno cerraba la
+  aplicación** sin aviso (en algunos equipos con gráfica AMD): el visor
+  arrancaba la conexión de red para descargar el mapa base desde dentro
+  del dibujado de OpenGL. Ahora las descargas empiezan justo después; las
+  teselas ya guardadas en el disco se siguen leyendo al momento, así que
+  las láminas y las exportaciones no salen sin mapa (#327, diagnosticado
+  por @timwelchnz; arreglo de @PINYOPATTANAWASANPORN).
+- **Rehacer con Ctrl+Shift+Z no funcionaba en Linux (KDE y GNOME)**, y
+  Ctrl+Y no estaba: el atajo de fábrica salía repetido («Ctrl+Shift+Z;
+  Ctrl+Shift+Z»), porque la tecla estándar de Rehacer de esos escritorios
+  ya es Ctrl+Shift+Z, y una tecla repetida no responde. Ahora Rehacer
+  lleva Ctrl+Y y Ctrl+Shift+Z en todos los sistemas (#313, diagnosticado
+  por @RaphaelNunes10).
+- **Importar un archivo de atajos podía dejar teclas muertas**: si el
+  archivo daba la misma tecla a dos comandos (Z para la herramienta Zoom y
+  para Zoom a la selección, al copiar los atajos de otro programa), ninguno
+  respondía. Ahora la tecla se queda con el primero y el aviso de la
+  importación dice cuáles se quitaron (#323, @tomlai-git).
+- **Las medidas del rectángulo con coma y espacio no se leían** y el
+  rectángulo salía del tamaño del cursor: en `1 3/8", 1 3/16"` o
+  `1220, 2440` la coma se tomaba por decimal (las pulgadas mixtas siempre
+  llevan un espacio). Ahora una coma junto a un espacio, o tras una marca
+  o una unidad, separa las dos medidas; `2,5` sigue siendo 2,5. Y se leen
+  las comillas tipográficas que pone el Mac (`”`, `’`) y las fracciones de
+  un solo carácter (`⅜`, `½`), que antes ni entraban en la casilla (#189,
+  @smcardle, @Loonster83).
+- **El Texto 3D pedía la altura y la extrusión en metros** aunque el
+  documento estuviera en milímetros: ahora las casillas muestran y leen
+  la unidad del documento (mm, cm, m, pulgadas o pies), con el panel de
+  unidades (#287, @ea2ehc).
+- **Copiar con Mover+Ctrl una pieza entera no dividía las caras donde
+  caía**: las aristas de una cara copiada (la tapa de una tabla bajada
+  1 cm, o una matriz de copias con `4/`) no partían la pared sobre la que
+  quedaban, mientras una línea dibujada ahí sí. Ahora se planifican como
+  las de la herramienta Línea, una vez pegadas las caras copiadas, sin
+  duplicarlas (#379, visto en la reseña de @Jrobredo3D).
+- **Bajar una arista sobre otra dejaba vértices dobles**: al hacer una
+  rampa con Mover, cada esquina caía sobre otra pero quedaban dos vértices
+  en el mismo punto, con una cara sin área que hacía fallar Crear grupo y
+  Crear componente. Ahora las esquinas se funden y queda un sólido limpio
+  (#341, @pacaeiro).
+- **Ctrl+Z cambiaba en silencio el modo Ctrl** del Transportador (guías),
+  Escalar (desde el centro) y Rectángulo (desde el centro), igual que el
+  de copia en Mover, Rotar y Voltear: un Ctrl que resulta ser parte de un
+  atajo ya no cuenta (#342, @pacaeiro; #262, @vicc3d).
+- **Deshacer dejaba aristas sueltas**: al deshacer una cara añadida (la
+  copia de un giro o de un movimiento, un pegado) quedaba su contorno; ahora
+  se van también las aristas y esquinas que trajo (#355, @pacaeiro).
+- **Una esquina limpia se anunciaba como «Intersección»** en vez de
+  «Extremo» a unos píxeles de ella; era el mismo punto con otro nombre
+  (#357, diagnosticado por @kellytait).
+- **Al mover una arista, «Desde el punto» le ganaba al eje**: tras pausar
+  en la esquina de partida, arrastrar por el eje rojo decía «Desde el
+  punto» todo el camino y desplazaba el punto unos centímetros del cursor
+  (#368, @pacaeiro).
+- **El GLB conserva la estructura del modelo**: cada grupo y componente
+  sale como un objeto con su nombre y su posición, anidado como en el
+  modelo, y las copias de un componente comparten una sola malla (en la
+  plaza el archivo pasa de 24,4 a 19,5 MB). Antes todo salía fundido en
+  un único objeto «IngeTrazo» (#304, @arthurarquitetoamb). Las figuras
+  de escala ya no se pierden: salen de pie mirando a la vista Frontal y
+  sin espejar, también dentro de un grupo, donde salían cortadas y
+  espejadas. Con algo seleccionado, Exportar ▸ glTF/GLB pregunta si se
+  exporta todo o solo la selección (#353, @SPMech). Y un color guardado
+  con transparencia ya no impide exportar el archivo entero. El COLLADA
+  (.dae) sigue saliendo en una sola pieza.
+- **Exportar a COLLADA, glTF/GLB, OBJ o STL podía incluir triángulos sin
+  área**, que otros programas rechazan (una puerta entera por 56 de 3 884);
+  ya no se escriben y la superficie exportada no cambia (#314,
+  @ales-limon).
+- **No se podía teclear «16s»** para los segmentos de un círculo o un arco:
+  la «s» nunca llegaba a la casilla de medidas (#252, Discussion #267,
+  Arthur031221).
+- **El cuentagotas no actualizaba la muestra «Activo»** del panel
+  Materiales (#47, #264, @canalsecuario-blip).
+- **Voltear no hacía nada con un grupo formado por otros grupos** (un
+  mueble con sus piezas agrupadas): la herramienta medía la caja del grupo
+  solo con su malla propia, que en ese caso está vacía, así que no había
+  planos que elegir. Ahora mide también las piezas de dentro; voltear una
+  copia (Ctrl) también las lleva (#380).
+- **El resaltado de una cara dentro de un componente se dibujaba lejos de
+  la pieza** en un componente colocado y luego explotado (#246,
+  @felixriestra).
+
+- **Una extensión que construye sus herramientas en `setup(app)` no
+  cargaba**: el cargador intentaba crear cada herramienta por su cuenta,
+  sin argumentos, y si pedía alguno descartaba la extensión entera, panel
+  incluido. Ahora esas herramientas se dejan a la extensión (planArq, de
+  José Castro Basso).
+
+### Seguridad
+- **Un `.igz` manipulado podía meter un archivo privado en el siguiente
+  guardado o exportación**, nombrándolo como textura (por ejemplo, una
+  clave SSH): solo se guardan o copian archivos que de verdad son imágenes
+  (@vicc3d).
+- **Un servidor de biblioteca en línea comprometido podía escribir fuera de
+  su caché** (por ejemplo, un complemento que se cargaría al arrancar): los
+  nombres de modelo que no son nombres simples se rechazan (@vicc3d).
+- **Una página web abierta en el mismo equipo podía enviar órdenes al
+  puente de IA**, incluida la ejecución de código, mientras estaba
+  encendido: el puente cierra la conexión en la primera línea que no es una
+  orden suya (#335, @WatchmanReeves).
+
+### Traducciones
+- **Francés** (#295, @YannFR81) y **alemán** (#365, @PESI3D), completados
+  con las frases añadidas después.
+- **Los nueve idiomas, completos**: chino, italiano, indonesio, polaco y
+  portugués reciben también todas las frases nuevas de esta versión.
+- **El español habla de «tú» en todo el programa** y recupera las tildes
+  que faltaban (#352, @kant).
+
+### Para desarrolladores
+- **La suite rápida pasa en Windows** (fuentes para la plataforma
+  offscreen, lecturas en UTF-8, una ruta POSIX) (#288, @orianbsilva).
+- **`scripts/bench_interaction.py`**: un banco que mide lo que siente la
+  mano en el ratón (cada evento hasta que su fotograma está en pantalla),
+  con mediana y p95 por gesto (#308, @orianbsilva).
+- Interruptores para diagnosticar: `INGETRAZO_NO_SNAP_FAST=1`,
+  `INGETRAZO_SCENE_ALWAYS_BUMP=1` e `INGETRAZO_NO_WALK_REACH=1` devuelven
+  el comportamiento anterior de cada optimización (@orianbsilva).
 
 ## [0.5.7] — 2026-09-30
 
@@ -114,6 +734,7 @@ pequeños que llegaron por correo y por GitHub.
   local (#130).
 
 ### Corregido
+- **El compositor de láminas acotaba en metros aunque el documento estuviera en pies** (#403): una cota, una cota de radio o diámetro y una cota de nivel nuevas nacen en la unidad y la precisión del documento. Cada una guarda la suya; cambiar el documento después no reescribe las que ya están en la lámina. La cota de nivel muestra y edita Nivel y Datum en esa unidad (pies y pulgadas se editan en pies decimales; el texto de la lámina sigue en forma de carpintero). Una lámina vieja, sin unidad guardada, sigue leyendo «+0.15».
 - **Renderizar con Blender no generaba imagen en el Flatpak** («Python file
   … could not be opened»), ni en el AppImage con el Blender de Flathub: el
   script de render ahora viaja junto al trabajo, en una carpeta que Blender

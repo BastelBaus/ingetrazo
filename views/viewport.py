@@ -59,6 +59,20 @@ _NO_INSTANCING = os.environ.get("INGETRAZO_NO_INSTANCING", "") == "1"
 # set to 1 to draw every paint on both sides like before — a diagnostic,
 # and the escape hatch should a driver misbehave with front culling.
 _NO_BACK_TINT = os.environ.get("INGETRAZO_NO_BACK_TINT", "") == "1"
+# Kill-switch for the snap engine's shortcuts (edge grid, occlusion in
+# batches, centre lookup through the registry): set to 1 to run every hover
+# the way it ran before — one pass over all group edges, one ray per
+# candidate, the rounded-position table. A diagnostic, and the escape hatch
+# should a snap ever land somewhere it did not before.
+_NO_SNAP_FAST = os.environ.get("INGETRAZO_NO_SNAP_FAST", "") == "1"
+# Kill-switch for the pick index's span grid: set to 1 to keep one span per
+# chunk however big, as before (a ray that meets the box of a 107 k-triangle
+# group then tests all of its triangles).
+_NO_SPAN_GRID = os.environ.get("INGETRAZO_NO_SPAN_GRID", "") == "1"
+#: A chunk with more triangles than this is split into grid cells for the
+#: ray prefilter (_split_chunk_spans); ~4 096 triangles a cell.
+_SPAN_GRID_MIN = 8192
+_SPAN_CELL_TRIS = 4096
 _perf_file = None
 
 
@@ -113,11 +127,12 @@ from core.history import EraseSelectionCommand, History
 from core.scene import Scene
 from core.style import DEFAULT_BACK_COLOR, effective_back_color
 from core.materials import material_sig as _material_sig
-from core.snap import SnapResult, _AXIS_VECTORS, compute_snap
+from core.snap import SnapResult, _AXIS_VECTORS
 from core.texture import face_uv_axes
 from core.triangulate import plane_axes
 from tools.base import Tool, ToolContext
 from tools.select import selection_mode
+from core.inference import InferenceEngine
 
 
 class _HoverEvent:
@@ -243,6 +258,69 @@ SHADER_DIR = app_root() / "resources" / "shaders"
 _LOOSE_SNAP_CAP = 3000
 
 
+def _split_chunk_spans(chunk, depth=0, force=False):
+    """``(v0, e1, e2, tri_ent, cells)`` of a chunk for the pick index. For a
+    chunk of more than ``_SPAN_GRID_MIN`` triangles: the triangles reordered
+    by the cell of their centroid in a grid over the chunk (cells per axis
+    in proportion to its extent there, ~``_SPAN_CELL_TRIS`` a cell), and
+    ``cells = [(bbox, start, count)]``, one per non-empty cell, each box
+    tight around its triangles; a cell that still holds over twice the
+    target (triangles cluster) is binned again on its own, up to three
+    levels. Otherwise ``cells = None`` and the arrays as they are. Cached on
+    the chunk by its revision.
+
+    One span per chunk made every ray that met the box of a big group run
+    Möller–Trumbore over all of it: a 107 k-triangle sofa, 2.6 ms a ray,
+    ~100 rays a hover with Line (snap occlusion), 300 ms a Move step on a
+    306 k-face room. The order of the triangles inside the index is free
+    (each carries its entity), so the answer does not change."""
+    v0, e1, e2, te = chunk["v0"], chunk["e1"], chunk["e2"], chunk["tri_ent"]
+    n = len(v0)
+    if _NO_SPAN_GRID or (n <= _SPAN_GRID_MIN and not force):
+        return v0, e1, e2, te, None
+    memo = chunk.get("_span_grid") if not force else None
+    if memo is not None and memo[0] == (chunk.get("rev"), n):
+        return memo[1]
+    import numpy as np
+    cen = v0 + (e1 + e2) / 3.0                                  # centroids
+    lo = cen.min(axis=0)
+    span = np.maximum(cen.max(axis=0) - lo, 1e-9)
+    # Cells per axis in proportion to the extent on it; the weights multiply
+    # to 1, so their product stays near the target count.
+    w = span / np.exp(np.log(span).mean())
+    per_axis = np.maximum(
+        1, np.round((n / _SPAN_CELL_TRIS) ** (1.0 / 3.0) * w)).astype(np.int64)
+    cell = np.minimum(((cen - lo) * (per_axis / span)).astype(np.int64),
+                      per_axis - 1)
+    key = (cell[:, 0] * per_axis[1] + cell[:, 1]) * per_axis[2] + cell[:, 2]
+    order = np.argsort(key, kind="stable")
+    key = key[order]
+    v0p = np.ascontiguousarray(v0[order])
+    e1p = np.ascontiguousarray(e1[order])
+    e2p = np.ascontiguousarray(e2[order])
+    tep = np.ascontiguousarray(te[order])
+    starts = np.flatnonzero(np.r_[True, key[1:] != key[:-1]])
+    ends = np.r_[starts[1:], len(key)]
+    cells = []
+    for s0, s1 in zip(starts.tolist(), ends.tolist()):
+        if s1 - s0 > 2 * _SPAN_CELL_TRIS and depth < 3:
+            sv0, se1, se2, ste, sub = _split_chunk_spans(
+                {"v0": v0p[s0:s1], "e1": e1p[s0:s1], "e2": e2p[s0:s1],
+                 "tri_ent": tep[s0:s1]}, depth + 1, force=True)
+            # The sub-grid is a permutation of this range: write it back.
+            v0p[s0:s1], e1p[s0:s1], e2p[s0:s1], tep[s0:s1] = sv0, se1, se2, ste
+            cells += [(bb, s0 + a, c) for bb, a, c in sub]
+            continue
+        pts = np.concatenate([v0p[s0:s1], v0p[s0:s1] + e1p[s0:s1],
+                              v0p[s0:s1] + e2p[s0:s1]])
+        cells.append(((tuple(pts.min(axis=0).tolist()),
+                       tuple(pts.max(axis=0).tolist())), s0, s1 - s0))
+    out = (v0p, e1p, e2p, tep, cells)
+    if not force:
+        chunk["_span_grid"] = ((chunk.get("rev"), n), out)
+    return out
+
+
 def _ray_aabb_span(o, d, lo, hi):
     """``(t_in, t_out)`` of the forward ray (t >= 0) through the AABB, or
     ``None`` if it misses. Plain floats."""
@@ -263,11 +341,11 @@ def _ray_aabb_span(o, d, lo, hi):
     return tmin, tmax
 
 
-def _ray_aabb(o, d, lo, hi) -> bool:
-    """Slab test: does the forward ray (t >= 0) touch the AABB? Plain
-    floats — the pick prefilter tests ~tens of chunk boxes per ray."""
+def _ray_aabb(o, d, lo, hi, reach=float("inf")) -> bool:
+    """Slab test: does the forward ray (``0 <= t <= reach``) touch the AABB?
+    Plain floats — the pick prefilter tests ~tens of chunk boxes per ray."""
     tmin = 0.0
-    tmax = float("inf")
+    tmax = reach
     for i in range(3):
         di = d[i]
         if -1e-12 < di < 1e-12:
@@ -389,6 +467,12 @@ def _load_edit_rest_mode() -> str:
     return mode if mode in EDIT_REST_MODES else "fade"
 
 
+def _load_hide_similar() -> bool:
+    from PySide6.QtCore import QSettings
+    return str(QSettings().value("display/hide_similar_components",
+                                 "0")) == "1"
+
+
 def _load_invert_wheel() -> bool:
     from PySide6.QtCore import QSettings
     return str(QSettings().value("nav/invert_wheel", "0")) != "0"
@@ -457,32 +541,30 @@ def _axes_vertices(spacing: float, pos_len: float = 1.0e5):
     return coords, spans
 
 
-def _box_dash_vertices(corners, spacing: float):
+def _box_edge_vertices(corners):
     """The twelve edges of a box (``corners`` in ``oriented_box_corners``
-    order) as world-space dashes for the GL pass — so the part behind the
+    order) as world-space LINES for the GL pass — so the part behind the
     geometry is hidden like any line, the way guides are (issue #23). The
     edit box used to be painted in the QPainter overlay, which has no depth:
-    inside a cube its back edges showed through the faces (Marco, 23-09)."""
+    inside a cube its back edges showed through the faces (Marco, 23-09).
+
+    Whole edges, not dashes: the pattern is the shader's (u_stipple 4,
+    measured in window pixels, like Back Edges). Tessellating dashes here
+    sized them by camera distance, and the count scaled as
+    edge_length/(0.012·distance) — zooming into a large open group pushed
+    it past a million segments rebuilt and re-uploaded EVERY frame (the
+    «viewport dies when I zoom in close» report: 5.8 s/frame at 5 cm on a
+    50 m box)."""
     coords = array("f")
-    spacing = max(spacing, 1e-4)
-    dash = spacing * 0.5
     for i in range(8):
         for bit in (1, 2, 4):
             j = i | bit
             if j == i:
                 continue
             a, b = corners[i], corners[j]
-            d = b - a
-            length = d.length()
-            if length < 1e-9:
+            if (b - a).length() < 1e-9:
                 continue
-            u = d / length
-            t = 0.0
-            while t < length:
-                t1 = min(t + dash, length)
-                p, q = a + u * t, a + u * t1
-                coords.extend([p.x(), p.y(), p.z(), q.x(), q.y(), q.z()])
-                t += spacing
+            coords.extend([a.x(), a.y(), a.z(), b.x(), b.y(), b.z()])
     return coords
 
 
@@ -615,36 +697,12 @@ def _point_to_segment_distance_2d(p, a, b) -> float:
 
 # ---- Viewport --------------------------------------------------------------
 
-_IMPERIAL_UNITS = {"in": 0.0254, '"': 0.0254, "ft": 0.3048, "'": 0.3048}
-_METRIC_UNITS = {"": 1.0, "m": 1.0, "cm": 0.01, "mm": 0.001}
-
-
 def _parse_number(tok: str):
     """``2``, ``2.5``, ``.5``, ``3/4`` (a fraction), ``1-1/2`` (a mixed
-    number, the hyphen form) → float, else None."""
-    m = re.fullmatch(r"(?:(\d+)-)?(\d+\.?\d*|\.\d+)(?:/(\d+\.?\d*))?", tok)
-    if m is None:
-        return None
-    v = float(m.group(2))
-    if m.group(3):
-        d = float(m.group(3))
-        if d == 0:
-            return None
-        v /= d
-    elif m.group(1):
-        return None                      # "1-2" without a fraction: not ours
-    if m.group(1):
-        v += float(m.group(1))
-    # A number too long for a float comes back as inf, and inf − inf is
-    # NaN a few steps later: a coordinate no tool can recover from (#185).
-    # So does a finite one too big for the geometry's float32 coordinates
-    # (1e34 overflows them): nothing typed in a model is ever that large.
-    return v if math.isfinite(v) and abs(v) <= _MAX_TYPED else None
-
-
-#: The largest number the value box takes (in whatever unit it is typed):
-#: a UTM northing is ~1e7 m, a kilometre in millimetres 1e6.
-_MAX_TYPED = 1e9
+    number, the hyphen form) → float, else None — ``core.units`` reads it,
+    refusing a number too long for a float or too big for a model (#185)."""
+    from core.units import _number
+    return _number(tok)
 
 
 def _is_chord(modifiers) -> bool:
@@ -658,64 +716,45 @@ def _is_chord(modifiers) -> bool:
 
 def _merge_mixed_numbers(fields: list) -> list:
     """The usual ``1 1/2"``: a whole number followed by a fraction field is
-    ONE mixed number, not two fields — joined with the hyphen form."""
+    ONE mixed number, not two fields — joined with the hyphen form. And a
+    feet field followed by inches that carry their mark is ONE length, the
+    way it is written: ``5' 3 1/2"`` → ``5'3-1/2"`` (a 5 ft × 3 in
+    rectangle is typed ``5';3"``)."""
     out = []
     i = 0
     while i < len(fields):
         f = fields[i]
         nxt = fields[i + 1] if i + 1 < len(fields) else None
         if (nxt is not None
-                and re.fullmatch(r"-?\d+(?:'\d*)?", f)
+                and re.fullmatch(r"-?\d+(?:'-?\d*)?", f)
                 and re.fullmatch(r"\d+/\d+(?:mm|cm|m|in|ft|\"|')?", nxt.lower())):
             # 1 1/2" → 1-1/2"; 1'6 1/2" → 1'6-1/2"; 1' 1/2" → 1'1/2"
-            joint = "" if f.endswith("'") else "-"
+            joint = "" if f.endswith(("'", "-")) else "-"
             out.append(f"{f}{joint}{nxt}")
             i += 2
             continue
         out.append(f)
         i += 1
-    return out
+    joined = []
+    for f in out:
+        if (joined and re.fullmatch(r"-?[\d./-]+'", joined[-1])
+                and re.fullmatch(r"[\d./-]+(?:\"|in)", f.lower())):
+            joined[-1] += f
+        else:
+            joined.append(f)
+    return joined
 
 
 def _parse_length_field(field: str):
     """One typed length in metres: metric or imperial, the usual forms.
 
-    ``2`` (metres) · ``30cm`` · ``1500mm`` · ``2"`` / ``2in`` · ``1'`` /
-    ``1ft`` · ``1'6"`` · ``3/4"`` · ``1'3/4"``. A leading minus is kept.
-    Returns None when the field is not a length."""
-    f = field.strip().lower()
-    sign = 1.0
-    if f.startswith("-"):
-        sign, f = -1.0, f[1:]
-    if not f:
-        return None
-    # feet-and-inches: <feet>'<inches>" (inches optional, may be a fraction)
-    m = re.fullmatch(r"([^'\"]+)'([^'\"]*)\"?", f)
-    if m is not None and m.group(2):
-        # 1'6 1/2" arrives from the buffer merge as 1'6-1/2"
-        feet = _parse_number(m.group(1))
-        inches = _parse_number(m.group(2))
-        if feet is None or inches is None:
-            return None
-        return sign * (feet * 0.3048 + inches * 0.0254)
-    m = re.fullmatch(r"(.+?)(mm|cm|m|in|ft|\"|')?", f)
-    if m is None:
-        return None
-    num = _parse_number(m.group(1))
-    if num is None:
-        return None
-    unit = m.group(2) or ""
-    if unit == "":
-        # No unit typed: the model's (issue #33) — 2 is 2 m in a metric
-        # document, 2 mm in a millimetre one.
-        from core.units import bare_number_scale
-        return sign * num * bare_number_scale()
-    scale = _METRIC_UNITS.get(unit)
-    if scale is None:
-        scale = _IMPERIAL_UNITS.get(unit)
-    if scale is None:
-        return None
-    return sign * num * scale
+    ``2`` (the document's unit, issue #33) · ``30cm`` · ``1500mm`` ·
+    ``1m20`` · ``2"`` / ``2in`` · ``1'`` / ``1ft`` · ``1'6"`` · ``3/4"`` ·
+    ``1'3/4"``. A leading minus is kept. Returns None when the field is not
+    a length. The reading itself lives in ``core.units.parse``, the one
+    every length field shares."""
+    from core.units import parse_length_field
+    return parse_length_field(field)
 
 
 class _AltWatch(QObject):
@@ -795,6 +834,41 @@ class _AltWatch(QObject):
         return False
 
 
+def _face_geometry(f, memo, triangulate):
+    """``(key, normal, area, triangles, centroid)`` of a mesh face, from
+    ``memo`` when every corner (holes included) is exactly where it was
+    (``memo`` None: computed, not remembered).
+    Triangles are ``((x, y, z), …)`` float tuples — copies, never the live
+    vertex positions, which edits move in place."""
+    loop = [v.position for v in f.loop]
+    holes = [[v.position for v in h] for h in f.hole_loops]
+    if memo is None:
+        key = None                  # a closed group: nothing to remember
+    else:
+        key = (tuple((p.x(), p.y(), p.z()) for p in loop),
+               tuple(tuple((p.x(), p.y(), p.z()) for p in h) for h in holes))
+        hit = memo.get(id(f))
+        if hit is not None and hit[0] == key:
+            return hit
+    if len(loop) < 3:
+        geom = (key, QVector3D(0.0, 0.0, 1.0), 0.0, [], None, {}, (), None)
+    else:
+        n_raw = f._newell()
+        ln = n_raw.length()
+        normal = n_raw / ln if ln > 1e-9 else QVector3D(0.0, 0.0, 1.0)
+        tris = [tuple((t.x(), t.y(), t.z()) for t in tri)
+                for tri in triangulate(loop, holes, normal)]
+        c = f.centroid()
+        flat = tuple(x for tri in tris for corner in tri for x in corner)
+        props = ((normal.x(), normal.y(), normal.z()), (c.x(), c.y(), c.z()))
+        # 5: shaded colour per base colour · 6: triangles as 9 floats each
+        # · 7: the soft-edge silhouette props (normal, centroid)
+        geom = (key, normal, 0.5 * ln, tris, c, {}, flat, props)
+    if memo is not None:
+        memo[id(f)] = geom
+    return geom
+
+
 class Viewport(QOpenGLWidget):
     """OpenGL viewport with orbital camera, grid, XYZ axes, tools and snapping."""
 
@@ -808,6 +882,10 @@ class Viewport(QOpenGLWidget):
     tilesChanged = Signal()
     # UTM coordinate under the cursor, for the status bar readout (Track G).
     coordinateChanged = Signal(str)
+    # The camera's projection changed ("parallel" / "perspective" /
+    # "two_point"), whoever changed it — the View toolbar's quick buttons
+    # follow it.
+    projectionChanged = Signal(str)
 
     # Soft warm white painted on faces with no material colour — like the matte
     # cardstock of an architecture model (a near-white default).
@@ -890,9 +968,13 @@ class Viewport(QOpenGLWidget):
         from core import units as _units
         _units.bind_scene(self.scene)   # readouts format in the model's units
         self.history = History(self.scene)
+        # Snapping inference state (hover / acquired edges and points,
+        # the encouraged points, the axis and reference locks, the last
+        # snap) gathered in its own collaborator. The delegating
+        # properties further down keep the old attribute names reading
+        # and writing through to it.
+        self.inference = InferenceEngine(self)
         self.active_tool: Optional[Tool] = None
-        self.axis_lock: Optional[str] = None  # None | "x" | "y" | "z"
-        self.last_snap: Optional[SnapResult] = None
         # Extensions' overlays and snap providers (views.extension_api).
         self._ext_overlays: list = []
         self._ext_snap_providers: list = []
@@ -901,9 +983,6 @@ class Viewport(QOpenGLWidget):
         # place it under the cursor.
         self.clipboard: Optional[dict] = None
 
-        # Reference-edge state (Down arrow → parallel / perpendicular).
-        self.reference_edge = None
-        self.reference_mode: Optional[str] = None  # None | "parallel" | "perpendicular"
         # Linear-inference toggle (Alt): "all" | "off" | "parallel_perp".
         self.linear_inference_mode = "all"
         #: A bare Alt is down and nothing else has happened since — the tap
@@ -911,34 +990,6 @@ class Viewport(QOpenGLWidget):
         self._alt_tap = False
         self._alt_down = False
         _AltWatch.watch(self)
-        # Sticky inference lock (Shift): (direction, color) captured from the
-        # active inference, held until Shift is released.
-        self._shift_lock: Optional[tuple] = None
-        self._hover_edge = None  # last edge under cursor (candidate for capture)
-        # Center inference: the centre of the last circle or arc
-        # the cursor visited (its edge, or a face it bounds), kept as a
-        # reference until another circle takes its place or the tool
-        # changes — «me marca un punto verde en el centro del círculo…
-        # esto me sirve para dibujar, acotar, mover» (Marco, 2026-09-11).
-        # ``(centre, radius, key)``.
-        self._center_ref = None
-        # Edge/corner/face hovered while drawing, held as soft references
-        # ("from point" / "through point" / "perpendicular to face"
-        # acquisition). Cleared when no segment is in progress.
-        self._acquired_edge = None
-        self._acquired_point = None
-        self._acquired_face_normal = None
-        # Encouraged points: the last two points the cursor
-        # PAUSED on (a corner, a circle's centre). The 'from point' dotted
-        # line runs from them — from both at once where their axis lines
-        # cross. Pausing, not merely crossing: sweeping over a vertex on the
-        # way somewhere else must not steal the reference.
-        self._encouraged: list = []
-        self._dwell_point: Optional[QVector3D] = None
-        self._dwell_timer = QTimer(self)
-        self._dwell_timer.setSingleShot(True)
-        self._dwell_timer.setInterval(self.ENCOURAGE_MS)
-        self._dwell_timer.timeout.connect(self._encourage_dwelt)
         self._last_mouse_pos: Optional[QPointF] = None
 
         # Pixel radius for point snaps (endpoint, origin, close). 12 px felt
@@ -1011,6 +1062,7 @@ class Viewport(QOpenGLWidget):
         # entirely — on a heavy import that is also the fastest, since a
         # hidden group never reaches the VBOs. See `edit_rest_mode`.
         self._edit_rest_mode = _load_edit_rest_mode()
+        self.scene.hide_similar_components = _load_hide_similar()
         self._invert_wheel = _load_invert_wheel()
         self._invert_orbit_y = _load_invert_orbit_y()
         self._msaa = _load_msaa()
@@ -1018,6 +1070,10 @@ class Viewport(QOpenGLWidget):
         # Hover highlight (Select tool). Not version-tracked — it changes with
         # the cursor, not with scene mutations — so it's uploaded per paint.
         self._hover_entity = None  # None | Edge | Face under the cursor
+        #: The placement a hovered face is reached THROUGH (a part inside a
+        #: component): its matrix puts the face's own coordinates in the
+        #: world. ``None`` for a loose face, which is already there.
+        self._hover_placement = None
         self._last_double = None   # (timestamp, pos) of the last double-click
         self._hover_faces_vao = None
         self._hover_faces_vbo = None
@@ -1099,6 +1155,12 @@ class Viewport(QOpenGLWidget):
         # running app); GL textures are cached per tile, keyed by (source, x,y,z).
         self._tile_fetcher = None
         self._tile_textures: dict = {}
+        # A paint must only draw.  In particular, creating Qt's native HTTPS
+        # backend while an OpenGL context is current crashed in ntdll on an
+        # AMD Windows driver (#327).  Missing tiles schedule one event-loop
+        # callback; that callback starts the network work after paintGL has
+        # returned and the context is no longer inside a driver callback.
+        self._tile_requests_scheduled = False
         self._last_coordinate = ""      # so the label only repaints on change
         self._tile_quad_vao = None
         self._tile_quad_vbo = None
@@ -1130,6 +1192,12 @@ class Viewport(QOpenGLWidget):
 
     # ---- GL lifecycle -------------------------------------------------------
     def initializeGL(self) -> None:
+        # initializeGL re-runs when Qt recreates the context — the widget
+        # moved to another window, which is what MultiView does to put the
+        # viewport in its grid. Everything below is rebuilt; what the frame
+        # makes lazily must be forgotten too, or it is bound in a context it
+        # does not belong to (segfault in _draw_image_planes, 10-10).
+        self._forget_context_objects()
         self._gl = QOpenGLFunctions(self.context())
         self._gl.initializeOpenGLFunctions()
         # Who is drawing: the GPU driver or a software rasteriser. Recorded
@@ -1341,9 +1409,20 @@ class Viewport(QOpenGLWidget):
         from core import axes as _axes
         _axes.sync(getattr(self.scene, "drawing_frame", None))
 
+    def _sync_projection(self) -> None:
+        """Tell the quick buttons when the projection changed. Scenes,
+        saved views, the geo path and the composer all set the camera's
+        fields directly, so the check runs on every paint: whatever set
+        it, the next frame shows it and the buttons follow."""
+        mode = self.camera.projection_mode()
+        if mode != getattr(self, "_shown_projection", None):
+            self._shown_projection = mode
+            self.projectionChanged.emit(mode)
+
     def paintGL(self) -> None:
         self._tick = getattr(self, "_tick", 0) + 1     # a new epoch memo
         self._sync_axes()
+        self._sync_projection()
         if self._gl is None or self._program is None:
             return
         _pt0 = _time_mod.perf_counter() if _PERF else 0.0
@@ -1888,7 +1967,8 @@ class Viewport(QOpenGLWidget):
                 # Offset, Follow Me...) wears the same dots as a selected
                 # one, so every tool points at a face the same way. An
                 # already selected face is skipped: it shows its dots.
-                hover_count = self._upload_hover_face(hovered)
+                hover_count = self._upload_hover_face(
+                    hovered, self._hover_placement)
                 if hover_count > 0:
                     front, back = self._selection_dot_colors(hovered)
                     self._set_color(*front, 1.0)
@@ -1967,21 +2047,36 @@ class Viewport(QOpenGLWidget):
 
         # The dashed box of the group being edited, depth-tested like the
         # guides (it shares their buffer): the part behind the geometry is
-        # hidden instead of showing through it.
+        # hidden instead of showing through it. The dashes live in the
+        # shader (u_stipple 4): twelve solid edges at any zoom, not a
+        # per-frame tessellation whose count scaled with 1/distance.
         box = (self._edit_group_box_corners()
                if self.plano_style is None and self.style_override is None
                else None)
         if box is not None:
-            dist = max(float(self.camera.distance), 1e-3)
-            data = _box_dash_vertices(box, dist * 0.012).tobytes()
+            data = _box_edge_vertices(box).tobytes()
             if data:
                 self._guides_vbo.bind()
                 self._guides_vbo.allocate(data, len(data))
                 self._guides_vbo.release()
                 self._guides_vao.bind()
+                # Dash size in framebuffer pixels for visual parity with
+                # the old world-space dashes: their 0.006·distance length
+                # spanned 0.003/tan(fov/2) of the viewport height — a
+                # screen fraction, independent of zoom (perspective frames
+                # the target at 2·distance·tan(fov/2); parallel sizes its
+                # height from the same product). w/h are framebuffer
+                # pixels, which is what gl_FragCoord measures.
+                fov = math.radians(float(self.camera.fov_deg))
+                dash = min(20.0, max(3.0, 0.003 * h / math.tan(fov / 2.0)))
+                self._program.setUniformValue(self._loc_viewport_px,
+                                              QVector2D(float(w), float(h)))
+                self._program.setUniformValue1f(self._loc_dash_px, dash)
+                self._program.setUniformValue(self._loc_stipple, 4)
                 self._gl.glDepthMask(GL_FALSE)
                 self._set_color(90 / 255, 110 / 255, 140 / 255, 1.0)
                 self._gl.glDrawArrays(GL_LINES, 0, len(data) // 12)
+                self._program.setUniformValue(self._loc_stipple, 0)
                 self._gl.glDepthMask(GL_TRUE)
                 self._guides_vao.release()
 
@@ -2387,6 +2482,8 @@ class Viewport(QOpenGLWidget):
                        # @pacaeiro).
                        bool(getattr(sc, "show_hidden_objects", False)),
                        bool(getattr(sc, "show_hidden_geometry", False)),
+                       # Hide Similar Components drops placements too.
+                       bool(getattr(sc, "hide_similar_components", False)),
                        tuple((ly.name, ly.visible, ly.locked) for ly in sc.layers)]
 
         loose = sc.mesh
@@ -2534,6 +2631,38 @@ class Viewport(QOpenGLWidget):
 
         walk(group, getattr(group, "xform", None), hidden=bool(group.hidden))
         return out
+
+    def prepare_drawing(self, progress=None) -> None:
+        """Build the drawing data of every group and prototype now, with
+        ``progress(fraction, text)`` called a few times a second — what the
+        first paint would otherwise do in one go: 55 s on a model of 21 406
+        placements, long enough for the desktop to call IngeTrazo «not
+        responding» (Marco, 01-10, #158). Pure NumPy, no GL needed."""
+        import time
+        from core.group import effective_material
+        groups = self._placements()
+        n = max(1, len(groups))
+        last = time.monotonic()
+        done: set = set()
+        for i, g in enumerate(groups):
+            if getattr(g, "billboard", False):
+                continue
+            try:
+                if getattr(g, "xform", None) is not None:
+                    key = (id(g.mesh), _material_sig(effective_material(g)))
+                    if key not in done:
+                        done.add(key)
+                        self._proto_base_chunk(g.mesh, effective_material(g))
+                    if not self._instanced_eligible(g):
+                        self._group_chunk(g)
+                else:
+                    self._group_chunk(g)
+            except Exception:                  # noqa: BLE001 - paint retries
+                pass
+            now = time.monotonic()
+            if progress is not None and now - last > 0.25:
+                progress(i / n, "Preparing the drawing…")
+                last = now
 
     def _placement_bbox(self, g):
         """World AABB of an instanced placement from its PROTOTYPE's local
@@ -3398,6 +3527,65 @@ class Viewport(QOpenGLWidget):
             self.tilesChanged.emit()
             self.update()
 
+    def _disk_cached_tile(self, source, x, y, z):
+        """Tile ``(x, y, z)`` of ``source`` from the on-disk cache, or None.
+        The same cache the fetcher fills, read without the fetcher: safe
+        inside paintGL, where the fetcher's network manager must not be
+        created (#327)."""
+        if z < 0 or z > source.max_zoom:
+            return None
+        if self._tile_fetcher is not None:
+            cache = self._tile_fetcher.cache
+        else:
+            cache = getattr(self, "_tile_disk_cache", None)
+            if cache is None:
+                from georef.tiles import TileCache, default_cache_dir
+                cache = self._tile_disk_cache = TileCache(default_cache_dir())
+        data = cache.get(source.id, x, y, z)
+        if data is None:
+            return None
+        from PySide6.QtCore import QByteArray
+        from PySide6.QtGui import QImage
+        img = QImage()
+        return img if img.loadFromData(QByteArray(data)) else None
+
+    def _schedule_tile_requests(self) -> None:
+        """Start missing tile requests after the current GL paint returns."""
+        if self._tile_requests_scheduled:
+            return
+        self._tile_requests_scheduled = True
+        QTimer.singleShot(0, self._request_missing_tiles)
+
+    def _request_missing_tiles(self) -> None:
+        """Fetch the current layer's missing images outside ``paintGL``.
+
+        Cache hits are copied into the layer immediately and repaint once;
+        network misses are delivered later by :meth:`_on_tile_ready`.
+        Reading the current scene here also makes a callback queued just before
+        a source/location change harmless.
+        """
+        self._tile_requests_scheduled = False
+        layer = getattr(self.scene, "tile_layer", None)
+        datum = getattr(self.scene, "georef", None)
+        if layer is None or datum is None or not getattr(layer, "visible", False):
+            return
+        try:
+            tiles = layer.flat_tiles(datum)
+        except Exception:
+            return
+        fetcher = self._ensure_tile_fetcher()
+        cached = False
+        for x, y in tiles:
+            key = (x, y, layer.zoom)
+            if key in layer.images:
+                continue
+            image = fetcher.request(layer.source, x, y, layer.zoom)
+            if image is not None:
+                layer.images[key] = image
+                cached = True
+        if cached:
+            self.update()
+
     #: Per-document caches keyed by ``id()`` of the document's groups,
     #: meshes and placements — the render/pick chunks and what hangs off
     #: them. Nothing but the document boundary makes them all stale at once.
@@ -3474,6 +3662,26 @@ class Viewport(QOpenGLWidget):
         cache.clear()
         self.update()
 
+    #: GL objects the frame creates on first use, outside initializeGL —
+    #: dropped (not destroyed: their context is gone) when it re-runs.
+    _LAZY_GL = ("_img_vao", "_img_vbo",
+                "_pv_edges_vao", "_pv_edges_vbo", "_pv_vcol_vao",
+                "_pv_vcol_vbo", "_pv_tex_vao", "_pv_tex_vbo",
+                "_ghost_edges_vao", "_ghost_edges_vbo", "_ghost_vcol_vao",
+                "_ghost_vcol_vbo", "_ghost_tex_vao", "_ghost_tex_vbo",
+                "_depth_fbo", "_scene_fbo", "_shadow_fbo", "_depth_snap")
+
+    def _forget_context_objects(self) -> None:
+        """Forget every lazily made GL object (see ``_LAZY_GL``) and the
+        per-prototype draw entries (their VAOs and buffers): the next frame
+        makes them again in the current context."""
+        for name in self._LAZY_GL:
+            if getattr(self, name, None) is not None:
+                setattr(self, name, None)
+        self._fbo_size = (0, 0)
+        if getattr(self, "_proto_draw", None):
+            self._proto_draw = {}
+
     def release_gl_textures(self) -> None:
         """Free every GL texture while the context can still take them back.
 
@@ -3544,10 +3752,16 @@ class Viewport(QOpenGLWidget):
             return self._tile_textures[key]
         img = layer.images.get((x, y, z))
         if img is None:
-            # Cache hit returns the image synchronously; a miss returns None and
-            # starts an async download (see _on_tile_ready).
-            img = self._ensure_tile_fetcher().request(layer.source, x, y, z)
+            # A tile already on disk is read now — a file, no network — so a
+            # sheet frame or an export, drawn once, still gets every cached
+            # tile. Only a DOWNLOAD waits: QtNetwork must not start (the
+            # fetcher builds its network manager on first use) inside
+            # paintGL. On Windows/AMD that crashed in ntdll while the GL
+            # driver callback was active (#327). The queued callback runs
+            # when this paint has returned.
+            img = self._disk_cached_tile(layer.source, x, y, z)
             if img is None:
+                self._schedule_tile_requests()
                 return None
             layer.images[(x, y, z)] = img
         if self._tex_budget <= 0:
@@ -5513,15 +5727,27 @@ class Viewport(QOpenGLWidget):
                 self._gl.glDrawArrays(GL_TRIANGLES, 0, len(a))
             self._program.setUniformValue(self._loc_use_tex, 1)
 
-    def _upload_hover_face(self, face: Face) -> int:
-        """Triangulate ``face`` into the hover-faces VBO. Returns vertex count."""
+    @staticmethod
+    def _hover_face_data(face: Face, placement=None) -> array:
+        """The hover marking's triangles, in WORLD coordinates.
+
+        A face inside a component is stored in its part's OWN coordinates;
+        ``placement`` (from :meth:`pick_face_placement`) carries the matrix
+        that puts it where it is drawn. Without it the marking sat at the
+        part's unplaced, assembled position: metres away from a component
+        that had been placed and exploded."""
+        m = getattr(placement, "xform", None)
         data = array("f")
-        for t0, t1, t2 in face.triangulate():
-            data.extend([
-                t0.x(), t0.y(), t0.z(),
-                t1.x(), t1.y(), t1.z(),
-                t2.x(), t2.y(), t2.z(),
-            ])
+        for tri in face.triangulate():
+            if m is not None:
+                tri = [m.map(p) for p in tri]
+            for p in tri:
+                data.extend([p.x(), p.y(), p.z()])
+        return data
+
+    def _upload_hover_face(self, face: Face, placement=None) -> int:
+        """Triangulate ``face`` into the hover-faces VBO. Returns vertex count."""
+        data = self._hover_face_data(face, placement)
         self._hover_faces_vbo.bind()
         if data:
             raw = data.tobytes()
@@ -5849,12 +6075,16 @@ class Viewport(QOpenGLWidget):
         self._hover_edges_vbo.release()
         return len(data) // 3
 
-    def set_hover(self, entity) -> None:
+    def set_hover(self, entity, placement=None) -> None:
         """Set the entity (edge/face) highlighted under the cursor and repaint
-        if it changed. ``None`` clears the highlight."""
-        if entity is self._hover_entity:
+        if it changed. ``None`` clears the highlight. ``placement`` is the
+        component placement a face inside a component was picked through
+        (see :meth:`pick_face_placement`): it is what puts the marking on the
+        part."""
+        if entity is self._hover_entity and placement is self._hover_placement:
             return
         self._hover_entity = entity
+        self._hover_placement = placement
         self.update()
 
     def flash_status(self, text: str, msec: int = 2500) -> None:
@@ -6415,6 +6645,8 @@ class Viewport(QOpenGLWidget):
             return
         selection = self.scene.selection
         for sp in planes:
+            if getattr(sp, "hidden", False):
+                continue                    # its frame is off; a cut stays
             corners = self.section_plane_frame(sp)
             px = []
             ok = True
@@ -6498,6 +6730,8 @@ class Viewport(QOpenGLWidget):
             return None
         best, best_d = None, self.pick_threshold_px
         for sp in planes:
+            if getattr(sp, "hidden", False):
+                continue
             corners = self.section_plane_frame(sp)
             for i in range(4):
                 seg = self._clip_segment_front(corners[i],
@@ -6521,7 +6755,6 @@ class Viewport(QOpenGLWidget):
         sp = self.scene.active_section()
         if sp is None:
             return None
-        import numpy as np
         n, o = sp.normal, sp.point
         key = (self.scene.version, round(n.x(), 9), round(n.y(), 9),
                round(n.z(), 9), round(o.x(), 6), round(o.y(), 6),
@@ -6530,102 +6763,126 @@ class Viewport(QOpenGLWidget):
         if cached is not None and cached[0] == key:
             return cached[1]
         idx = self._pick_flat(self._pick_index(near="all"))
+        from core.section import cut_chords
         segs = None
         if idx.tri_v0 is not None and len(idx.tri_v0):
-            nv = np.array([n.x(), n.y(), n.z()], dtype=np.float64)
-            c = float(np.dot(nv, [o.x(), o.y(), o.z()]))
-            p0 = idx.tri_v0
-            p1 = idx.tri_v0 + idx.tri_e1
-            p2 = idx.tri_v0 + idx.tri_e2
-            vis = idx.ent_vis[idx.tri_ent]
-            d0 = p0 @ nv - c
-            d1 = p1 @ nv - c
-            d2 = p2 @ nv - c
-            pts = []
-            for (a, b, da, db) in ((p0, p1, d0, d1), (p1, p2, d1, d2),
-                                   (p2, p0, d2, d0)):
-                cross = (da * db) < 0
-                t = np.zeros(len(da))
-                np.divide(da, da - db, out=t, where=cross)
-                pts.append((cross, a + (b - a) * t[:, None]))
-            two = (pts[0][0].astype(np.int8) + pts[1][0] + pts[2][0]) == 2
-            two &= vis
-            if two.any():
-                acc = np.zeros((int(two.sum()), 2, 3))
-                slot = np.zeros(int(two.sum()), dtype=np.int64)
-                for cross, p in pts:
-                    m = cross[two]
-                    where = np.where(m)[0]
-                    acc[where, np.minimum(slot[where], 1)] = p[two][m]
-                    slot[where] += 1
-                segs = acc.astype(np.float32)
+            segs = cut_chords(idx.tri_v0, idx.tri_e1, idx.tri_e2, n, o,
+                              idx.ent_vis[idx.tri_ent])
         self._section_cut_cache = (key, segs)
         return segs
 
+    def _section_fill_tris(self):
+        """The fill's triangles for the active cut, cached with the cut
+        segments they come from (same scene version, same plane pose)."""
+        import numpy as np
+        segs = self._section_cut_segments()
+        cached = getattr(self, "_section_fill_cache", None)
+        if cached is not None and (cached[0] is segs or (
+                segs is not None and cached[0] is not None
+                and cached[0].shape == segs.shape
+                and np.array_equal(cached[0], segs))):
+            # A selection click moves the scene version, not the cut.
+            self._section_fill_cache = (segs, cached[1])
+            return cached[1]
+        # Chaining the rings costs a fraction of a second on a model with
+        # thousands of cut solids — nothing once, too much per frame while
+        # a plane is dragged. A cut that keeps changing shows its lines
+        # live and its fill once it rests for a moment.
+        import time as _t
+        now = _t.monotonic()
+        last = getattr(self, "_section_fill_changed", 0.0)
+        self._section_fill_changed = now
+        if cached is not None and now - last < 0.15:
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(200, self.update)
+            return None
+        from core.section import fill_triangles
+        tris = fill_triangles(segs, self.scene.active_section().normal)
+        self._section_fill_cache = (segs, tris)
+        self._section_hatch_cache = {}
+        return tris
+
+    def _section_hatch(self, spacing: float, cross: bool):
+        """The hatch lines of the cut whose fill is cached, per (spacing,
+        cross) — computed once, while the cut stays the same."""
+        cached = getattr(self, "_section_fill_cache", None)
+        if cached is None:
+            return None
+        memo = getattr(self, "_section_hatch_cache", None)
+        if memo is None:
+            memo = self._section_hatch_cache = {}
+        key = (round(spacing, 9), bool(cross))
+        if key not in memo:
+            from core.section import hatch_segments
+            memo[key] = hatch_segments(
+                cached[0], self.scene.active_section().normal, spacing,
+                cross)
+        return memo[key]
+
     def _draw_section_fill(self, mode, style) -> None:
-        """Section Fill: paint the areas where the active cut
-        slices THROUGH a solid. Per-pixel GL capping — wherever the visible
-        surface is a BACK face, the eye is looking at the inside of a solid
-        opened by the clip, so the plane fills it. Open (non-watertight)
-        surfaces can leak the fill, the classic troubleshoot
-        case. Lives in the style (style.section_fill)."""
+        """Section Fill: paint what the active cut slices out of solids —
+        and only that. The outlines come from the cut itself: the chords the
+        plane takes out of the visible triangles, chained into closed rings
+        with their holes (core.section.fill_triangles), the same rule the
+        sheet composer's poché follows. An open surface gives no closed
+        ring and stays unfilled.
+
+        It used to be a per-pixel trick — fill the plane wherever a BACK
+        face was the visible surface — which also painted faces seen from
+        behind that the plane does not cut at all (a lone face, a flipped
+        one, a 2D cutout): the fill showed where there was no section.
+        Lives in the style (style.section_fill)."""
         if getattr(self, "_clip_vec", None) is None:
-            return
-        if not getattr(style, "section_fill", True):
             return
         if mode in ("wireframe", "xray"):
             return
         sp = self.scene.active_section()
         if sp is None:
             return
-        # Pass 1 — stencil the pixels whose visible surface is a back face.
-        self._gl.glStencilMask(0xFF)
-        self._gl.glClear(GL_STENCIL_BUFFER_BIT)
-        self._gl.glEnable(GL_STENCIL_TEST)
-        self._gl.glStencilFunc(GL_ALWAYS, 1, 0xFF)
-        self._gl.glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE)
-        self._gl.glColorMask(False, False, False, False)
-        self._gl.glDepthMask(GL_FALSE)
-        self._gl.glEnable(GL_CULL_FACE)
-        self._gl.glCullFace(GL_FRONT)          # rasterize BACK faces only
-        if self._faces_count > 0:
-            self._faces_vao.bind()
-            self._gl.glDrawArrays(GL_TRIANGLES, 0, self._faces_count)
-            self._faces_vao.release()
-        if self._tex_faces_count > 0:
-            self._tex_faces_vao.bind()
-            self._gl.glDrawArrays(GL_TRIANGLES, 0, self._tex_faces_count)
-            self._tex_faces_vao.release()
-        self._draw_instanced_raw()   # instanced components join the stencil
-        self._gl.glDisable(GL_CULL_FACE)
-        self._gl.glColorMask(True, True, True, True)
-        self._gl.glDepthMask(GL_TRUE)
-        # Pass 2 — the plane quad, only through the stencil, nudged a hair
-        # behind so the thick cut lines drawn later win the depth test.
-        self._gl.glStencilFunc(GL_EQUAL, 1, 0xFF)
-        self._gl.glStencilMask(0x00)
+        # The plane's own fill over the style's (the style's switch is the
+        # master): solid, hatched, cross-hatched or none, in its colour.
+        from core.section import effective_fill
+        pattern, fc, spacing = effective_fill(sp, style)
+        if pattern == "none":
+            return
+        tris = self._section_fill_tris()
+        if tris is None or not len(tris):
+            return
+        # The fill lies IN the plane, which clips: unclipped while it
+        # draws, nudged a hair behind so the thick cut lines drawn later
+        # win the depth test.
         self._set_section_clip(False)
-        import numpy as np
-        corners = self.section_plane_frame(sp)
-        c = [np.array([q.x(), q.y(), q.z()], dtype=np.float32)
-             for q in corners]
-        tris = np.concatenate([c[0], c[1], c[2], c[0], c[2], c[3]])
-        raw = tris.astype(np.float32).tobytes()
+        raw = tris.reshape(-1).astype("float32").tobytes()
         self._section_vbo.bind()
         self._section_vbo.allocate(raw, len(raw))
         self._section_vbo.release()
-        fc = getattr(style, "section_fill_color", (0.35, 0.37, 0.41))
+        # A hatched cut sits on a pale ground of its own colour, so the
+        # inside of the solid never shows between the lines.
+        base = (fc if pattern == "solid"
+                else tuple(c + (1.0 - c) * 0.78 for c in fc[:3]))
         self._gl.glEnable(GL_POLYGON_OFFSET_FILL)
         self._gl.glPolygonOffset(2.0, 2.0)
-        self._set_color(fc[0], fc[1], fc[2], 1.0)
+        self._set_color(base[0], base[1], base[2], 1.0)
         self._program.setUniformValue(
-            self._loc_back_color, QVector4D(fc[0], fc[1], fc[2], 1.0))
+            self._loc_back_color, QVector4D(base[0], base[1], base[2], 1.0))
         self._section_vao.bind()
-        self._gl.glDrawArrays(GL_TRIANGLES, 0, 6)
+        self._gl.glDrawArrays(GL_TRIANGLES, 0, len(tris) * 3)
         self._section_vao.release()
         self._gl.glDisable(GL_POLYGON_OFFSET_FILL)
-        self._gl.glStencilMask(0xFF)
-        self._gl.glDisable(GL_STENCIL_TEST)
+        if pattern in ("hatch", "cross"):
+            lines = self._section_hatch(spacing, pattern == "cross")
+            if lines is not None and len(lines):
+                raw = lines.reshape(-1).astype("float32").tobytes()
+                self._section_vbo.bind()
+                self._section_vbo.allocate(raw, len(raw))
+                self._section_vbo.release()
+                self._set_color(fc[0], fc[1], fc[2], 1.0)
+                self._program.setUniformValue(
+                    self._loc_back_color,
+                    QVector4D(fc[0], fc[1], fc[2], 1.0))
+                self._section_vao.bind()
+                self._gl.glDrawArrays(GL_LINES, 0, len(lines) * 2)
+                self._section_vao.release()
         self._set_section_clip(True)
 
     def _draw_section_cut_edges(self) -> None:
@@ -7241,21 +7498,38 @@ class Viewport(QOpenGLWidget):
         if result is None:
             return
         world, kind = result
-        pixel = self._world_to_pixel(world)
-        if pixel is None:
-            return
-        px, py = pixel
         # The same colours and words as the snap markers: a corner is the
         # endpoint green, an edge the on-edge red, a face the on-face blue
         # — the classic cue says "On edge" while you push level with one.
         from core.snap import COLOR_ENDPOINT, COLOR_ON_EDGE, COLOR_ON_FACE
-        rgb, label = {
+        palette = {
             "edge": (COLOR_ON_EDGE, "on_edge"),
             "face": (COLOR_ON_FACE, "on_face"),
             "guide_line": (COLOR_ON_EDGE, "on_line"),
             "guide_point": (COLOR_ENDPOINT, "guide_point"),
-        }.get(kind, (COLOR_ENDPOINT, "endpoint"))
+        }
+        rgb, label = palette.get(kind, (COLOR_ENDPOINT, "endpoint"))
         color = QColor.fromRgbF(*rgb, 1.0)
+        # The dotted «level with» reference line from the geometry the
+        # inference locked onto to the moving cap, dashed in that snap-kind
+        # colour. Drawn before the marker's own point is projected: a point
+        # behind the eye is dropped whole, a segment crossing it is merely
+        # clipped, and the reference must survive (Fix 3).
+        guide_provider = getattr(tool, "inference_guide_lines", None)
+        if callable(guide_provider):
+            pen = QPen(color, 1.5, Qt.DashLine)
+            pen.setDashPattern([10.0, 7.0])
+            for a, b, g_kind in guide_provider():
+                g_rgb = palette.get(g_kind, (COLOR_ENDPOINT, "endpoint"))[0]
+                pen.setColor(QColor.fromRgbF(*g_rgb, 1.0))
+                painter.setPen(pen)
+                seg = self._segment_to_pixels(a, b)
+                if seg is not None:
+                    painter.drawLine(QPointF(*seg[0]), QPointF(*seg[1]))
+        pixel = self._world_to_pixel(world)
+        if pixel is None:
+            return
+        px, py = pixel
         painter.setPen(QPen(QColor(255, 255, 255, 230), 4.0))
         painter.setBrush(Qt.NoBrush)
         painter.drawRect(QRectF(px - 6, py - 6, 12, 12))
@@ -7284,6 +7558,10 @@ class Viewport(QOpenGLWidget):
         if callable(label_provider):
             result = label_provider()
             if result is None:
+                return
+            # Extension tools are outside the viewport's control. A malformed
+            # value_label() must not break the OpenGL paint loop repeatedly.
+            if not isinstance(result, (tuple, list)) or len(result) != 2:
                 return
             text, mid_world = result
             if mid_world is None:        # VCB-only value (Walkthrough eye height)
@@ -7605,6 +7883,15 @@ class Viewport(QOpenGLWidget):
                     return fp
         return base
 
+    def _still_face_under(self, px: float, py: float) -> bool:
+        """Whether a face the drag is NOT bending is under the cursor —
+        the «On face» cue never names the face being moved."""
+        face, grp = self.pick_face_any(px, py)
+        if face is None:
+            return False
+        moving = getattr(self.active_tool, "moving_face_ids", None)
+        return not (grp is None and callable(moving) and id(face) in moving())
+
     def _hover_face_plane(self, cursor):
         """World plane of an unselected face under the cursor, or None."""
         face, grp = self.pick_face_placement(cursor[0], cursor[1])
@@ -7614,6 +7901,14 @@ class Viewport(QOpenGLWidget):
         owner = self._owner_of(grp) if grp is not None else None
         if (owner is not None and owner in sel) or (grp is None and face in sel):
             return None
+        if grp is None:
+            # A face the drag is bending (one corner on a grabbed vertex)
+            # is not somewhere to land: the point would follow the face,
+            # the face the point, and the geometry shook under a still
+            # mouse.
+            moving = getattr(self.active_tool, "moving_face_ids", None)
+            if callable(moving) and id(face) in moving():
+                return None
         from core.snap import face_plane_world
         return face_plane_world(face, getattr(grp, "xform", None))
 
@@ -7843,8 +8138,12 @@ class Viewport(QOpenGLWidget):
                 # differs. Deterministic mix, no hash() — the disk digest
                 # reuses this term across runs.
                 hid ^= ((i + 1) * 2654435761) & 0xFFFFFFFF
-        return (len(mesh.vertices), len(mesh.edges), len(mesh.faces),
-                round(s, 4), a, soft, hid)
+        fp = (len(mesh.vertices), len(mesh.edges), len(mesh.faces),
+              round(s, 4), a, soft, hid)
+        # Reverse Faces changes none of the above (#197): the mesh counts
+        # its flips, and only a flipped mesh carries the extra term.
+        wr = getattr(mesh, "_winding_rev", 0)
+        return fp + (("winding", wr),) if wr else fp
 
     def _group_fp(self, group):
         """Fingerprint of a group's mesh, memoised per scene version — the
@@ -8339,9 +8638,24 @@ class Viewport(QOpenGLWidget):
         dback_faces: list = []        # face index → its back is the default
         faces: list = []
         areas: list = []
-        tris: list = []
+        tris = array("d")             # 9 doubles per triangle
         tri_ent: list = []
         from core.materials import back_is_default
+        # Per-face geometry memo (normal, area, triangles as floats, centroid)
+        # keyed on the face's exact vertex positions: an edit inside a big
+        # group touches a few faces, and every other face's Newell walk and
+        # triangulation was redone on each edit — ~1 s per stroke inside the
+        # Plaza's 25 797-face group (09-10). Reused only when every corner is
+        # where it was, so the chunk is the one a full rebuild makes.
+        editing_now = getattr(self, "_editing_meshes", None)
+        if callable(editing_now) and id(mesh) not in editing_now():
+            memo = None             # see below: only the edited mesh keeps one
+            built: dict = {}        # this build's geometry, never kept
+        else:
+            memo = mesh.__dict__.get("_face_geom_memo")
+            if memo is None or len(memo) > 2 * len(mesh.faces) + 64:
+                memo = mesh.__dict__["_face_geom_memo"] = {}
+            built = memo
         for f in mesh.faces:
             if f.attrs.get("hidden"):
                 # Hide on a face: out of the chunk entirely — not
@@ -8350,16 +8664,11 @@ class Viewport(QOpenGLWidget):
             fattrs = effective_attrs(f.attrs, paint)
             i = len(faces)
             faces.append(f)
-            if len(f.loop) < 3:
-                normal = QVector3D(0.0, 0.0, 1.0)
-                areas.append(0.0)
-                tri_list = []
-            else:
-                n_raw = f._newell()
-                ln = n_raw.length()
-                normal = n_raw / ln if ln > 1e-9 else QVector3D(0.0, 0.0, 1.0)
-                areas.append(0.5 * ln)
-                tri_list = _triangulate(f.vertices, f.holes, normal)
+            geom = _face_geometry(f, memo, _triangulate)
+            if memo is None:
+                built[id(f)] = geom     # this build's, for the soft edges
+            normal, area, tri_list = geom[1], geom[2], geom[3]
+            areas.append(area)
             fprops[id(f)] = normal
             back = fattrs.get("back")
             fcull = 0
@@ -8387,7 +8696,11 @@ class Viewport(QOpenGLWidget):
             else:
                 col = fattrs.get("color")
                 base = tuple(col) if col is not None else self.DEFAULT_FACE_COLOR
-                r, g, b = self._shaded_color(base, normal)
+                shade = geom[5]
+                rgb = shade.get(base)
+                if rgb is None:
+                    rgb = shade[base] = self._shaded_color(base, normal)
+                r, g, b = rgb
                 if op < 0.999:
                     dest = tcol.setdefault((round(op, 3), fcull), array("f"))
                 elif fcull:
@@ -8397,20 +8710,13 @@ class Viewport(QOpenGLWidget):
                 if dest is None:
                     buf = array("f")
                     for t0, t1, t2 in tri_list:
-                        buf.extend([t0.x(), t0.y(), t0.z(), r, g, b,
-                                    t1.x(), t1.y(), t1.z(), r, g, b,
-                                    t2.x(), t2.y(), t2.z(), r, g, b])
+                        buf.extend([*t0, r, g, b, *t1, r, g, b, *t2, r, g, b])
                     fcull_vcol_parts.append(buf.tobytes())
                     dest = array("f")   # discarded sink for the shared loop
                 for t0, t1, t2 in tri_list:
-                    dest.extend([t0.x(), t0.y(), t0.z(), r, g, b,
-                                 t1.x(), t1.y(), t1.z(), r, g, b,
-                                 t2.x(), t2.y(), t2.z(), r, g, b])
-            for t0, t1, t2 in tri_list:
-                tris.append([[t0.x(), t0.y(), t0.z()],
-                             [t1.x(), t1.y(), t1.z()],
-                             [t2.x(), t2.y(), t2.z()]])
-                tri_ent.append(i)
+                    dest.extend([*t0, r, g, b, *t1, r, g, b, *t2, r, g, b])
+            tris.extend(geom[6])
+            tri_ent.extend([i] * len(tri_list))
             if tri_list and back_is_default(fattrs):
                 dback_faces.append(i)
 
@@ -8419,6 +8725,10 @@ class Viewport(QOpenGLWidget):
         def props(f):
             r = sprops.get(id(f))
             if r is None:
+                hit = built.get(id(f))
+                if hit is not None and hit[7] is not None:
+                    r = sprops[id(f)] = hit[7]
+                    return r
                 n = fprops.get(id(f))
                 if n is None:
                     n = f.normal()
@@ -8451,7 +8761,7 @@ class Viewport(QOpenGLWidget):
             soft_n1.append(n1)
             soft_c1.append(c1)
         if tris:
-            t = np.asarray(tris, dtype=np.float64)
+            t = np.frombuffer(tris.tobytes(), dtype=np.float64).reshape(-1, 3, 3)
             v0, e1, e2 = t[:, 0], t[:, 1] - t[:, 0], t[:, 2] - t[:, 0]
             tri_ent_a = np.asarray(tri_ent, dtype=np.int64)
             # The default-back tint triangles, cut from the pick triangles
@@ -8529,7 +8839,19 @@ class Viewport(QOpenGLWidget):
         entry["mesh"] = mesh
         cache[id(group)] = entry
         _store = getattr(self, "_chunk_cache_store", None)   # stub VPs in tests
-        if callable(_store):
+        editing = getattr(self, "_editing_meshes", None)
+        if not (callable(editing) and id(mesh) in editing()):
+            # The per-face memo only pays off for the mesh being edited
+            # (each stroke rebuilds its chunk); kept for every mesh it cost
+            # +140 MB on the Plaza (release_check 10-10). Entering a group
+            # rebuilds it on the first stroke, as before the memo existed.
+            mesh.__dict__.pop("_face_geom_memo", None)
+        # Not while the group is open: each stroke inside it rebuilds this
+        # chunk, and pickling 25 000 faces after every one held the GIL
+        # ~350 ms beside the UI (Plaza, 09-10) for an entry the next stroke
+        # made stale. The cold build on opening still lands on disk.
+        if callable(_store) and not (callable(editing)
+                                     and id(mesh) in editing()):
             _store(mesh, entry)
         return entry
 
@@ -8559,6 +8881,10 @@ class Viewport(QOpenGLWidget):
         import hashlib
         h = hashlib.sha1()
         h.update(repr((fp[0], fp[1], fp[2], fp[3], fp[5])).encode())
+        if len(fp) > 7 and fp[7][0] == "winding":
+            # Flipped this session (#197): never the digest of the same
+            # mesh before the flip, which would serve its old winding.
+            h.update(repr(fp[7]).encode())
         if fp[6]:
             # Hidden-edge term, only when some edge IS hidden: meshes without
             # any (the overwhelming majority) keep their pre-existing digests,
@@ -8805,6 +9131,7 @@ class Viewport(QOpenGLWidget):
             need = np.arange(len(groups))
         elif isinstance(near, tuple) and near[0] == "ray":
             o, d = near[1], near[2]
+            reach = near[3] if len(near) > 3 else None
             o = np.array([o.x(), o.y(), o.z()])
             d = np.array([d.x(), d.y(), d.z()])
             with np.errstate(divide="ignore", invalid="ignore"):
@@ -8814,6 +9141,12 @@ class Viewport(QOpenGLWidget):
             tmin = np.nanmax(np.minimum(t1, t2), axis=1)
             tmax = np.nanmin(np.maximum(t1, t2), axis=1)
             hit = tmax >= np.maximum(tmin, 0.0)
+            if reach is not None:
+                # A bounded query (the walkthrough's wall feelers, half a
+                # metre ahead) needs nothing past its reach: an unbounded
+                # one baked every placement down the street, and turning
+                # the head brought in new ones and rebuilt the index.
+                hit &= tmin <= reach
             if px_at is not None and hit.sum() > 1:
                 # Whatever starts behind the surface the frame shows at this
                 # pixel can be neither picked nor seen.
@@ -9156,13 +9489,20 @@ class Viewport(QOpenGLWidget):
                                       chunk["tri_ent"], off))
                     elif chunk["v0"] is not None:
                         static_key.append((id(chunk), chunk.get("rev"), off))
-                        b_v0.append(chunk["v0"])
-                        b_e1.append(chunk["e1"])
-                        b_e2.append(chunk["e2"])
-                        b_te.append(chunk["tri_ent"] + off)
-                        b_spans.append((chunk.get("bbox"), b_tri_off,
-                                        len(chunk["v0"])))
-                        b_tri_off += len(chunk["v0"])
+                        v0, e1, e2, te, cells = _split_chunk_spans(chunk)
+                        b_v0.append(v0)
+                        b_e1.append(e1)
+                        b_e2.append(e2)
+                        b_te.append(te + off)
+                        if cells is None:
+                            b_spans.append((chunk.get("bbox"), b_tri_off,
+                                            len(v0)))
+                        else:
+                            # One span per grid cell, each with its own box:
+                            # a ray meets the cells it crosses, not the chunk.
+                            b_spans += [(bb, b_tri_off + s0, n)
+                                        for bb, s0, n in cells]
+                        b_tri_off += len(v0)
                     if gsnap and chunk["edges"]:
                         ge = chunk.get("_pick_ge")
                         if ge is None or ge[0] is not chunk["edges"]:
@@ -9331,24 +9671,30 @@ class Viewport(QOpenGLWidget):
         idx._flat = flat
         return flat
 
-    def ray_distance(self, origin: QVector3D, direction: QVector3D):
+    def ray_distance(self, origin: QVector3D, direction: QVector3D,
+                     reach: float | None = None):
         """Distance along ``direction`` (unit) from ``origin`` to the nearest
         VISIBLE face, or ``None`` when the ray meets nothing. What the
         walkthrough tools ask — the floor under the eye, the wall ahead —
         over the same index every pick uses (hidden objects and hidden
-        layers are not there to bump into)."""
-        idx = self._pick_index(near=("ray", origin, direction))
+        layers are not there to bump into). With ``reach``, only faces
+        within that distance count: the query bakes and tests only what
+        lies within it."""
+        near = (("ray", origin, direction) if reach is None
+                else ("ray", origin, direction, float(reach)))
+        idx = self._pick_index(near=near)
         if idx is None or (getattr(idx, "tri_v0", None) is None
                            and not getattr(idx, "own_spans", None)):
             return None
         t = self._ray_hits(idx, origin, direction, idx.ent_vis,
-                           reduce_global=True)
-        if t is None or t == float("inf"):
+                           reduce_global=True, reach=reach)
+        if t is None or t == float("inf") or (reach is not None
+                                               and t > reach):
             return None
         return float(t)
 
     def _ray_hits(self, idx, origin, direction, ent_mask,
-                  reduce_global: bool = False):
+                  reduce_global: bool = False, reach: float | None = None):
         """Per-entity nearest ray parameter over the index triangles whose
         entity passes ``ent_mask``. Returns an (E,) array of t (``inf`` = no
         hit), the single nearest t as a float when ``reduce_global``, or
@@ -9392,18 +9738,45 @@ class Viewport(QOpenGLWidget):
                 t2 = (bhi - o) * inv_d
             tmin = np.nanmax(np.minimum(t1, t2), axis=1)
             tmax = np.nanmin(np.maximum(t1, t2), axis=1)
-            meet = np.flatnonzero(tmax >= np.maximum(tmin, 0.0))
-            spans = [(None,) + tuple(spans[i][1:]) for i in meet]
+            meet = tmax >= np.maximum(tmin, 0.0)
+            if reach is not None:
+                meet &= tmin <= reach
+            spans = [(None,) + tuple(spans[i][1:])
+                     for i in np.flatnonzero(meet)]
         o3 = (float(o[0]), float(o[1]), float(o[2]))
         d3 = (float(d[0]), float(d[1]), float(d[2]))
+        lim = float("inf") if reach is None else float(reach)
         best = float("inf")
         face_t = None if reduce_global else np.full(len(idx.entities), np.inf)
+        # The static spans the ray meets go through Möller–Trumbore in ONE
+        # pass: with the span grid a ray meets dozens of small spans, and a
+        # NumPy call per span (~30 µs) became the ray's whole cost.
+        ranges = []
+        rest = []
+        for span in spans:
+            if len(span) == 3:
+                bb, s0, n = span
+                if n and (bb is None or _ray_aabb(o3, d3, bb[0], bb[1])):
+                    ranges.append((s0, n))
+            else:
+                rest.append(span)
+        if ranges:
+            if len(ranges) == 1:
+                s0, n = ranges[0]
+                sel = slice(s0, s0 + n)
+            else:
+                sel = np.concatenate([np.arange(s0, s0 + n)
+                                      for s0, n in ranges])
+            rest.insert(0, (None, idx.tri_v0[sel], idx.tri_e1[sel],
+                            idx.tri_e2[sel], idx.tri_ent[sel], 0))
+        spans = rest
         for span in spans:
             if len(span) == 3:
                 bb, s0, n = span
                 if not n:
                     continue
-                if bb is not None and not _ray_aabb(o3, d3, bb[0], bb[1]):
+                if bb is not None and not _ray_aabb(o3, d3, bb[0], bb[1],
+                                                    lim):
                     continue
                 v0 = idx.tri_v0[s0:s0 + n]
                 e1 = idx.tri_e1[s0:s0 + n]
@@ -9413,7 +9786,8 @@ class Viewport(QOpenGLWidget):
                 bb, v0, e1, e2, te_local, eoff = span
                 if not len(v0):
                     continue
-                if bb is not None and not _ray_aabb(o3, d3, bb[0], bb[1]):
+                if bb is not None and not _ray_aabb(o3, d3, bb[0], bb[1],
+                                                    lim):
                     continue
                 te = te_local + eoff
             p = np.cross(d, e2)
@@ -9724,11 +10098,37 @@ class Viewport(QOpenGLWidget):
         self._gedge_px_cache = (key, data)
         return data
 
+    #: The group-edge distances' contract with their two readers (the
+    #: hovered-edge pick, within ``pick_threshold_px``; the snap prefilter,
+    #: the ``GEDGE_ENOUGH`` nearest within 48 px): exact within
+    #: ``GEDGE_NEAR_PX``, and within ``GEDGE_REACH_PX`` too unless at least
+    #: ``GEDGE_ENOUGH`` edges already lie inside the near radius — then the
+    #: nearest ones are all there. Past that a big model says ``inf``.
+    GEDGE_NEAR_PX = 8.0
+    GEDGE_REACH_PX = 64.0
+    GEDGE_ENOUGH = 48
+    #: From this many group edges up, the distances come through a screen
+    #: grid (core.edge_grid) instead of one pass over all of them.
+    GEDGE_GRID_MIN = 20000
+
     def _gedge_dist(self, px: float, py: float):
-        """Screen distance from the cursor to every group hard edge — one
-        vectorised pass per hover position, shared by the hovered-edge
-        pick and the snap prefilter (both used to compute it)."""
+        """Screen distance from the cursor to every group hard edge, shared
+        by the hovered-edge pick and the snap prefilter (both used to
+        compute it); see ``GEDGE_NEAR_PX`` for how far it is exact.
+
+        On a 330 k-face city the full pass was ~30 ms of every mouse move
+        for the few dozen edges that matter. A camera that stays put for a
+        second hover gets the edges binned into a screen grid (once — the
+        projection's own lifetime), and each move then measures the cells
+        around the cursor: 0.2 ms zoomed onto a building, ~2 ms with the
+        whole city in view (11 edges per pixel: the near radius already
+        holds hundreds). The grid lives as long as the projection: the
+        first hover of a projection keeps the full pass, so one that
+        changes every event (the camera moving) never pays for a grid it
+        would use once. City-L, the interaction benchmark: hover with Line
+        103 -> 60 ms, a Move drag 101 -> 49 ms per event (median)."""
         import numpy as np
+        from core.edge_grid import EdgeGrid, segment_distances
         proj = self._gedge_screen()
         # Whole pixels: the hovered-edge pick gets the float position and
         # the snap scene the rounded one — the same pass must serve both.
@@ -9737,12 +10137,34 @@ class Viewport(QOpenGLWidget):
         if cached is not None and cached[0] == key:
             return cached[1]
         ax, ay, bx, by, ok = proj
-        dx, dy = bx - ax, by - ay
-        l2 = dx * dx + dy * dy
-        safe = np.where(l2 > 1e-12, l2, 1.0)
-        t = np.clip(((px - ax) * dx + (py - ay) * dy) / safe, 0.0, 1.0)
-        d = np.hypot(ax + t * dx - px, ay + t * dy - py)
-        d = np.where(ok, d, np.inf)
+        d = None
+        if (not _NO_SNAP_FAST and len(ax) >= Viewport.GEDGE_GRID_MIN
+                and getattr(self, "pick_threshold_px", 0.0)
+                <= Viewport.GEDGE_REACH_PX):
+            # (projection, grid or None): the grid waits for the second hover.
+            slot = getattr(self, "_gedge_grid_cache", None)
+            if slot is None or slot[0] is not proj:
+                self._gedge_grid_cache = (proj, None)
+            else:
+                grid = slot[1]
+                if grid is None:
+                    grid = EdgeGrid(ax, ay, bx, by, ok, self.width(),
+                                    self.height(), Viewport.GEDGE_REACH_PX)
+                    self._gedge_grid_cache = (proj, grid)
+                near_px = max(Viewport.GEDGE_NEAR_PX,
+                              getattr(self, "pick_threshold_px", 0.0))
+                for reach in (near_px, Viewport.GEDGE_REACH_PX):
+                    ids = grid.near(px, py, reach)
+                    if ids is None:
+                        break
+                    sub = segment_distances(ax, ay, bx, by, ok, px, py, ids)
+                    if (reach >= Viewport.GEDGE_REACH_PX
+                            or int((sub < reach).sum()) >= Viewport.GEDGE_ENOUGH):
+                        d = np.full(len(ax), np.inf)
+                        d[ids] = sub
+                        break
+        if d is None:
+            d = segment_distances(ax, ay, bx, by, ok, px, py)
         self._gedge_dist_cache = (key, d)
         return d
 
@@ -9809,7 +10231,13 @@ class Viewport(QOpenGLWidget):
         if not proj[4].any():
             return []
         dist = getattr(self, "_gedge_dist", None)          # stub VPs in tests
-        d = dist(px, py) if dist is not None else Viewport._gedge_dist(self, px, py)
+        if radius_px > Viewport.GEDGE_REACH_PX or cap > Viewport.GEDGE_ENOUGH:
+            # Past what _gedge_dist promises (GEDGE_NEAR_PX): every edge.
+            from core.edge_grid import segment_distances
+            d = segment_distances(*proj, px, py)
+        else:
+            d = (dist(px, py) if dist is not None
+                 else Viewport._gedge_dist(self, px, py))
         cand = np.where(d < radius_px)[0]
         if len(cand) > cap:
             cand = cand[np.argsort(d[cand])[:cap]]
@@ -10262,16 +10690,30 @@ class Viewport(QOpenGLWidget):
                 return None
         la = inv.map(pseudo.a) if inv is not None else pseudo.a
         lb = inv.map(pseudo.b) if inv is not None else pseudo.b
-        key = (id(mesh), self.scene.version)
-        table = getattr(self, "_group_edge_table", None)
-        if table is None or table[0] != key:
+        # The mesh's own registry: two O(1) vertex lookups (tolerant, the
+        # weld grid) and the edge between them by incidence. This used to
+        # build a dict of EVERY edge of the group, keyed by rounded
+        # positions, cached for one group at a time — so a cursor crossing
+        # from one group to the next rebuilt it on nearly every move:
+        # 9 ms of a 14 ms hover on pileta-fuente (2 500 edges per group).
+        edge = None
+        if not _NO_SNAP_FAST:
+            va, vb = mesh.vertex_at(la), mesh.vertex_at(lb)
+            if va is not None and vb is not None:
+                edge = mesh.find_edge(va, vb)
+        if edge is None:
+            # The registry missed (a position past the weld tolerance):
+            # the rounded-position table, one per mesh, built once.
+            tables = getattr(self, "_group_edge_tables", None)
+            if tables is None or tables[0] != self.scene.version:
+                tables = self._group_edge_tables = (self.scene.version, {})
             def k(p):
                 return (round(p.x(), 4), round(p.y(), 4), round(p.z(), 4))
-            table = (key, {frozenset((k(e.a), k(e.b))): e for e in mesh.edges})
-            self._group_edge_table = table
-        def k(p):
-            return (round(p.x(), 4), round(p.y(), 4), round(p.z(), 4))
-        edge = table[1].get(frozenset((k(la), k(lb))))
+            table = tables[1].get(id(mesh))
+            if table is None:
+                table = tables[1][id(mesh)] = {
+                    frozenset((k(e.a), k(e.b))): e for e in mesh.edges}
+            edge = table.get(frozenset((k(la), k(lb))))
         if edge is None or getattr(edge, "curve", None) is None:
             return None
         found = self._center_of_edge(edge, mesh)
@@ -10385,28 +10827,6 @@ class Viewport(QOpenGLWidget):
             for p in oriented_box_corners(*self._group_obb(ent)):
                 pts.append(_SnapEdge(p, QVector3D(p)))
         return pts
-
-    def _axis_source_cue(self, snap, px_x: float, px_y: float):
-        """Before its first click, a tool that reads the model axes as a
-        source (the Tape: ``axis_source``) shows the cursor is ON the red,
-        green or blue axis — the classic small square on the axis line.
-        Without the cue the axis looked ungrabbable (Marco, testing
-        Rafael's guide from an axis, 2026-09-21): the pick worked, nothing
-        said so. Only where the engine found nothing better."""
-        tool = self.active_tool
-        if (snap is None or not getattr(tool, "axis_source", False)
-                or getattr(tool, "start_point", None) is not None
-                or snap.kind not in ("none", "on_face")):
-            return snap
-        name = self.pick_axis(px_x, px_y)
-        if name is None:
-            return snap
-        from core.snap import AXIS_COLORS
-        from core import axes as _axes
-        axis = _axes.axis(name)
-        o = _axes.origin()
-        foot = o + axis * QVector3D.dotProduct(snap.point - o, axis)
-        return SnapResult(foot, "on_axis", AXIS_COLORS[name], axis=name)
 
     def pick_axis(self, screen_x: float, screen_y: float):
         """The model axis line under the cursor — ``"x"`` / ``"y"`` /
@@ -10706,7 +11126,16 @@ class Viewport(QOpenGLWidget):
         X-ray and wireframe show everything, so nothing hides a snap there
         (the usual trick: switch to X-ray to dimension the floor of a pool through
         its water). Hidden-line and shaded keep the visible-only rule.
+
+        The active section cut is checked first, in every style: what it
+        cuts away is gone, not behind something. Dropping only the edges
+        with BOTH ends on the hidden side (``_snap_scene``) left the edge
+        that crosses the cut — a wall's vertical, cut halfway up — and its
+        hidden end and stretch still snapped (#384).
         """
+        sp = _active_cut(self.scene)
+        if sp is not None and sp.side(world) > 1e-6:
+            return True
         if self._effective_style().face_mode in ("xray", "wireframe"):
             return False
         idx = self._pick_index()
@@ -10743,6 +11172,146 @@ class Viewport(QOpenGLWidget):
         c = float(n @ [sp.point.x(), sp.point.y(), sp.point.z()])
         pts = eye + dv * face_t[hit][:, None]
         return bool(((pts @ n - c) <= 1e-6).any())
+
+    #: Cap on rays × triangles in one NumPy block of ``_occluded_many``
+    #: (×3 float64 per array: ~50 MB at most).
+    _OCCL_BLOCK = 2_000_000
+
+    def _occluded_many(self, worlds) -> list:
+        """``_is_occluded`` for several points at once — the snap engine's
+        candidates, which all cast from the same eye. One ray at a time,
+        each paid for its own span cull and a Möller–Trumbore pass per span
+        it met, in small NumPy calls whose overhead was the cost (0.8 ms a
+        ray, ~41 rays a hover on a 330 k-face city, 60 % of the inference
+        pass). Here the rays share it: one box test for all of them against
+        every span, then each span's triangles against the rays that reach
+        it. Same rays (built with the same QVector3D arithmetic), same
+        acceptance as ``_ray_hits``; with an active section cut — per-face
+        rules — it asks ``_is_occluded`` point by point."""
+        import numpy as np
+        worlds = list(worlds)
+        if worlds and _active_cut(self.scene) is not None:
+            return [self._is_occluded(w) for w in worlds]   # the cut first (#384)
+        out = [False] * len(worlds)
+        if not worlds or self._effective_style().face_mode in ("xray",
+                                                               "wireframe"):
+            return out
+        idx = self._pick_index()
+        own = getattr(idx, "own_spans", None) or ()
+        if getattr(idx, "tri_v0", None) is None and not own:
+            return out
+        if _active_cut(self.scene) is not None:
+            return [self._is_occluded(w) for w in worlds]
+        origin = self.camera.eye()
+        rows, dirs, dists = [], [], []
+        for i, w in enumerate(worlds):
+            delta = w - origin
+            dist = delta.length()
+            if dist < 1e-9:
+                continue
+            d = delta / dist
+            rows.append(i)
+            dirs.append((d.x(), d.y(), d.z()))
+            dists.append(dist)
+        if not rows:
+            return out
+        o = np.array([origin.x(), origin.y(), origin.z()])
+        D = np.array(dirs, dtype=np.float64)
+        best = np.full(len(rows), np.inf)
+        spans = ([] if idx.tri_v0 is None else
+                 list(getattr(idx, "tri_spans", None)
+                      or [(None, 0, len(idx.tri_v0))]))
+        spans += list(own)
+        inf = float("inf")
+        boxes = getattr(idx, "_span_boxes", None)
+        if boxes is None or boxes[0] != len(spans):
+            blo = np.array([sp[0][0] if sp[0] is not None else (-inf,) * 3
+                            for sp in spans], dtype=np.float64).reshape(-1, 3)
+            bhi = np.array([sp[0][1] if sp[0] is not None else (inf,) * 3
+                            for sp in spans], dtype=np.float64).reshape(-1, 3)
+            boxes = idx._span_boxes = (len(spans), blo, bhi)
+        _n, blo, bhi = boxes
+        # The box prefilter _ray_hits applies, in both its regimes: the
+        # vectorised slab past 64 spans, ``_ray_aabb`` (with its tolerance
+        # for a ray parallel to an axis) below — they differ on exactly
+        # those rays, the standard views'.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            if len(spans) > 64:
+                inv_d = 1.0 / np.where(np.abs(D) > 1e-12, D, 1e-12)  # (R, 3)
+                t1 = (blo[None, :, :] - o) * inv_d[:, None, :]        # (R, S, 3)
+                t2 = (bhi[None, :, :] - o) * inv_d[:, None, :]
+                tmin = np.nanmax(np.minimum(t1, t2), axis=2)
+                tmax = np.nanmin(np.maximum(t1, t2), axis=2)
+                meet = tmax >= np.maximum(tmin, 0.0)
+            else:
+                par = np.abs(D) < 1e-12                               # (R, 3)
+                inv_d = 1.0 / np.where(par, 1.0, D)
+                t1 = (blo[None, :, :] - o) * inv_d[:, None, :]
+                t2 = (bhi[None, :, :] - o) * inv_d[:, None, :]
+                lo_t = np.where(par[:, None, :], -inf, np.minimum(t1, t2))
+                hi_t = np.where(par[:, None, :], inf, np.maximum(t1, t2))
+                tmin = np.maximum(lo_t.max(axis=2), 0.0)
+                tmax = hi_t.min(axis=2)
+                inside = (o >= blo - 1e-9) & (o <= bhi + 1e-9)        # (S, 3)
+                meet = ((~par[:, None, :] | inside[None, :, :]).all(axis=2)
+                        & (tmin <= tmax))
+                unboxed = np.array([sp[0] is None for sp in spans], dtype=bool)
+                meet |= unboxed[None, :]
+                tmin = np.where(unboxed[None, :], -inf, tmin)
+        limit = np.array(dists) - 1e-3                                # (R,)
+        # Only what lies BEFORE the point can hide it: a span whose box the
+        # ray enters past the point is skipped (an occluding hit at t < limit
+        # enters its box before that), and spans go nearest first so a ray
+        # settled as hidden stops asking.
+        meet = meet & (tmin < limit[:, None])                         # (R, S)
+        ent_mask = idx.ent_vis
+        live_spans = np.flatnonzero(meet.any(axis=0))
+        order = np.argsort(np.where(meet[:, live_spans],
+                                    tmin[:, live_spans], np.inf).min(axis=0))
+        for si in live_spans[order]:
+            span = spans[si]
+            if len(span) == 3:
+                _bb, s0, n = span
+                if not n:
+                    continue
+                v0 = idx.tri_v0[s0:s0 + n]
+                e1 = idx.tri_e1[s0:s0 + n]
+                e2 = idx.tri_e2[s0:s0 + n]
+                te = idx.tri_ent[s0:s0 + n]
+            else:
+                _bb, v0, e1, e2, te_local, eoff = span
+                if not len(v0):
+                    continue
+                te = te_local + eoff
+            live = ent_mask[te]
+            if not live.any():
+                continue
+            if not live.all():
+                v0, e1, e2 = v0[live], e1[live], e2[live]
+            s = o - v0                                                # (n, 3)
+            q = np.cross(s, e1)                                       # (n, 3)
+            uq = np.einsum("ij,ij->i", e2, q)                         # (n,)
+            r_all = np.flatnonzero(meet[:, si] & (best >= limit))
+            if not len(r_all):
+                continue
+            step = max(1, self._OCCL_BLOCK // max(len(v0), 1))
+            for k in range(0, len(r_all), step):
+                r = r_all[k:k + step]
+                d = D[r]                                              # (r, 3)
+                p = np.cross(d[:, None, :], e2[None, :, :])           # (r, n, 3)
+                det = np.einsum("nj,rnj->rn", e1, p)
+                ok = np.abs(det) > 1e-6
+                inv = np.where(ok, 1.0 / np.where(ok, det, 1.0), 0.0)
+                u = np.einsum("nj,rnj->rn", s, p) * inv
+                v = (d @ q.T) * inv
+                t = uq[None, :] * inv
+                hit = (ok & (u >= 0.0) & (u <= 1.0) & (v >= 0.0)
+                       & (u + v <= 1.0) & (t > 1e-6))
+                tm = np.where(hit, t, np.inf).min(axis=1)
+                best[r] = np.minimum(best[r], tm)
+        for j, i in enumerate(rows):
+            out[i] = bool(best[j] < limit[j])
+        return out
 
     def pick_face(self, screen_x: float, screen_y: float):
         """Return the face the cursor ray hits, or ``None``.
@@ -10846,9 +11415,12 @@ class Viewport(QOpenGLWidget):
             import numpy as np
             best = None  # (t, group)
             idx = self._pick_index(near=("px", screen_x, screen_y))
+            loose_t = np.inf
             if idx.entities:
                 face_t = self._hover_face_t(idx, origin, direction)
                 if face_t is not None:
+                    loose_t = float(np.where(idx.ent_loose, face_t,
+                                             np.inf).min())
                     face_t = np.where(idx.ent_loose, np.inf, face_t)
                     i = int(np.argmin(face_t))
                     if np.isfinite(face_t[i]):
@@ -10870,6 +11442,14 @@ class Viewport(QOpenGLWidget):
                             if t is not None and (best is None or t < best[0]):
                                 best = (t, self._owner_of(g))
             if best is not None:
+                # A loose face clearly in FRONT hides the group: what the
+                # cursor shows is that face, and every caller asks for the
+                # group it can see (#276, #363, #378 — a loose box before
+                # a component could not be clicked). Coplanar faces keep
+                # the old answer.
+                eps = self._coplanar_eps(origin, direction, best[0])
+                if np.isfinite(loose_t) and loose_t < best[0] - eps:
+                    return None
                 return best[1]
         # Edge fallback (cursor over empty space, or a lines-only group):
         # screen-space distance to every group hard edge, batched over the
@@ -10896,10 +11476,18 @@ class Viewport(QOpenGLWidget):
                 if sel is not None:
                     ok = ok & sel
                 d = np.where(ok, d, np.inf)
-                i = int(np.argmin(d))
-                if d[i] < best_d:
-                    best_d = float(d[i])
-                    best_g = idx.gedge_groups[int(idx.gedge_gi[i])]
+                # Only an edge the user can SEE takes the click: the far
+                # edge of a slab, hidden behind a loose box standing on it,
+                # lies a few pixels from a click on that box and handed the
+                # slab the selection. The nearest visible one decides.
+                near = np.where(d < best_d)[0]
+                for i in near[np.argsort(d[near])]:
+                    a = QVector3D(*idx.gedge_a[i])
+                    p = a + (QVector3D(*idx.gedge_b[i]) - a) * float(t[i])
+                    if not self._is_occluded(p):
+                        best_d = float(d[i])
+                        best_g = idx.gedge_groups[int(idx.gedge_gi[i])]
+                        break
         # Billboard outlines: clicking a figure exactly on its snapped feet
         # point lands ON the quad's boundary, which the ray-triangle test
         # rejects — the outline proximity test catches it.
@@ -10934,12 +11522,12 @@ class Viewport(QOpenGLWidget):
             # reset». It used to be a no-op.
             if tool is not None:
                 tool.on_cancel(self)
+            self.inference.clear_references()
             self.axis_lock = None
             self._shift_lock = None
             self.reference_edge = None
             self.reference_mode = None
             self.linear_inference_mode = "all"
-            self.last_snap = None
             self._refresh_snap()
             return
         # Picking a drawing tool always leaves camera-navigation mode — and
@@ -10960,13 +11548,7 @@ class Viewport(QOpenGLWidget):
         # quietly constraining a tool that never asked for it.
         self.axis_lock = None
         self._hover_entity = None  # stale highlight from the previous tool
-        self.last_snap = None      # stale snap marker from the previous tool
-        self._center_ref = None
-        self._acquired_edge = None  # drop any held parallel reference
-        self._acquired_point = None
-        self._acquired_face_normal = None
-        self._encouraged = []
-        self._dwell_point = None
+        self.inference.clear_references()
         if tool is not None:
             tool.on_activate(self)
         self._apply_tool_cursor()
@@ -11252,9 +11834,13 @@ class Viewport(QOpenGLWidget):
         this viewport has shown before it is drawn."""
         self.end_group_edit()
         old = (self.scene, self.history)
+        self.inference.reset()
         self.reset_document_caches()
         seen = max(getattr(self, "_versions_seen", 0), self.scene.version, scene.version)
         scene.version = self._versions_seen = seen + 1
+        # A view preference, not document content: it follows the viewport.
+        scene.hide_similar_components = bool(
+            getattr(self.scene, "hide_similar_components", False))
         self.scene = scene
         self.history = history
         from core import units as _units
@@ -11330,6 +11916,25 @@ class Viewport(QOpenGLWidget):
         QSettings().setValue("display/edit_rest_mode", mode)
         # "hide" keeps the rest out of the VBOs entirely, so switching to or
         # from it changes what is uploaded, not just how it is drawn.
+        self._edges_version = -1
+        self.update()
+
+    def set_hide_similar_components(self, on: bool) -> None:
+        """Hide Similar Components: the other instances of the
+        component being edited leave the frame. Persisted like the rest
+        mode; the version bump re-keys the pick index."""
+        on = bool(on)
+        from PySide6.QtCore import QSettings
+        QSettings().setValue("display/hide_similar_components",
+                             "1" if on else "0")
+        if bool(getattr(self.scene, "hide_similar_components", False)) == on:
+            return
+        self.scene.hide_similar_components = on
+        if on:
+            for ent in list(self.scene.selection):
+                if self.scene.similar_hidden(ent):
+                    self.scene.selection.discard(ent)
+        self.scene.version += 1
         self._edges_version = -1
         self.update()
 
@@ -11456,6 +12061,52 @@ class Viewport(QOpenGLWidget):
         super().leaveEvent(ev)
 
     # ---- Input --------------------------------------------------------------
+    def _context_pick(self, x: float, y: float):
+        """Right-click at ``(x, y)``: select the thing under the cursor
+        before the menu opens — unless it is already selected, which keeps
+        the selection as it is. Returns that thing (or ``None``).
+
+        «Under the cursor» is what the cursor SHOWS: a group behind a
+        selected loose face used to take the right-click and drop the
+        selection, and «Make Group» with it (#378)."""
+        picked = (self.pick_text_label(x, y, rect_only=True)
+                  or self.pick_group(x, y) or self.pick_edge(x, y)
+                  or self.pick_geopath(x, y) or self.pick_dimension(x, y)
+                  or self.pick_text_label(x, y)
+                  or self.pick_section_plane(x, y)
+                  or self.pick_guide(x, y)
+                  or self.pick_face(x, y)
+                  or self.pick_image_plane(x, y)
+                  or self.pick_locked_image_plane(x, y))
+        if picked is not None and picked not in self.scene.selection:
+            self.scene.select([picked])
+            self.update()
+        return picked
+
+    # ---- A side-tray tab dropped here: the window moves it to that side ----
+    def _dock_drag(self, ev) -> bool:
+        win = self.window()
+        mime = getattr(win, "DOCK_MIME", None)
+        return bool(mime) and ev.mimeData().hasFormat(mime)
+
+    def dragEnterEvent(self, ev) -> None:
+        if self._dock_drag(ev):
+            ev.acceptProposedAction()
+            return
+        super().dragEnterEvent(ev)
+
+    def dragMoveEvent(self, ev) -> None:
+        if self._dock_drag(ev):
+            ev.acceptProposedAction()
+            return
+        super().dragMoveEvent(ev)
+
+    def dropEvent(self, ev) -> None:
+        if self._dock_drag(ev):
+            self.window().drop_dock_on_viewport(ev)
+            return
+        super().dropEvent(ev)
+
     def contextMenuEvent(self, ev) -> None:
         """Right-click: select what's under the cursor and open
         a context menu of actions relevant to the current selection."""
@@ -11471,18 +12122,7 @@ class Viewport(QOpenGLWidget):
         # Where the menu was opened, for entries that act at the cursor
         # (Texture ▸ Position puts its pins on the tile under it).
         self._context_pixel = (x, y)
-        picked = (self.pick_text_label(x, y, rect_only=True)
-                  or self.pick_group(x, y) or self.pick_edge(x, y)
-                  or self.pick_geopath(x, y) or self.pick_dimension(x, y)
-                  or self.pick_text_label(x, y)
-                  or self.pick_section_plane(x, y)
-                  or self.pick_guide(x, y)
-                  or self.pick_face(x, y)
-                  or self.pick_image_plane(x, y)
-                  or self.pick_locked_image_plane(x, y))
-        if picked is not None and picked not in self.scene.selection:
-            self.scene.select([picked])
-            self.update()
+        picked = self._context_pick(x, y)
         # A locked image under the cursor is offered even when the click
         # landed on geometry drawn over it (the plaza on its orthomosaic):
         # the menu is the only way back to Unlock / Delete for it.
@@ -11791,32 +12431,144 @@ class Viewport(QOpenGLWidget):
             # under the frame telemetry's floor.
             _plog("hover.move", self._hover_cost * 1000.0, floor=80.0)
 
+    # -- Snapping inference, delegated to self.inference -----------------
+    # The reference state (the hover / acquired edges and points, the centre
+    # reference, the axis and reference locks, the last snap) lives in
+    # core.inference.InferenceEngine, and so do the rules that used to be the
+    # two post-processors of the search (the axis-source cue, the extension
+    # hooks). These properties and thin wrappers keep the surface the tools,
+    # the extensions, the probe and the tests read and write, so the
+    # extraction stays behaviour-neutral.
+    @property
+    def _acquired_point(self) -> Optional[QVector3D]:
+        return self.inference._acquired_point
+
+    @_acquired_point.setter
+    def _acquired_point(self, value: Optional[QVector3D]) -> None:
+        self.inference._acquired_point = value
+
+    @property
+    def _encouraged(self) -> list:
+        return self.inference._encouraged
+
+    @_encouraged.setter
+    def _encouraged(self, value: list) -> None:
+        self.inference._encouraged = value
+
+    @property
+    def _dwell_point(self) -> Optional[QVector3D]:
+        return self.inference._dwell_point
+
+    @_dwell_point.setter
+    def _dwell_point(self, value: Optional[QVector3D]) -> None:
+        self.inference._dwell_point = value
+
+    @property
+    def _dwell_timer(self) -> QTimer:
+        return self.inference._dwell_timer
+
+    @_dwell_timer.setter
+    def _dwell_timer(self, value: QTimer) -> None:
+        self.inference._dwell_timer = value
+
+    @property
+    def axis_lock(self) -> Optional[str]:
+        return self.inference.axis_lock
+
+    @axis_lock.setter
+    def axis_lock(self, value: Optional[str]) -> None:
+        self.inference.axis_lock = value
+
+    @property
+    def last_snap(self) -> Optional[SnapResult]:
+        return self.inference.last_snap
+
+    @last_snap.setter
+    def last_snap(self, value) -> None:
+        self.inference.last_snap = value
+
+    @property
+    def reference_edge(self):
+        return self.inference.reference_edge
+
+    @reference_edge.setter
+    def reference_edge(self, value) -> None:
+        self.inference.reference_edge = value
+
+    @property
+    def reference_mode(self) -> Optional[str]:
+        return self.inference.reference_mode
+
+    @reference_mode.setter
+    def reference_mode(self, value: Optional[str]) -> None:
+        self.inference.reference_mode = value
+
+    @property
+    def _shift_lock(self):
+        return self.inference._shift_lock
+
+    @_shift_lock.setter
+    def _shift_lock(self, value) -> None:
+        self.inference._shift_lock = value
+
+    @property
+    def _hover_edge(self):
+        return self.inference._hover_edge
+
+    @_hover_edge.setter
+    def _hover_edge(self, value) -> None:
+        self.inference._hover_edge = value
+
+    @property
+    def _hover_center(self):
+        return self.inference._hover_center
+
+    @_hover_center.setter
+    def _hover_center(self, value) -> None:
+        self.inference._hover_center = value
+
+    @property
+    def _center_ref(self):
+        return self.inference._center_ref
+
+    @_center_ref.setter
+    def _center_ref(self, value) -> None:
+        self.inference._center_ref = value
+
+    @property
+    def _acquired_edge(self):
+        return self.inference._acquired_edge
+
+    @_acquired_edge.setter
+    def _acquired_edge(self, value) -> None:
+        self.inference._acquired_edge = value
+
+    @property
+    def _acquired_face_normal(self):
+        return self.inference._acquired_face_normal
+
+    @_acquired_face_normal.setter
+    def _acquired_face_normal(self, value) -> None:
+        self.inference._acquired_face_normal = value
+
     def _dwell_on(self, point: Optional[QVector3D]) -> None:
-        """The cursor is over ``point`` (or nothing): (re)start the pause
-        that turns it into an encouraged point."""
-        if point is None:
-            self._dwell_point = None
-            self._dwell_timer.stop()
-            return
-        if (self._dwell_point is not None
-                and (self._dwell_point - point).length() < 1e-6):
-            return                                  # still resting on it
-        self._dwell_point = QVector3D(point)
-        self._dwell_timer.start()
+        self.inference._dwell_on(point)
 
     def _encourage_dwelt(self) -> None:
-        if self._dwell_point is not None:
-            self.encourage_point(self._dwell_point)
+        self.inference._encourage_dwelt()
 
     def encourage_point(self, point: QVector3D) -> None:
-        """Make ``point`` the newest encouraged point (two are kept, the
-        older one drops), and the 'from point' reference."""
-        pt = QVector3D(point)
-        self._encouraged = [p for p in self._encouraged if (p - pt).length() > 1e-6]
-        self._encouraged.append(pt)
-        del self._encouraged[:-2]
-        self._acquired_point = pt
-        self.update()
+        self.inference.encourage_point(point)
+
+    # The two post-processors of the search (the axis-source cue for the
+    # tools that read the model axes as a source, the extension hooks) moved
+    # behind ``self.inference.snap()`` too. The names stay on the viewport
+    # because the extension tests and the probe call them from here.
+    def _axis_source_cue(self, snap, px_x: float, px_y: float):
+        return self.inference._axis_source_cue(snap, px_x, px_y)
+
+    def _extension_snap(self, snap, px_x: float, px_y: float):
+        return self.inference._extension_snap(snap, px_x, px_y)
 
     def _process_hover(self, pos, modifiers) -> None:
         if self._last_pos is not None or self._box_active:
@@ -11841,49 +12593,7 @@ class Viewport(QOpenGLWidget):
         win = self.window()
         if hasattr(win, "on_viewport_hover"):
             win.on_viewport_hover(ev.position().x(), ev.position().y())
-        tool = self.active_tool
-        if tool is not None and (tool.uses_snap
-                                 or getattr(tool, "hover_group_edges", False)):
-            self._hover_edge = self.pick_edge_any(ev.position().x(), ev.position().y())
-        else:
-            self._hover_edge = self.pick_edge(ev.position().x(), ev.position().y())
-        _hmark("pickedge")
-        if self.active_tool is not None and self.active_tool.uses_snap:
-            # Only the tools that snap can use a centre; Select and
-            # Push/Pull never pay for the fit. Hovering the rim ENCOURAGES
-            # the centre like a corner: the dotted axis line then runs from
-            # it (Marco's capture, 2026-09-14 — a circle placed
-            # in line with another's centre).
-            self._hover_center = self._update_center_ref(
-                ev.position().x(), ev.position().y())
-
-        # While a segment is being drawn, hovering an edge acquires it as a soft
-        # parallel reference; the acquisition is dropped once nothing is in
-        # progress, so it never goes stale across separate draws. A hovered
-        # CORNER is kept even before the first click (an encouraged
-        # point): the first corner of a window lines up with the door's on a
-        # dotted line from it (Rafael's review, 2026-09-10).
-        drawing = (
-            self.active_tool is not None
-            and getattr(self.active_tool, "start_point", None) is not None
-        )
-        if drawing and self.active_tool.uses_snap:
-            # Mid-segment: the corner under the cursor is a soft, instant
-            # reference (through point / from point), as always.
-            corner = self.pick_vertex(ev.position().x(), ev.position().y())
-            if corner is not None:
-                self._acquired_point = corner
-        if not drawing:
-            self._acquired_edge = None
-            self._acquired_face_normal = None
-        else:
-            if self._hover_edge is not None:
-                self._acquired_edge = self._hover_edge
-            face, _g = self.pick_face_placement(ev.position().x(), ev.position().y())
-            if face is not None:
-                from core.snap import face_plane_world
-                self._acquired_face_normal = face_plane_world(
-                    face, getattr(_g, "xform", None))[1]
+        self.inference.acquire(ev.position().x(), ev.position().y())
 
         if self.active_tool is None:
             return
@@ -12029,7 +12739,19 @@ class Viewport(QOpenGLWidget):
         q = inv.map(QVector4D(nx, ny, d * 2.0 - 1.0, 1.0))
         if abs(q.w()) < 1e-12:
             return None
-        return ("hit", QVector3D(q.x() / q.w(), q.y() / q.w(), q.z() / q.w()))
+        point = QVector3D(q.x() / q.w(), q.y() / q.w(), q.z() / q.w())
+        # Zoomed right in, the near plane is a fraction of a millimetre while
+        # the far one is kilometres away: the depth buffer has no precision
+        # left, and the read-back unprojects to a point far behind the model
+        # — or to infinity. The orbit then turned about that point and threw
+        # the camera off until its target was NaN and the model would not
+        # save (#485, #383). Such a point is no answer: the caller falls
+        # back to the ray.
+        if not all(math.isfinite(c) for c in (point.x(), point.y(), point.z())):
+            return None
+        if (point - self.camera.eye()).length() > 1.01 * self.camera.far_plane():
+            return None
+        return ("hit", point)
 
     def _world_under_cursor(self, x: float, y: float) -> Optional[QVector3D]:
         """The world point the cursor points at: nearest geometry hit, else the
@@ -12185,9 +12907,22 @@ class Viewport(QOpenGLWidget):
             t = ev.text().lower()
             if t and (t.isdigit() or t in (".", ",", ";", " ", "-", ":",
                                            "\"", "'", "/", "m", "c", "r",
-                                           "i", "n", "f", "t", "x", "*")):
+                                           "i", "n", "f", "t", "x", "*", "s")):
                 ev.accept()
                 return True
+            # "0.3p", the profile of a bevel — P is Push/Pull otherwise.
+            if t == "p" and hasattr(self.active_tool, "on_profile_value"):
+                ev.accept()
+                return True
+        # Right after a copy, "x5" is the array written multiplier first
+        # (#542): the bare X must reach the value box, not the Text tool.
+        if (ev.type() == QEvent.ShortcutOverride and not self._value_buffer
+                and not _is_chord(ev.modifiers())
+                and ev.text().lower() == "x"
+                and getattr(self.active_tool, "accepts_array", False)
+                and self._array_pending()):
+            ev.accept()
+            return True
         return super().event(ev)
 
     def _tool_claims_key(self, ev) -> bool:
@@ -12364,7 +13099,7 @@ class Viewport(QOpenGLWidget):
     def escape(self) -> None:
         """The Esc cascade (standard CAD), ONE step per press: a typed value
         buffer, then a sticky constraint (axis lock / reference), then the
-        tool's in-progress action, then the selection, then — nothing in
+        array window a copy just opened, then the tool's in-progress action, then the selection, then — nothing in
         progress — step out ONE level of the open group, and
         finally the tool's own cancel. The window's «Cancel current tool»
         action (shortcut Esc, which fires BEFORE this widget's key event)
@@ -12377,6 +13112,13 @@ class Viewport(QOpenGLWidget):
         if self.release_constraints():
             return
         tool = self.active_tool
+        close = getattr(tool, "close_array_window", None)
+        if callable(close) and self._array_pending():
+            # Right after a copy the array window is what is open: Esc
+            # closes it before touching the selection, so a bare X is the
+            # Text shortcut again (#542).
+            close()
+            return
         if tool is not None and type(tool).__name__ == "PasteTool":
             win = self.window()
             activate = getattr(win, "_activate_tool", None)
@@ -12493,45 +13235,11 @@ class Viewport(QOpenGLWidget):
             return
         from PySide6.QtGui import QGuiApplication
 
-        p = self._last_mouse_pos.toPoint()
-        px_x, px_y = p.x(), p.y()
-        world_raw = self._world_from_pixel(px_x, px_y)
-        if world_raw is None:
-            return
         modifiers = QGuiApplication.keyboardModifiers()
-        chain_first = getattr(self.active_tool, "chain_first_point", None)
-        start_pt = getattr(self.active_tool, "start_point", None)
-        snap = compute_snap(
-            candidate_world=world_raw,
-            candidate_pixel=(px_x, px_y),
-            scene=self._snap_scene(px_x, px_y),
-            world_to_pixel=self._world_to_pixel,
-            threshold_px=self.snap_threshold_px,
-            project_onto_line=lambda s, d: self._project_to_lock_line(s, d, px_x, px_y),
-            chain_first_point=chain_first,
-            start_point=start_pt,
-            axis_lock=self.axis_lock,
-            shift_held=bool(modifiers & Qt.ShiftModifier),
-            reference_edge=self.reference_edge,
-            reference_mode=self.reference_mode,
-            inference_angle_deg=self.inference_angle_deg,
-            is_occluded=self._is_occluded,
-            face_under_cursor=self.pick_face_any(px_x, px_y)[0] is not None,
-            edge_threshold_px=self.edge_snap_threshold_px,
-            magnetic_axis_deg=getattr(self.active_tool, "magnetic_axis_deg", None),
-            screen_axis_px=getattr(self.active_tool, "screen_axis_px", None),
-            acquired_edge=self._acquired_edge,
-            acquired_point=self._acquired_point,
-            acquired_face_normal=self._acquired_face_normal,
-            acquired_points=self._encouraged,
-            shift_lock_dir=self._shift_lock[0] if self._shift_lock else None,
-            shift_lock_color=self._shift_lock[1] if self._shift_lock else None,
-            linear_mode=self.linear_inference_mode,
-            work_plane_normal=self._work_plane_normal(),
-            radial_arm=bool(getattr(self.active_tool, "radial_arm", False)),
-        )
-        snap = self._axis_source_cue(snap, px_x, px_y)
-        snap = self._extension_snap(snap, px_x, px_y)
+        p = self._last_mouse_pos.toPoint()
+        snap = self._snap_at(p.x(), p.y(), modifiers)
+        if snap is None:
+            return
         self.last_snap = snap
         ctx = ToolContext(
             viewport=self,
@@ -12716,6 +13424,14 @@ class Viewport(QOpenGLWidget):
                             "Type the count alone here, e.g. 3x"))
                 self._set_value_buffer("")
                 return True
+            if isinstance(value, tuple) and value and value[0] == "profile":
+                # "0.3p": the profile of a bevel. Only tools that declare
+                # it understand.
+                handler = getattr(self.active_tool, "on_profile_value", None)
+                if handler is not None:
+                    handler(self, value[1])
+                self._set_value_buffer("")
+                return True
             if isinstance(value, tuple) and value and value[0] == "radius":
                 # "2r": the 2-point arc takes a RADIUS instead
                 # of the bulge. Only tools that declare it understand.
@@ -12733,9 +13449,17 @@ class Viewport(QOpenGLWidget):
                 if _re.search(r"[\d\"']\s*(mm|cm|m|in|ft)\b|\d\s*[\"']",
                               self._value_buffer.lower()):
                     value = ("abs_len", value)
+            # Did this value actually commit geometry? Same signal as a
+            # click that commits (see _dispatch_tool_click): a chaining tool
+            # like Line stays busy the instant the segment exists, so "busy"
+            # is not "the operation that used the arrow lock has ended". The
+            # typed length must drop the lock exactly like the second click.
+            history = getattr(self, "history", None)
+            _before = len(history.undo_stack) if history is not None else 0
             self.active_tool.on_value(self, value)
+            _drew = history is not None and len(history.undo_stack) > _before
             self._set_value_buffer("")
-            self._release_axis_lock_after_operation()
+            self._release_axis_lock_after_operation(committed=_drew)
             return True
 
         if key == Qt.Key_Backspace:
@@ -12750,13 +13474,34 @@ class Viewport(QOpenGLWidget):
             # shortcut never fired and each try added a «1» — a 35-digit
             # number, inf in the geometry's floats, then NaN (#185).
             return False
+        from core.units import VULGAR_FRACTIONS, plain_marks
+        if text in VULGAR_FRACTIONS:
+            # ⅜, ½…: the fraction as digits, after a space when it follows
+            # a whole number (1⅜ → 1 3/8). A keyboard that types them, or
+            # smart quotes (”), made the value box drop keys (#189).
+            if not self._value_buffer:
+                self._set_value_buffer(plain_marks(text))
+            else:
+                self._set_value_buffer(plain_marks(self._value_buffer + text))
+            return True
+        text = plain_marks(text)
         arrays = getattr(self.active_tool, "accepts_array", False)
         if arrays and text == "*":
             # "*3" / "3*": the array multiplier ("x" works too).
             self._set_value_buffer(self._value_buffer + text)
             return True
-        if arrays and text.lower() == "x" and self._current_token_tail():
-            # "3x" — only after a digit: bare X stays the Text tool shortcut.
+        if arrays and text.lower() == "x" and (
+                self._current_token_tail()
+                or (not self._value_buffer and self._array_pending())):
+            # "3x" — after a digit; bare X stays the Text tool shortcut,
+            # except right after a copy, where "x5" is the array written
+            # multiplier first (#542), as common a habit as "5x".
+            self._set_value_buffer(self._value_buffer + text)
+            return True
+        if (text.lower() == "p" and self._current_token_tail()
+                and hasattr(self.active_tool, "on_profile_value")):
+            # "0.3p" — only after a digit, and only for a tool that takes a
+            # profile: bare P stays the Push/Pull shortcut.
             self._set_value_buffer(self._value_buffer + text)
             return True
         if arrays and text == "/" and not self._value_buffer:
@@ -12765,7 +13510,7 @@ class Viewport(QOpenGLWidget):
             return True
         if text and (text.isdigit()
                      or text in (".", ",", ";", " ", "-", ":", "\"", "'", "/")
-                     or text.lower() in ("m", "c", "r", "i", "n", "f", "t")):
+                     or text.lower() in ("m", "c", "r", "i", "n", "f", "t", "s")):
             # A field separator (space / ;) with an empty buffer isn't VCB
             # input — let it fall through so Space can act as the Select
             # shortcut. It only separates fields mid-number.
@@ -12773,8 +13518,9 @@ class Viewport(QOpenGLWidget):
                 return False
             # A unit letter with an empty buffer is a tool shortcut (M = Move,
             # C = Circle, R = Rectangle), not VCB input — only buffer it
-            # after a digit. "r" is the radius suffix for arcs (2r).
-            if (text.lower() in ("m", "c", "r", "i", "n", "f", "t")
+            # after a digit. "r" is the radius suffix for arcs (2r), "s"
+            # the segment count of an arc / sides of a circle (16s).
+            if (text.lower() in ("m", "c", "r", "i", "n", "f", "t", "s")
                     and not self._current_token_tail()):
                 return False
             # Imperial marks and the fraction bar belong after a digit too:
@@ -12819,6 +13565,11 @@ class Viewport(QOpenGLWidget):
         only several values (the Rectangle), where a lone decimal could never
         be meant; a user who wants decimals there separates with ``;``
         (``1,5;2,5``), which is the usual rule in comma-decimal locales."""
+        from core.units import plain_marks
+        buffer = plain_marks(buffer)
+        # A comma followed by a space separates values: a decimal comma
+        # never has one after it. «1 3/8", 1 3/16"» is two lengths (#189).
+        buffer = re.sub(r",\s+", ";", buffer.strip())
         if (comma_lists and ";" not in buffer
                 and not any(ch.isspace() for ch in buffer.strip())):
             buffer = buffer.replace(",", " ")
@@ -12847,6 +13598,12 @@ class Viewport(QOpenGLWidget):
             if m is None:
                 return None
             return ("radius", float(m.group(1)))
+        if stripped.lower().endswith("p") and ":" not in stripped:
+            # "0.3p": the profile of a bevel (0 to 1, no unit).
+            m = re.fullmatch(r"(\d+\.?\d*|\.\d+)p", stripped.lower())
+            if m is None:
+                return None
+            return ("profile", float(m.group(1)))
         if stripped.lower().endswith("s") and ":" not in stripped:
             # "12s": the segment count of an arc / the sides of
             # a circle. Only tools that declare it understand.
@@ -12866,7 +13623,11 @@ class Viewport(QOpenGLWidget):
                 return None
             return ("ratio", math.degrees(math.atan2(rise, run)))
         nums = []
-        for p in _merge_mixed_numbers(normalized.split()):
+        # «;» is a hard separator: «5';3"» stays two values, while «5' 3"»
+        # is one length, written the usual way.
+        fields = [f for group in buffer.replace(",", ".").split(";")
+                  for f in _merge_mixed_numbers(group.split())]
+        for p in fields:
             v = _parse_length_field(p)
             if v is None:
                 return None
@@ -12876,6 +13637,12 @@ class Viewport(QOpenGLWidget):
         if len(nums) in (2, 3):
             return tuple(nums)
         return None
+
+    def _array_pending(self) -> bool:
+        """Whether the active tool just made a copy that «x5» would turn
+        into an array (#542)."""
+        pending = getattr(self.active_tool, "array_pending", None)
+        return bool(pending(self)) if callable(pending) else False
 
     def _current_token_tail(self) -> str:
         """The portion of the buffer after the last ``;`` or space."""
@@ -12894,95 +13661,41 @@ class Viewport(QOpenGLWidget):
 
     def toggle_projection(self) -> None:
         self.camera.toggle_projection()
+        self._sync_projection()
         self.update()
 
     def toggle_two_point(self) -> None:
         self.camera.toggle_two_point()
+        self._sync_projection()
         self.update()
 
-    # ---- Extensions (views.extension_api) -----------------------------------
-    #: Built-in inferences an extension's may not override: a point with a
-    #: name is the user's target, and the snap engine already ranked it.
-    _NAMED_SNAPS = frozenset((
-        "endpoint", "midpoint", "arc_midpoint", "center", "origin",
-        "component_origin", "intersection", "close", "on_edge"))
-
-    def _extension_snap(self, snap, px_x: float, px_y: float):
-        """Offer the snap engine's answer to each extension's provider
-        (``ExtensionApp.add_snap_provider``); the first that returns a
-        :class:`SnapResult` wins. A named point is never overridden, and a
-        provider that raises is skipped — it cannot take the cursor away."""
-        providers = getattr(self, "_ext_snap_providers", None)
-        if not providers or snap is None or snap.kind in self._NAMED_SNAPS:
-            return snap
-        for fn in list(providers):
-            try:
-                got = fn(self, snap, px_x, px_y)
-            except Exception:  # noqa: BLE001 — a plugin never breaks input
-                import logging
-                logging.getLogger("ingetrazo.plugins").exception(
-                    "extension snap provider failed")
-                continue
-            if got is not None:
-                return got
-        return snap
+    def set_projection(self, mode: str) -> None:
+        """Parallel, perspective or two-point (the View toolbar's buttons)."""
+        self.camera.set_projection(mode)
+        self._sync_projection()
+        self.update()
 
     # ---- Helpers ------------------------------------------------------------
+    def _snap_at(
+        self, px_x: float, px_y: float, modifiers
+    ) -> Optional[SnapResult]:
+        """The snap engine's answer for the cursor at ``(px_x, px_y)``.
+
+        THE one code path: both ``_build_ctx`` (mouse motion and clicks) and
+        ``_refresh_snap`` (a modifier changing with the hand still) go through
+        here, so the :func:`compute_snap` argument list lives in exactly one
+        place. Returns ``None`` when the pixel casts no world point (the ray
+        misses the plane / the point is behind the camera). A tool that does
+        not snap (Select, Push/Pull) gets a ``"none"`` result instead - no
+        snap engine, no occlusion raycasts, no marker."""
+        return self.inference.snap(px_x, px_y, modifiers)
+
     def _build_ctx(self, ev) -> Optional[ToolContext]:
         self._sync_axes()
         p = ev.position().toPoint()
-        px_x, px_y = p.x(), p.y()
-        world_raw = self._world_from_pixel(px_x, px_y)
-        if world_raw is None:
+        snap = self._snap_at(p.x(), p.y(), ev.modifiers())
+        if snap is None:
             return None
-        # Tools that don't snap (Select, Push/Pull) skip the snap engine and its
-        # occlusion raycasts entirely, and show no snap marker.
-        if self.active_tool is not None and not self.active_tool.uses_snap:
-            snap = SnapResult(world_raw, "none")
-            return ToolContext(
-                viewport=self,
-                world=world_raw,
-                screen=ev.position(),
-                modifiers=ev.modifiers(),
-                snap=snap,
-            )
-        chain_first = None
-        start_pt = None
-        if self.active_tool is not None:
-            chain_first = getattr(self.active_tool, "chain_first_point", None)
-            start_pt = getattr(self.active_tool, "start_point", None)
-        shift_held = bool(ev.modifiers() & Qt.ShiftModifier)
-        snap = compute_snap(
-            candidate_world=world_raw,
-            candidate_pixel=(px_x, px_y),
-            scene=self._snap_scene(px_x, px_y),
-            world_to_pixel=self._world_to_pixel,
-            threshold_px=self.snap_threshold_px,
-            project_onto_line=lambda s, d: self._project_to_lock_line(s, d, px_x, px_y),
-            chain_first_point=chain_first,
-            start_point=start_pt,
-            axis_lock=self.axis_lock,
-            shift_held=shift_held,
-            reference_edge=self.reference_edge,
-            reference_mode=self.reference_mode,
-            inference_angle_deg=self.inference_angle_deg,
-            is_occluded=self._is_occluded,
-            face_under_cursor=self.pick_face_any(px_x, px_y)[0] is not None,
-            edge_threshold_px=self.edge_snap_threshold_px,
-            magnetic_axis_deg=getattr(self.active_tool, "magnetic_axis_deg", None),
-            screen_axis_px=getattr(self.active_tool, "screen_axis_px", None),
-            acquired_edge=self._acquired_edge,
-            acquired_point=self._acquired_point,
-            acquired_face_normal=self._acquired_face_normal,
-            acquired_points=self._encouraged,
-            shift_lock_dir=self._shift_lock[0] if self._shift_lock else None,
-            shift_lock_color=self._shift_lock[1] if self._shift_lock else None,
-            linear_mode=self.linear_inference_mode,
-            work_plane_normal=self._work_plane_normal(),
-            radial_arm=bool(getattr(self.active_tool, "radial_arm", False)),
-        )
-        snap = self._axis_source_cue(snap, px_x, px_y)
-        snap = self._extension_snap(snap, px_x, px_y)
         return ToolContext(
             viewport=self,
             world=snap.point,

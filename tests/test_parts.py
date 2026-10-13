@@ -297,8 +297,9 @@ def test_part_sizes_resolve_the_millimetre_whatever_the_display_precision():
             "0.033 × 0.024 × 0.004 m"
         assert units.fmt_len_fine(0.0043) == "0.004 m"
         scene.units = {"length": "mm", "precision": 0}
+        # 32.5 mm rounds up, as 0.0325 m does to 0.033 m above.
         assert units.fmt_triple(0.0325, 0.024, 0.0043, fine=True) == \
-            "32 × 24 × 4 mm"
+            "33 × 24 × 4 mm"
     finally:
         units.bind_scene(None)
 

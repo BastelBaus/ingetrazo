@@ -111,7 +111,8 @@ class ExtensionApp:
 
     # ---- Side panel ----------------------------------------------------------
     def add_panel(self, title: str, widget, name: str | None = None, *,
-                  panel: str | None = None, stretch: int = 0):
+                  panel: str | None = None, stretch: int = 0,
+                  start_hidden: bool = False):
         """Put ``widget`` in the side tray as a tab of its own, beside
         Properties / BIM / Terrain. Returns the dock.
 
@@ -127,7 +128,11 @@ class ExtensionApp:
         ``extension_<panel>``): the first call creates it, named ``title``;
         the next ones stack their widget under the previous (``stretch`` as
         in ``QBoxLayout.addWidget``) — the assistant and the MCP bridge both
-        live in the «AI» tab."""
+        live in the «AI» tab.
+
+        ``start_hidden``: the panel starts closed the first time (for a
+        panel few users need open all the time); Window ▸ Panels opens it,
+        and from then on the user's choice is kept."""
         from PySide6.QtWidgets import QDockWidget, QVBoxLayout, QWidget
         win = self._window
         shared = getattr(win, "_shared_panels", None)
@@ -153,6 +158,10 @@ class ExtensionApp:
             widget = holder
         dock = QDockWidget(title, win)
         dock.setObjectName(object_name)
+        if start_hidden:
+            if not hasattr(win, "_start_hidden"):
+                win._start_hidden = set()
+            win._start_hidden.add(object_name)
         dock.setWidget(widget)
         dock.setTitleBarWidget(QWidget(dock))   # the tab already names it
         win._register_extension_dock(dock)
@@ -189,7 +198,15 @@ class ExtensionApp:
                 action.setShortcut(QKeySequence(shortcut))
                 taken.add(seq)
         action.triggered.connect(lambda _c=False: fn())
-        menu.addAction(action)
+        anchor = getattr(win, "_ext_anchor", None)
+        if anchor is not None:
+            # Above the menu's own entries (examples, manager, plugins
+            # folder, guide), as in 0.5.7: since setup() runs after the
+            # window is up (#440) those entries already exist, and an
+            # appended action landed under «Develop an extension…».
+            menu.insertAction(anchor, action)
+        else:
+            menu.addAction(action)
         return action
 
     def add_menu(self, title: str):
@@ -197,7 +214,31 @@ class ExtensionApp:
         for an extension with several commands; returns the QMenu to fill
         (``None`` outside a window with that menu)."""
         menu = getattr(self._window, "_ext_menu", None)
-        return menu.addMenu(title) if menu is not None else None
+        if menu is None:
+            return None
+        anchor = getattr(self._window, "_ext_anchor", None)
+        if anchor is None:
+            return menu.addMenu(title)
+        from PySide6.QtWidgets import QMenu
+        sub = QMenu(title, menu)
+        menu.insertMenu(anchor, sub)        # above the menu's own entries
+        return sub
+
+    def add_outliner_kind(self, fn) -> None:
+        """Say what YOUR container groups are, in the Browser:
+        ``fn(group)`` → ``{"type": "Window", "props": [("Panes", "3 × 2"),
+        ("Width", "1.20 m")]}`` for a group of yours (read ``group.ext``),
+        ``None`` for the rest. The type shows in the Type column (and the
+        filter finds it), the properties in its tooltip. Keep it cheap: it
+        is asked for every row as the tree refreshes. A provider that
+        raises is logged and skipped."""
+        win = self._window
+        if not hasattr(win, "_outliner_kinds"):
+            win._outliner_kinds = []
+        win._outliner_kinds.append(fn)
+        browser = getattr(win, "project_browser", None)
+        if browser is not None:
+            browser.outliner.refresh()
 
     def add_context_menu(self, fn) -> None:
         """``fn(menu, selection)`` adds entries to the viewport's

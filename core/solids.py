@@ -140,11 +140,75 @@ def _to_manifold(group, sources: _Sources):
     a, b, c = v[t[:, 0]], v[t[:, 1]], v[t[:, 2]]
     if np.einsum("ij,ij->i", a, np.cross(b, c)).sum() < 0:
         t = t[:, ::-1].copy()
-    man = m3d.Manifold(m3d.Mesh64(vert_properties=v, tri_verts=t,
-                                  face_id=np.asarray(fids, dtype=np.uint32)))
+    f = np.asarray(fids, dtype=np.uint32)
+    man = m3d.Manifold(m3d.Mesh64(vert_properties=v, tri_verts=t, face_id=f))
     if man.status() != m3d.Error.NoError:
-        raise SolidError("not manifold")
+        # A face's triangulation can leave a corner of a neighbouring face
+        # lying ON one of its triangle edges — two door openings in a row,
+        # their tops at one height, give a triangle whose long edge runs
+        # past both holes' corners. That draws fine but is not a closed
+        # triangle surface, and the boolean refuses it (#227). Only then,
+        # split those triangles at the corners and try once more: what
+        # converts today converts exactly as before.
+        v, t, f = _conform_t_junctions(v, t, f)
+        man = m3d.Manifold(m3d.Mesh64(vert_properties=v, tri_verts=t,
+                                      face_id=f))
+        if man.status() != m3d.Error.NoError:
+            raise SolidError("not manifold")
     return man
+
+
+def _conform_t_junctions(v, t, f, rel_tol: float = 1e-9):
+    """Split every triangle that has a vertex of the mesh lying inside one
+    of its edges: the triangle's outline with those vertices inserted, in
+    order, fanned from a new point at its centroid (strictly inside, so no
+    sliver comes out). Returns new ``(vertices, triangles, face_ids)``."""
+    scale = max(1.0, float(np.abs(v).max())) if len(v) else 1.0
+    tol = rel_tol * scale
+    verts = [tuple(p) for p in v.tolist()]
+    out_t: list = []
+    out_f: list = []
+    for tri, fid in zip(t.tolist(), f.tolist()):
+        ring: list = []
+        split = False
+        for k in range(3):
+            a, b = tri[k], tri[(k + 1) % 3]
+            ring.append(a)
+            pa, pb = v[a], v[b]
+            d = pb - pa
+            length2 = float(d @ d)
+            if length2 <= tol * tol:
+                continue
+            box_lo = np.minimum(pa, pb) - tol
+            box_hi = np.maximum(pa, pb) + tol
+            near = np.flatnonzero(np.all((v >= box_lo) & (v <= box_hi),
+                                         axis=1))
+            hits = []
+            for i in near.tolist():
+                if i in (a, b):
+                    continue
+                s = float((v[i] - pa) @ d) / length2
+                if s <= 1e-9 or s >= 1.0 - 1e-9:
+                    continue
+                off = v[i] - (pa + s * d)
+                if float(off @ off) <= tol * tol:
+                    hits.append((s, i))
+            if hits:
+                split = True
+                ring.extend(i for _s, i in sorted(hits))
+        if not split:
+            out_t.append(tri)
+            out_f.append(fid)
+            continue
+        c = len(verts)
+        verts.append(tuple(v[tri].mean(axis=0).tolist()))
+        n = len(ring)
+        for k in range(n):
+            out_t.append((c, ring[k], ring[(k + 1) % n]))
+            out_f.append(fid)
+    return (np.asarray(verts, dtype=np.float64),
+            np.asarray(out_t, dtype=np.uint32),
+            np.asarray(out_f, dtype=np.uint32))
 
 
 def _loops_from(man, sources: _Sources, drop_voids: bool = False):

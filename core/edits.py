@@ -63,9 +63,17 @@ def plan_edge_commands(
     commands: list[Command] = []
     simulated: list[Edge] = list(scene.edges)
     faces_snapshot: list[Face] = list(scene.faces)
+    near = _Nearby(simulated, faces_snapshot)
+    from core.topology import KeyMemo
+    near.key = KeyMemo()            # nothing moves while a plan is made
 
     for a, b in segments:
-        new_segments, edge_cuts = plan_edge_split(simulated, a, b)
+        # The searches only look at what can touch the segment (a box test
+        # far wider than the welding tolerance); the plan's own edits still
+        # go to the full lists. Inside the Plaza's 25 797-face group every
+        # stroke tested every edge and face — ~1 s each (09-10).
+        new_segments, edge_cuts = plan_edge_split(
+            near.edges(simulated, a, b), a, b)
 
         # Replace each crossed existing edge with its two sub-edges.
         for edge, point in edge_cuts.items():
@@ -79,7 +87,8 @@ def plan_edge_commands(
             e_soft = getattr(edge, "soft", False) or None
             e_curve = getattr(edge, "curve", None)
             for sa, sb in ((edge.a, point), (point, edge.b)):
-                if find_duplicate_edge(simulated, sa, sb) is None:
+                if find_duplicate_edge(near.edges(simulated, sa, sb),
+                                       sa, sb) is None:
                     commands.append(
                         AddEdgeCommand(sa, sb, soft=e_soft, curve=e_curve))
                     simulated.append(Edge(sa, sb))
@@ -102,7 +111,8 @@ def plan_edge_commands(
             # dissolves the door back into the wall. The same door drawn with
             # three lines left the box closed, which is what gave it away.
             for f, new_verts in split_edge_in_faces(
-                faces_snapshot, edge.a, edge.b, point, skip_endpoints=(a, b)
+                near.faces(faces_snapshot, edge.a, edge.b),
+                edge.a, edge.b, point, skip_endpoints=(a, b)
             ):
                 # Same face, one collinear vertex richer: it keeps its own
                 # paint, exactly as it stands (the texture's world→UV map
@@ -120,7 +130,8 @@ def plan_edge_commands(
 
         # Add the new segment's pieces (welding duplicates), auto-facing.
         for sa, sb in new_segments:
-            already = find_duplicate_edge(simulated, sa, sb)
+            already = find_duplicate_edge(near.edges(simulated, sa, sb),
+                                          sa, sb)
             # Always emit the add: AddEdgeCommand welds, so a duplicate is a
             # no-op, but face detection below must still run (drawing over an
             # existing edge can still close a new face).
@@ -128,12 +139,117 @@ def plan_edge_commands(
             if already is None:
                 simulated.append(Edge(sa, sb))
             if detect_faces:
-                _plan_faces(commands, faces_snapshot, simulated, sa, sb, eye)
+                _plan_faces(commands, faces_snapshot, simulated, sa, sb, eye,
+                            near)
 
     return commands
 
 
-def _plan_faces(commands, faces_snapshot, simulated, sa, sb, eye=None) -> None:
+class _Nearby:
+    """Box filter for the planner's searches. Every edge and face is boxed
+    once per plan, in one NumPy array (the plan's own simulated pieces are
+    boxed on first sight); a search then gets, in their original order, only
+    those whose box, grown by a margin far beyond the 0.1 mm welding
+    tolerance, reaches the segment. Anything that can cross, contain or
+    duplicate the segment is kept, so the plan is the one the full lists
+    give (tests/test_planner_box_filter.py)."""
+
+    def __init__(self, edges, faces) -> None:
+        import numpy as np
+        self._np = np
+        self._items: list = []
+        self._row: dict = {}
+        rows = []
+        for e in edges:
+            self._row[id(e)] = len(self._items)
+            self._items.append(e)
+            a, b = e.a, e.b
+            ax, ay, az, bx, by, bz = a.x(), a.y(), a.z(), b.x(), b.y(), b.z()
+            rows.append((min(ax, bx), min(ay, by), min(az, bz),
+                         max(ax, bx), max(ay, by), max(az, bz)))
+        for f in faces:
+            self._row[id(f)] = len(self._items)
+            self._items.append(f)
+            rows.append(self._points_box(f.vertices))
+        self._arr = (np.asarray(rows, dtype=np.float64) if rows
+                     else np.zeros((0, 6)))
+        self._extra: dict = {}
+
+    @staticmethod
+    def _points_box(pts):
+        xs = [p.x() for p in pts]
+        ys = [p.y() for p in pts]
+        zs = [p.z() for p in pts]
+        if not xs:
+            return (0.0,) * 6
+        return (min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
+
+    def _box(self, item):
+        hit = self._extra.get(id(item))
+        if hit is not None and hit[0] is item:
+            return hit[1]
+        pts = item.vertices if hasattr(item, "vertices") else (item.a, item.b)
+        box = self._points_box(pts)
+        self._extra[id(item)] = (item, box)
+        return box
+
+    @staticmethod
+    def _window(pts):
+        xs = [p.x() for p in pts]
+        ys = [p.y() for p in pts]
+        zs = [p.z() for p in pts]
+        lo = (min(xs), min(ys), min(zs))
+        hi = (max(xs), max(ys), max(zs))
+        # 1 cm, plus a relative term for coordinates far from the origin
+        # (float32 positions, segment_intersection's relative tolerance).
+        m = 0.01 + 1e-6 * max(abs(c) for c in lo + hi)
+        return (lo[0] - m, lo[1] - m, lo[2] - m,
+                hi[0] + m, hi[1] + m, hi[2] + m)
+
+    def _pick(self, items, pts):
+        np = self._np
+        w = self._window(pts)
+        arr = self._arr
+        mask = ((arr[:, 3] >= w[0]) & (arr[:, 0] <= w[3])
+                & (arr[:, 4] >= w[1]) & (arr[:, 1] <= w[4])
+                & (arr[:, 5] >= w[2]) & (arr[:, 2] <= w[5]))
+        known = self._items
+        # Boxed at the start (kept alive in ``known``, so an id is never
+        # reused): the mask says. The plan's own new pieces are boxed here.
+        # The set work runs in C; only the hits and the new pieces reach
+        # Python, and the result keeps the order of ``items``.
+        keep = {id(known[r]) for r in np.flatnonzero(mask)}
+        ids = list(map(id, items))
+        new = set(ids).difference(self._row)
+        if new:
+            for it in items:
+                if id(it) in new:
+                    x0, y0, z0, x1, y1, z1 = self._box(it)
+                    if (x1 >= w[0] and x0 <= w[3] and y1 >= w[1]
+                            and y0 <= w[4] and z1 >= w[2] and z0 <= w[5]):
+                        keep.add(id(it))
+        if not keep:
+            return []
+        return [it for it, i in zip(items, ids) if i in keep]
+
+    def edges(self, edges, a, b):
+        return self._pick(edges, (a, b))
+
+    def faces(self, faces, a, b):
+        return self._pick(faces, (a, b))
+
+    def faces_around(self, faces, pts):
+        return self._pick(faces, list(pts))
+
+
+def _around(near, faces, loop):
+    """The faces a same-vertex face can be among: an equal face has the same
+    corners, hence the same box (``face_exists`` compares vertex sets)."""
+    return near.faces_around(faces, loop) if near is not None else faces
+
+
+def _plan_faces(commands, faces_snapshot, simulated, sa, sb, eye=None,
+                near=None) -> None:
     """Emit the face commands for a freshly added edge ``sa``–``sb``.
 
     Two paths, mutually exclusive:
@@ -145,7 +261,9 @@ def _plan_faces(commands, faces_snapshot, simulated, sa, sb, eye=None) -> None:
       ``find_cycles_through`` returns both sides, so a diagonal across a
       face-less square still faces both triangles.
     """
-    chord = find_chord_split(faces_snapshot, sa, sb)
+    chord = find_chord_split(
+        near.faces(faces_snapshot, sa, sb) if near is not None
+        else faces_snapshot, sa, sb)
     if chord is not None:
         mother, loop_a, loop_b = chord
         # Both halves ARE the mother, cut in two: they keep her paint, and
@@ -158,13 +276,17 @@ def _plan_faces(commands, faces_snapshot, simulated, sa, sb, eye=None) -> None:
         commands.append(DeleteFaceCommand(mother))
         faces_snapshot.remove(mother)
         for loop in (loop_a, loop_b):
-            if is_planar(loop) and not face_exists(faces_snapshot, loop):
+            if is_planar(loop) and not face_exists(
+                    _around(near, faces_snapshot, loop), loop):
                 commands.append(AddFaceCommand(loop, attrs=keep))
                 faces_snapshot.append(Face(list(loop), attrs=keep))
         return
 
-    for cycle in find_cycles_through(simulated, sa, sb):
-        if is_planar(cycle) and not face_exists(faces_snapshot, cycle):
+    for cycle in find_cycles_through(
+            simulated, sa, sb,
+            key=getattr(near, "key", None) if near is not None else None):
+        if is_planar(cycle) and not face_exists(
+                _around(near, faces_snapshot, cycle), cycle):
             cycle = face_up_or_toward(cycle, eye)
             commands.append(AddFaceCommand(cycle))
             faces_snapshot.append(Face(list(cycle)))

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from views import prompts as _prompts
 
+import os
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPoint, QRect, QSettings, QSize, Qt
@@ -61,10 +62,10 @@ from core.textlabel import TextLabel
 from georef.datum import SceneDatum
 from georef.geopath import GeoPath
 from georef.tiles import DEFAULT_SOURCE_ID, PRESETS, TileLayer, custom_source
-from tools.paint import PaintTool
+from tools.paint import RECENT_MAX, PaintTool
 
 from core.paths import app_root
-from core.units import fmt_area, fmt_len
+from core.units import fmt_area, fmt_len, fmt_volume
 
 _TEX_DIR = app_root() / "resources" / "textures"
 #: RAL Classic — the paint standard a drawing can be specified in. Its names
@@ -204,7 +205,19 @@ def _default_pixmap(size=_SWATCH) -> QPixmap:
 
 
 def _texture_pixmap(path, size=_SWATCH) -> QPixmap | None:
-    img = QImage(str(path))
+    """A swatch of the image at *path*. Read with the allocation limit off:
+    ``QImage(path)`` refuses anything over Qt's 256 MB default, so a big
+    texture (a packaging artwork, #460) painted fine — the viewport lifts
+    the limit — but had no swatch at all."""
+    from PySide6.QtGui import QImageReader
+    limit = QImageReader.allocationLimit()
+    QImageReader.setAllocationLimit(0)
+    try:
+        reader = QImageReader(str(path))
+        reader.setAutoTransform(True)
+        img = reader.read()
+    finally:
+        QImageReader.setAllocationLimit(limit)
     if img.isNull():
         return None
     return QPixmap.fromImage(img.scaled(size, size, Qt.IgnoreAspectRatio,
@@ -1051,6 +1064,8 @@ class ComponentsPanel(QWidget):
     panel costs a handful of pixmap loads and never touches the GL renderer."""
 
     COLS = 3
+    #: Rows from which the «In model» list offers its name filter.
+    FILTER_FROM = 8
 
     def __init__(self, window) -> None:
         super().__init__()
@@ -1117,49 +1132,201 @@ class ComponentsPanel(QWidget):
         # from; it says nothing about what you already have, which is what
         # you actually look for when you want to find or re-place a piece.
         lay.addWidget(QLabel(f"<b>{tr('In model')}</b>"))
+        # A long list is searched by name rather than scrolled (the list
+        # «can get quite big», PR #4 review). Only shown once it is long.
+        self._in_model_filter = QLineEdit()
+        self._in_model_filter.setPlaceholderText(tr("Filter by name…"))
+        self._in_model_filter.setClearButtonEnabled(True)
+        self._in_model_filter.textChanged.connect(self._apply_in_model_filter)
+        lay.addWidget(self._in_model_filter)
         self._in_model = QListWidget()
         self._in_model.setToolTip(tr(
             "Components placed in this drawing — click one to select its "
             "copies"))
         self._in_model.itemClicked.connect(self._select_component)
+        # Each row shows what the component looks like
+        # (views/component_thumbs.py), not only its name.
+        from views.component_thumbs import SIZE as _THUMB
+        self._in_model.setIconSize(QSize(_THUMB, _THUMB))
+        # Right-click a row: the same two moves the viewport's menu offers,
+        # from the list — which is where a long one is searched anyway.
+        self._in_model.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._in_model.customContextMenuRequested.connect(
+            self._in_model_menu)
         lay.addWidget(self._in_model)
+        # The definitions of another document, kept here unplaced: a
+        # library drawn from a file of one's own.
+        from_file = QPushButton(tr("Components from File…"))
+        from_file.setToolTip(tr(
+            "Add the components of another IngeTrazo document to this "
+            "list, kept in the file and ready to place or swap in"))
+        from_file.clicked.connect(window._on_components_from_file)
+        lay.addWidget(from_file)
         self.refresh_in_model()
 
     def _components_in_model(self) -> list:
-        """``[(name, faces, [groups])]`` per distinct prototype, most copies
-        first. Instances share their prototype mesh, so identity groups them —
-        no geometry is walked."""
+        """``[(name, faces, [groups], template)]`` per distinct prototype,
+        most copies first. Instances share their prototype mesh, so identity
+        groups them — no geometry is walked. ``template`` is the definition
+        kept in the file (``None`` when it is not kept); a kept one with no
+        copy placed is a row too, with an empty list."""
+        from core.kept_components import kept_template
+        scene = self._window.viewport.scene
         by_proto: dict = {}
-        for g in self._window.viewport.scene.groups:
+        for g in scene.groups:
             if not g.is_component() or getattr(g, "billboard", False):
                 continue
             by_proto.setdefault(id(g.mesh), []).append(g)
-        rows = [(gs[0].name, len(gs[0].mesh.faces), gs)
+        rows = [(gs[0].name, len(gs[0].mesh.faces), gs,
+                 kept_template(scene, gs[0].mesh))
                 for gs in by_proto.values()]
-        rows.sort(key=lambda r: (-len(r[2]), r[0].lower()))
+        rows += [(t.name, len(t.mesh.faces), [], t)
+                 for t in getattr(scene, "kept_components", None) or ()
+                 if id(t.mesh) not in by_proto]
+        rows.sort(key=lambda r: (-len(r[2]), (r[0] or "").lower()))
         return rows
 
+    def on_scene_changed(self) -> None:
+        """The tray's per-change call. The «In model» list reads every
+        definition's signature (its faces and paint) to know whether its
+        thumbnail changed: on the Plaza that was +20 ms on every edit, its
+        section folded or its tab hidden (release_check, 09-10). Refreshed
+        now when on screen, on showing otherwise — like the Browser. A
+        window not shown yet (scripts, tests) refreshes at once, as before."""
+        if not self._window.isVisible():
+            self.refresh_in_model()
+            return
+        if not self.isVisible():
+            if not getattr(self, "_in_model_stale", False):
+                # Its rows hold the groups they list: kept while it waits,
+                # they held a whole previous document in memory after
+                # Open (+130 MB on the Plaza, release_check 10-10).
+                self._in_model.clear()
+            self._in_model_stale = True
+            return
+        # On screen: one refresh 300 ms after the last edit, as Materials
+        # does — a burst of edits (arrows, repeated pushes) pays it once.
+        timer = getattr(self, "_in_model_timer", None)
+        if timer is None:
+            from PySide6.QtCore import QTimer
+            timer = self._in_model_timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self.refresh_in_model)
+        timer.start(300)
+
+    def showEvent(self, ev) -> None:
+        super().showEvent(ev)
+        if getattr(self, "_in_model_stale", False):
+            self._in_model_stale = False
+            self.refresh_in_model()
+
     def refresh_in_model(self) -> None:
+        from views.component_thumbs import thumbnail
         self._in_model.clear()
-        for name, faces, gs in self._components_in_model():
+        for name, faces, gs, kept in self._components_in_model():
             copies = len(gs)
             label = f"{name}  ({copies}×, {faces} " + tr("Faces").lower() + ")"
+            if kept is not None:
+                label += "  · " + tr("kept")
             item = QListWidgetItem(label)
+            item.setIcon(QIcon(thumbnail(gs[0] if gs else kept)))
             item.setData(Qt.UserRole, gs)
+            item.setData(Qt.UserRole + 1, kept)
             self._in_model.addItem(item)
         if self._in_model.count() == 0:
             self._in_model.addItem(QListWidgetItem(tr("No components yet")))
+        self._in_model_filter.setVisible(
+            self._in_model.count() >= self.FILTER_FROM
+            or bool(self._in_model_filter.text()))
+        self._apply_in_model_filter()
+
+    def _apply_in_model_filter(self, _text=None) -> None:
+        """Hide the rows whose name does not hold the filter text (any
+        case, accents as typed). The list keeps its rows; only their
+        visibility changes, so a refresh does not lose the filter."""
+        needle = self._in_model_filter.text().strip().casefold()
+        for i in range(self._in_model.count()):
+            item = self._in_model.item(i)
+            groups = item.data(Qt.UserRole) or []
+            kept = item.data(Qt.UserRole + 1)
+            definition = groups[0] if groups else kept
+            name = (definition.name or "") if definition is not None else ""
+            item.setHidden(bool(needle) and definition is not None
+                           and needle not in name.casefold())
         fit_rows(self._in_model, max_rows=12)
 
     def _select_component(self, item) -> None:
         groups = item.data(Qt.UserRole)
-        if not groups:
+        if groups:
+            self._select_groups(groups)
+
+    def _in_model_actions(self, groups, kept=None) -> list:
+        """``[(text, callback, checked, tip)]`` for a row of the «In model»
+        list — its right-click menu, kept apart so it can be read without
+        opening one. ``callback`` None = shown greyed; ``checked`` None =
+        not a check entry; ``tip`` None = no tooltip."""
+        from core.kept_components import make_template, place_copy
+        definition = kept if kept is not None else groups[0]
+        swap = [g for g in self._window.viewport.scene.selection
+                if isinstance(g, Group) and g.is_component()
+                and g.mesh is not definition.mesh]
+        out = [(tr("Select Instances ({n})", n=len(groups)),
+                (lambda: self._select_groups(groups)) if groups else None,
+                None, None)]
+        if swap:
+            out.append((tr("Replace {n} Selected with This", n=len(swap)),
+                        lambda: self._window.replace_selection_with(
+                            definition), None, None))
+        else:
+            out.append((tr("Replace Selection with This"), None, None,
+                        tr("Select the instances of another component in "
+                           "the model first")))
+        out.append((tr("Place a Copy"),
+                    lambda: self._window._start_place(place_copy(
+                        kept if kept is not None
+                        else make_template(definition))), None, None))
+        out.append((tr("Keep in File"),
+                    lambda: self._window.keep_component(
+                        definition, kept is None), kept is not None,
+                    tr("Keep this definition in the file even with no copy "
+                       "placed, to place it or swap copies for it later")))
+        out.append((tr("Rename…"),
+                    lambda: self._window.rename_component(definition),
+                    None, tr("Renames every copy of this component")))
+        return out
+
+    def _in_model_menu(self, pos) -> None:
+        item = self._in_model.itemAt(pos)
+        if item is None:
             return
+        groups = item.data(Qt.UserRole) or []
+        kept = item.data(Qt.UserRole + 1)
+        if not groups and kept is None:
+            return                          # «No components yet»
+        menu = QMenu(self._in_model)
+        menu.setToolTipsVisible(True)
+        for text, callback, checked, tip in self._in_model_actions(
+                groups, kept):
+            act = menu.addAction(text)
+            if checked is not None:
+                act.setCheckable(True)
+                act.setChecked(checked)
+            if tip:
+                act.setToolTip(tip)
+            if callback is None:
+                act.setEnabled(False)
+            else:
+                act.triggered.connect(lambda _c=False, cb=callback: cb())
+        menu.exec(self._in_model.viewport().mapToGlobal(pos))
+
+    def _select_groups(self, groups) -> None:
         scene = self._window.viewport.scene
         scene.selection.clear()
         scene.selection.update(groups)
         scene.bump_view()
         self._window.viewport.update()
+        self._window.statusBar().showMessage(
+            tr("{n} entities selected", n=len(groups)), 2500)
 
 
 class PartsPanel(QWidget):
@@ -1738,6 +1905,16 @@ class MaterialsPanel(QWidget):
         root.addWidget(self._edit_body)
         self._load_texture_fields()
 
+        # The last materials painted with, so texturing a model does not
+        # mean hunting for the same brick in the library every time.
+        self._recent_heading = self._heading(tr("Recent"))
+        root.addWidget(self._recent_heading)
+        self._recent_grid = FlowLayout(spacing=2)
+        root.addLayout(self._recent_grid)
+        if not PaintTool.recent:
+            PaintTool.recent = load_recent_materials()
+        self._refresh_recent()
+
         root.addWidget(self._heading(tr("In model")))
         self._in_model_grid = FlowLayout(spacing=2)
         root.addLayout(self._in_model_grid)
@@ -2303,6 +2480,55 @@ class MaterialsPanel(QWidget):
         # A texture picked from disk is a material named after its file.
         self._apply_texture(path_str, size, name=Path(path_str).stem)
 
+    # ---- Recent ----------------------------------------------------------
+    def recent_materials_changed(self) -> None:
+        """The Paint tool painted with a material: keep it and show it."""
+        save_recent_materials(PaintTool.recent)
+        self._refresh_recent()
+
+    def _refresh_recent(self) -> None:
+        while self._recent_grid.count():
+            w = self._recent_grid.takeAt(0).widget()
+            if w is not None:
+                w.hide()
+                w.setParent(None)
+                w.deleteLater()
+        for entry in PaintTool.recent:
+            tex = entry.get("texture")
+            pm = (_texture_pixmap(tex["path"]) if tex
+                  else _color_pixmap(tuple(entry.get("color") or (1, 1, 1))))
+            if pm is None:
+                continue
+            label = entry.get("mat") or (
+                Path(tex["path"]).stem if tex else tr("Color"))
+            b = _swatch_button(pm, label)
+            b.clicked.connect(lambda _=False, e=entry: self._apply_recent(e))
+            self._recent_grid.addWidget(b)
+        shown = self._recent_grid.count() > 0
+        self._recent_heading.setVisible(shown)
+
+    def _apply_recent(self, entry: dict) -> None:
+        """Make a recent material the active paint, exactly as it was
+        painted: image with its size, turn and tint, or the colour; its
+        translucency and its name."""
+        tex = entry.get("texture")
+        PaintTool.current_is_default = False
+        PaintTool.current_texture_plane = None
+        if tex:
+            PaintTool.current_texture = dict(tex)
+        else:
+            PaintTool.current_texture = None
+            PaintTool.current_color = tuple(entry.get("color") or (1, 1, 1))
+        PaintTool.current_opacity = entry.get("opacity")
+        PaintTool.current_material = self._material_for(
+            entry.get("mat"),
+            color=None if tex else PaintTool.current_color,
+            texture=dict(tex) if tex else None,
+            opacity=entry.get("opacity"))
+        self._window._activate_tool("paint")
+        self._load_texture_fields()
+        self._refresh_preview()
+
     def sync_from_paint(self) -> None:
         """Mirror what the Paint tool holds NOW — called after the
         eyedropper sampled a face, so the «Activo» swatch and the size
@@ -2334,6 +2560,38 @@ class MaterialsPanel(QWidget):
                 self._preview.setPixmap(pm)
                 return
         self._preview.setPixmap(_color_pixmap(PaintTool.current_color))
+
+
+_RECENT_KEY = "paint/recent_materials"
+
+
+def load_recent_materials() -> list[dict]:
+    """The «Recent» materials saved by the last session. An image that is
+    gone from disk (an import's temporary folder) is dropped."""
+    import json
+    raw = QSettings().value(_RECENT_KEY) or ""
+    try:
+        data = json.loads(raw) if isinstance(raw, str) and raw else []
+    except ValueError:
+        return []
+    out = []
+    for e in data if isinstance(data, list) else []:
+        if not isinstance(e, dict) or not (e.get("texture") or e.get("color")):
+            continue
+        tex = e.get("texture")
+        if tex and not (isinstance(tex, dict) and tex.get("path")
+                        and Path(tex["path"]).exists()):
+            continue
+        out.append(e)
+    return out[:RECENT_MAX]
+
+
+def save_recent_materials(entries: list[dict]) -> None:
+    import json
+    try:
+        QSettings().setValue(_RECENT_KEY, json.dumps(entries[:RECENT_MAX]))
+    except (TypeError, ValueError):
+        pass                       # a value JSON cannot hold: keep the old
 
 
 def _dialog_parent(panel) -> QWidget:
@@ -3115,7 +3373,7 @@ class EntityInfoPanel(QWidget):
             e = sel[0]
             if isinstance(e, Face):
                 mat = self._material_of(e)
-                return (f"<b>{tr('Face')}</b><br>{tr('Area')}: {e.area():.3f} m²<br>"
+                return (f"<b>{tr('Face')}</b><br>{tr('Area')}: {fmt_area(e.area())}<br>"
                         f"{tr('Vertices')}: {len(e.vertices)}<br>"
                         f"{tr('Material')}: {mat}")
             if isinstance(e, Edge):
@@ -3129,7 +3387,7 @@ class EntityInfoPanel(QWidget):
                 # The usual «Solid Group» / «Solid Component» with its
                 # volume, the Solid Tools' own test (core.solids).
                 vol = self._solid_volume(e)
-                solid = (f"<br>{tr('Volume')}: {vol:.3f} m³"
+                solid = (f"<br>{tr('Volume')}: {fmt_volume(vol)}"
                          if vol is not None else "")
                 if e.is_component():
                     # Entity Info usually tells a component from a group and
@@ -3180,7 +3438,7 @@ class EntityInfoPanel(QWidget):
                 f"{tr('Perimeter')}: {fmt_len(path.perimeter())}"]
         if path.closed:
             area = path.area()
-            rows.append(f"{tr('Area (plan)')}: {area:.2f} m² "
+            rows.append(f"{tr('Area (plan)')}: {fmt_area(area)} "
                         f"({area / 10000:.4f} ha)")
             sa = path.surface_area()
             if sa is not None:
@@ -3494,6 +3752,11 @@ class LayersPanel(QWidget):
 
 
 
+#: Kill-switch: set INGETRAZO_SCENE_ALWAYS_BUMP=1 to bump ``scene.version``
+#: on every scene recall, as before — also one that only moves the camera.
+_SCENE_ALWAYS_BUMP = os.environ.get("INGETRAZO_SCENE_ALWAYS_BUMP", "") == "1"
+
+
 class ScenesPanel(QWidget):
     """Saved views — "Scenes": named camera + layer-visibility
     snapshots. Double-click recalls one; the buttons capture the current
@@ -3555,7 +3818,14 @@ class ScenesPanel(QWidget):
         if view is None:
             return
         scene = self._scene()
+        from core.saved_views import shown_state
+        before = shown_state(scene)
         view.apply(scene, self._window.viewport.camera)
+        # A scene that only moves the camera changes nothing the caches
+        # keyed on ``scene.version`` hold: bumping it re-synced every edge
+        # and profile of the model (120 ms on a 1 M-face building) and
+        # marked the document modified for a look around.
+        changed = _SCENE_ALWAYS_BUMP or shown_state(scene) != before
         # The view may carry a style snapshot — keep the menu in step.
         sync = getattr(self._window, "_sync_style_menu", None)
         if sync is not None:
@@ -3567,7 +3837,10 @@ class ScenesPanel(QWidget):
                 and not scene.entity_selectable(s)]
         for s in dead:
             scene.selection.discard(s)
-        self._touch()
+        if changed:
+            self._touch()
+        else:
+            self._window.viewport.update()
         self._window.tray.layers.refresh()
         self._window.statusBar().showMessage(
             tr("Scene '{name}'", name=view.name), 2000)
@@ -3578,7 +3851,10 @@ class ScenesPanel(QWidget):
         view = item.data(Qt.UserRole)
         new_name = item.text().strip()
         if view is not None and new_name:
-            view.name = new_name
+            # Through the browser's rule: the sheet views that show this
+            # scene follow the new name instead of losing their scene.
+            from core.outliner import rename_scene
+            rename_scene(self._scene(), view, new_name)
         self.refresh()
         self._touch()
 
@@ -3859,7 +4135,7 @@ class Tray(QDockWidget):
         timer.start(300)
         self.layers.refresh()
         self.scenes.refresh()
-        self.components.refresh_in_model()
+        self.components.on_scene_changed()
         self.parts.refresh()
 
 

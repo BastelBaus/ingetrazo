@@ -77,6 +77,9 @@ Gabriel Rodríguez Arregin  (github.com/canalsecuario-blip)
     Command search (pull request #168): F3 runs any command by name, as in
     Blender — initials, typos and both languages, in the model and the
     sheet composer.
+    The Browser: the model's groups and components as a tree (the
+    Outliner, built with Carlos Martins's plugin, #87, on Roy Méndez
+    Castro's scope, #219), and Views and sheets in the sheet composer.
 
 José Castro Basso — FADU–UDELAR, Montevideo  (github.com/castrobasso)
     Architect and teacher of architectural representation. Two-point
@@ -119,6 +122,11 @@ Carlos Martins  (github.com/fafecm)
     diagonal guides crossing a hair off (#110), a group's paint missing
     from the materials in the model (#133), groups drawn out of place
     after exploding (#134).
+    The Project Structure plugin (#87), shared with its code: the tree of
+    groups mirrored with the view both ways, the eye per node and nested
+    groups entered through their path, re-nesting by drag and drop and a
+    padlock per group — the base of the Outliner, which now keeps the lock
+    in the document.
 
 mnavarromugas  (github.com/mnavarromugas)
     The first to try the 3D mouse on a real 3Dconnexion SpaceMouse (#108)
@@ -128,6 +136,11 @@ xyont  (github.com/xyont)
     Reports from mechanical modelling in millimetres: pulling a face up
     against a wall (#94), units kept for new documents (#121), colours by
     layer (#120).
+
+Roy Méndez Castro  (github.com/roymendezcastro)
+    Civil engineer, Costa Rica. Wrote down the Outliner (#219): the
+    minimum a tree of nested groups needs, what comes after it, and that
+    scenes must remember what it hides.
 
 kagehak  (github.com/kagehak)
     STL import (pull request #161): binary and ASCII, the model's unit,

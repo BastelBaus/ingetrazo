@@ -506,14 +506,31 @@ class ScaleTool(Tool):
         if any(abs(f - 1.0) > 1e-9 for f in self._factors):
             self._commit(viewport, self._factors)
 
-    def on_key(self, viewport, key: int, modifiers) -> bool:
-        if key == Qt.Key_Control:
-            # Official doc: "tap the Ctrl key … to toggle this functionality".
-            self.about_center = not self.about_center
-            self._reanchor(viewport)
+    def _toggle_center(self, viewport, say: bool = True) -> None:
+        self.about_center = not self.about_center
+        self._reanchor(viewport)
+        if say:
             viewport.flash_status(
                 tr("About Center: on") if self.about_center
                 else tr("About Center: off"))
+        viewport.update()
+
+    def on_key_release(self, viewport, key: int) -> bool:
+        # Toggled on the PRESS so the anchor moves at once; a Ctrl that was
+        # part of a shortcut (Ctrl+Z…) takes it back on the release (#342).
+        if key != Qt.Key_Control or not getattr(self, "_ctrl_toggled", False):
+            return False
+        self._ctrl_toggled = False
+        tapped = getattr(viewport, "ctrl_tapped", None)
+        if callable(tapped) and not tapped():
+            self._toggle_center(viewport, say=False)
+        return True
+
+    def on_key(self, viewport, key: int, modifiers) -> bool:
+        if key == Qt.Key_Control:
+            # A tap of Ctrl toggles scaling about the centre.
+            self._toggle_center(viewport)
+            self._ctrl_toggled = True
             return True
         if key == Qt.Key_Shift:
             self.uniform = not self.uniform

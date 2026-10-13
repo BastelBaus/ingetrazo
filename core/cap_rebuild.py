@@ -798,14 +798,27 @@ def plane_key(point: QVector3D, normal: QVector3D):
     return (round(n.x(), 3), round(n.y(), 3), round(n.z(), 3), round(d, 3)), point, n
 
 
-def crack_planes(mesh) -> list:
+def crack_planes(mesh, near=None) -> list:
     """Representative ``(origin, normal)`` for each distinct plane that carries a
     crack — a boundary edge bordering a single face. These are the planes a
     nested push can leave unclosed, the ones :func:`apply_rebuild` should
-    recompute (the deterministic replacement for ``cap_boundary_loops``)."""
+    recompute (the deterministic replacement for ``cap_boundary_loops``).
+
+    ``near`` — a box ``(x0, y0, z0, x1, y1, z1)`` — keeps only the cracks with
+    an end inside it: the ones the operation that box surrounds can have left.
+    An imported model is open in many places, and every push re-rebuilt every
+    plane with a crack anywhere in the group: 178 planes, minutes, for one
+    face of the Plaza (09-10) — and planes far from the push recomputed."""
     seen: dict = {}
+
+    def inside(p) -> bool:
+        return (near[0] <= p.x() <= near[3] and near[1] <= p.y() <= near[4]
+                and near[2] <= p.z() <= near[5])
+
     for e in mesh.edges:
         if len(e.faces) != 1:
+            continue
+        if near is not None and not (inside(e.a) or inside(e.b)):
             continue
         f = e.faces[0]
         key, origin, n = plane_key(f.centroid(), f.normal())

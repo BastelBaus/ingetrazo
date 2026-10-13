@@ -96,6 +96,10 @@ def _candidates(p_dir: Path):
         if entry.is_file() and entry.suffix == ".py":
             yield entry.stem, entry
         elif entry.is_dir() and (entry / "__init__.py").is_file():
+            if (entry / ".disabled").is_file():
+                log.info("plugin %r is disabled by the extension manager",
+                         entry.name)
+                continue
             yield entry.name, entry / "__init__.py"
 
 
@@ -149,7 +153,8 @@ def discover_plugins(dirs=None):
                                                             inspect.isclass)
                     if (issubclass(obj, Tool) and obj is not Tool
                         and obj.__module__ == mod.__name__     # defined here
-                        and not inspect.isabstract(obj))
+                        and not inspect.isabstract(obj)
+                        and _builds_bare(obj))
                 ]
             except Exception as exc:                # noqa: BLE001 — contract
                 log.exception("failed to load plugin %r from %s", stem, file)
@@ -164,3 +169,18 @@ def discover_plugins(dirs=None):
                 for t in tools:
                     log.info("loaded plugin tool %r from %s", t.name, file)
     return plugins, errors
+
+
+def _builds_bare(cls) -> bool:
+    """Whether the loader can make ``cls`` on its own — no required
+    argument. A tool that needs one (the app, a mode) is the extension's to
+    build in its ``setup(app)``; making it here raised and threw away the
+    whole extension, setup and panel included (planArq, José Castro)."""
+    try:
+        sig = inspect.signature(cls.__init__)
+    except (TypeError, ValueError):
+        return True
+    params = list(sig.parameters.values())[1:]           # past ``self``
+    return all(p.default is not p.empty
+               or p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+               for p in params)

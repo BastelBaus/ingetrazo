@@ -807,6 +807,7 @@ class NivelItem:
     text: str = "N.P.T. {z}"     # {z} = the signed level
     z_m: float = 0.0             # the level when free (metres)
     datum_m: float = 0.0         # the project's ±0.00, in model metres
+    units: str = "m"             # how {z} reads; "" / missing stays metres
     decimals: int = 2
     size_mm: float = 2.5         # text height
     line_mm: float = 14.0        # the level line from the apex
@@ -838,12 +839,11 @@ class NivelItem:
         return z - float(self.datum_m)
 
     def value_text(self) -> str:
-        """«+0.15», «-0.30», «±0.00» (zero at the shown precision)."""
-        d = max(0, int(self.decimals))
-        v = self.level_m()
-        if round(v, d) == 0:
-            return "±" + f"{0.0:.{d}f}"
-        return f"{v:+.{d}f}"
+        """«+0.15», «-0.30», «±0.00» in metres; the same signs in the
+        mark's own unit otherwise («+0'5.91"»)."""
+        from core.units import format_signed_level
+        return format_signed_level(
+            self.level_m(), getattr(self, "units", "m") or "m", self.decimals)
 
     def label(self) -> str:
         text = self.text or "{z}"

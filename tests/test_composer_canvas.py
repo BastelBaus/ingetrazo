@@ -68,7 +68,11 @@ def _view(mode="linea"):
 def _mouse(view, etype, px, py, button=Qt.LeftButton,
            buttons=Qt.NoButton, mods=Qt.NoModifier):
     pos = QPointF(px, py)
-    ev = QMouseEvent(etype, pos, pos, button, buttons, mods)
+    # The global point is where that viewport pixel is on the screen: the
+    # scene finds what is under a press through it, so passing the local
+    # point again only worked while the page sat at the window's left edge.
+    glob = QPointF(view.viewport().mapToGlobal(pos.toPoint()))
+    ev = QMouseEvent(etype, pos, glob, button, buttons, mods)
     if etype == QEvent.MouseButtonPress:
         view.mousePressEvent(ev)
     elif etype == QEvent.MouseMove:

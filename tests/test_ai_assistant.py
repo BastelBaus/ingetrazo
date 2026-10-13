@@ -467,6 +467,89 @@ def test_step_limit_announces_instead_of_silent_stop(monkeypatch):
         win.close()
 
 
+def test_consecutive_failures_hand_control_back(monkeypatch):
+    # #461: llama3.2 fed its own TypeError back for all 12 rounds. Three
+    # failed blocks in a row stop the loop and say so; a success between
+    # failures resets the count.
+    import plugins.ai_assistant as pa
+    from views.main_window import MainWindow
+
+    sent = []
+    replies = iter(["```python\n1/0\n```", "```python\nprint('ok')\n```"]
+                   + ["```python\n'a' | 'b'\n```"] * 10)
+
+    def fake_chat(*a, **k):
+        sent.append(1)
+        return next(replies)
+
+    monkeypatch.setattr(ai, "chat", fake_chat)
+    win = MainWindow()
+    try:
+        dlg = pa.AsistenteDialog(win.viewport, parent=win)
+        dlg._provider.setCurrentIndex(0)
+        dlg._key.setText("AIzaTest")
+        dlg._shots.setChecked(False)
+        dlg._input.setText("dibuja un cubo")
+        dlg._on_send()
+        app = QApplication.instance()
+        for _ in range(2000):
+            app.processEvents()
+            if not dlg._busy:
+                break
+        assert not dlg._busy
+        # fail, ok, fail ×3 → stop: five blocks, not twelve.
+        assert len(sent) == 5
+        assert "3 attempts in a row failed" in dlg._chat.toPlainText()
+    finally:
+        win._saved_version = win.viewport.scene.version
+        win.close()
+
+
+def test_small_local_models_are_flagged():
+    assert ai.small_local_model("ollama", "llama3.2")
+    assert ai.small_local_model("ollama", "qwen2.5-coder:1.5b")
+    assert not ai.small_local_model("ollama", ai.DEFAULT_MODELS["ollama"])
+    assert not ai.small_local_model("ollama", "llama3.1:8b")
+    assert not ai.small_local_model("groq", "llama3.2")
+
+
+def test_box_helper_builds_a_closed_box():
+    from core.orient import is_closed
+    from views.main_window import MainWindow
+    win = MainWindow()
+    try:
+        vp = win.viewport
+        r = ai.run_transactional(
+            vp, "g = box((1, 2, 0), (6, 6, 6), name='Cubo')", {"__name__": "__ai__"})
+        assert r["error"] is None and r["changed"]
+        g = vp.scene.groups[-1]
+        assert g.name == "Cubo" and len(g.mesh.faces) == 6
+        assert is_closed(g.mesh)
+        xs = sorted({round(v.position.x(), 6) for v in g.mesh.vertices})
+        zs = sorted({round(v.position.z(), 6) for v in g.mesh.vertices})
+        assert xs == [1.0, 7.0] and zs == [0.0, 6.0]
+        # A model that appends what the helpers already added (live with
+        # qwen3.5): no duplicate, and house()'s LIST is flattened, not
+        # left in scene.groups to crash the next paint.
+        n0 = len(vp.scene.groups)
+        r = ai.run_transactional(vp, (
+            "b = box((20, 0, 0), (1, 1, 1))\ngroups.append(b)\n"
+            "gs = house(6, 4, origin=(30, 0))\ngroups.append(gs)"),
+            {"__name__": "__ai__"})
+        assert r["error"] is None
+        from core.group import Group
+        added = vp.scene.groups[n0:]
+        assert all(isinstance(x, Group) for x in vp.scene.groups)
+        # box + house walls, floor, roof (no openings → no carpentry).
+        assert len(added) == len({id(x) for x in added}) == 1 + 3
+        # The recipe book teaches it to both doors.
+        from core import ai_recipes
+        assert "box((x,y,z), (dx,dy,dz)" in ai_recipes.RECIPES
+    finally:
+        win._saved_version = win.viewport.scene.version
+        win.close()
+
+
 def test_encode_photo_rejects_garbage(tmp_path):
     from plugins.ai_assistant import AsistenteDialog
     from views.main_window import MainWindow
@@ -768,3 +851,24 @@ def test_rejected_key_names_the_prefix_to_check():
     hint = AsistenteDialog._bad_key_hint("groq", err)
     assert hint is not None and "gsk_" in hint
     assert AsistenteDialog._bad_key_hint("groq", "HTTP 503: busy") is None
+
+
+def test_openai_asks_for_max_completion_tokens():
+    """OpenAI's newer models reject ``max_tokens`` with HTTP 400 (#517);
+    ``max_completion_tokens`` works for all of them. The other
+    OpenAI-compatible services keep ``max_tokens``, the name they accept."""
+    msgs = [{"role": "user", "text": "x"}]
+    _u, _h, payload = ai.build_request("openai", "gpt-5", "sk-k", "SYS",
+                                       msgs, max_tokens=8192)
+    body = json.loads(payload)
+    assert body["max_completion_tokens"] == 8192
+    assert "max_tokens" not in body
+    for provider in ("groq", "gemini", "openrouter", "deepseek", "ollama"):
+        _u, _h, payload = ai.build_request(provider, "m", "k", "SYS", msgs,
+                                           max_tokens=8192)
+        body = json.loads(payload)
+        assert body["max_tokens"] == 8192, provider
+        assert "max_completion_tokens" not in body, provider
+    _u, _h, payload = ai.build_request("anthropic", "claude-sonnet-5", "k",
+                                       "SYS", msgs, max_tokens=8192)
+    assert json.loads(payload)["max_tokens"] == 8192

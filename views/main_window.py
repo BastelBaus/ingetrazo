@@ -22,10 +22,12 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QStatusBar,
+    QTabBar,
     QToolBar,
     QWidget,
 )
 
+from core import general_settings as _gs
 from core.i18n import (LANGUAGE_NAMES, available_languages, current_language,
                        set_language, tr)
 from views.theme import style as theme_style
@@ -149,11 +151,86 @@ def _obj_parts(temp):
         soften_smooth_edges(kid.mesh, cos_threshold=0.55)
     return group
 
+class _DockTitleTab(QTabBar):
+    """The title bar of a side tray: one tab with its name, as the tabs Qt
+    draws when trays share a side — so a tray alone on its side still has
+    a tab to drag to the other side, to right-click and to drop on. Qt
+    hides it while the tray is tabbed with others (their tab bar shows)."""
+
+    def __init__(self, window, dock) -> None:
+        super().__init__(dock)
+        self.addTab(dock.windowTitle())
+        self.setDrawBase(False)
+        self.setExpanding(False)
+        self.setElideMode(Qt.ElideNone)
+        dock.windowTitleChanged.connect(lambda t: self.setTabText(0, t))
+        self.setProperty("ingetrazo_watched", True)
+        self.setAcceptDrops(True)
+        self.installEventFilter(window)
+
+
+class _DockDropZone(QWidget):
+    """Where a dragged tray tab can go, shown while it is dragged: a
+    translucent panel at one edge of the viewport, lit while the pointer is
+    over it; dropping there docks the tray (or the whole side) there."""
+
+    def __init__(self, window, area, label: str) -> None:
+        super().__init__(window)
+        self.window_ = window
+        self.area = area
+        self.label = label
+        self._hot = False
+        self.setAcceptDrops(True)
+        self.hide()
+
+    def set_hot(self, on: bool) -> None:
+        self._hot = on
+        self.update()
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasFormat(self.window_.DOCK_MIME):
+            event.acceptProposedAction()
+            self.set_hot(True)
+
+    def dragMoveEvent(self, event) -> None:
+        if event.mimeData().hasFormat(self.window_.DOCK_MIME):
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event) -> None:
+        self.set_hot(False)
+
+    def dropEvent(self, event) -> None:
+        if event.mimeData().hasFormat(self.window_.DOCK_MIME):
+            self.window_.drop_on_side(event.mimeData(), self.area)
+            event.acceptProposedAction()
+        self.set_hot(False)
+
+    def paintEvent(self, event) -> None:
+        from PySide6.QtGui import QColor, QPainter, QPen
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        from views.theme import accent_color
+        accent = accent_color()
+        fill = QColor(accent)
+        fill.setAlpha(110 if self._hot else 45)
+        p.setBrush(fill)
+        pen = QPen(accent, 2 if self._hot else 1)
+        pen.setStyle(Qt.SolidLine if self._hot else Qt.DashLine)
+        p.setPen(pen)
+        p.drawRoundedRect(self.rect().adjusted(4, 4, -4, -4), 8, 8)
+        p.setPen(QColor(255, 255, 255) if self._hot else accent)
+        p.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, self.label)
+        p.end()
+
+
 class MainWindow(QMainWindow):
     """Top-level IngeTrazo window."""
 
-    def __init__(self) -> None:
+    def __init__(self, defer_extensions: bool = False) -> None:
         super().__init__()
+        # main.py passes True: the plugins' setup runs once the window is up
+        # (see load_extensions). Set first — the menu bar is built below.
+        self._defer_extensions = bool(defer_extensions)
         self.resize(1280, 800)
 
         self._tools = {
@@ -245,7 +322,7 @@ class MainWindow(QMainWindow):
         self.viewport = Viewport(self)
         try:                                        # issue #56
             self.viewport.history.max_steps = int(
-                QSettings().value("general/undo_steps", 200))
+                _gs.value("undo_steps", 200))
         except (TypeError, ValueError):
             self.viewport.history.max_steps = 200
         self.viewport.glReady.connect(self._on_gl_ready)
@@ -291,14 +368,14 @@ class MainWindow(QMainWindow):
         from core import autosave
         if autosave.pending(None):
             from PySide6.QtCore import QTimer
-            QTimer.singleShot(0, self._offer_untitled_recovery)
+            QTimer.singleShot(0, self, self._offer_untitled_recovery)
 
     def showEvent(self, event) -> None:  # noqa: N802 — Qt override
         super().showEvent(event)
         if not getattr(self, "_toolbars_packed", True):
             from PySide6.QtCore import QTimer
             self._toolbars_packed = True
-            QTimer.singleShot(0, self._pack_toolbars)
+            QTimer.singleShot(0, self, self._pack_toolbars)
         if not getattr(self, "_ndof_connected", False):
             self._connect_ndof()
 
@@ -417,8 +494,8 @@ class MainWindow(QMainWindow):
             timer = self._autosave_timer = QTimer(self)
             timer.timeout.connect(self._on_autosave_tick)
         st = QSettings()
-        enabled = str(st.value("general/autosave", "1")) != "0"
-        minutes = max(1, min(60, int(st.value("general/autosave_min", 5))))
+        enabled = str(_gs.value("autosave", "1", st)) != "0"
+        minutes = max(1, min(60, int(_gs.value("autosave_min", 5, st))))
         timer.stop()
         if enabled:
             timer.start(minutes * 60 * 1000)
@@ -496,25 +573,27 @@ class MainWindow(QMainWindow):
         self.tray = Tray(self)
         self.bim_tray = BimTray(self)
         self.georef_tray = GeorefTray(self)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.tray)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.bim_tray)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.georef_tray)
-        self.tabifyDockWidget(self.tray, self.bim_tray)
-        self.tabifyDockWidget(self.bim_tray, self.georef_tray)
+        from views.outliner import ProjectBrowser
+        self.project_browser = ProjectBrowser(self)
+        self._lay_out_trays()
         # The trays are tabbed: the tab bar already names the active panel,
         # so each dock's own title bar would say the same thing right above
         # it. An empty title-bar widget removes the duplicate (a clean tray
         # look); panels are toggled from the View menu, not dragged around.
-        for dock in (self.tray, self.bim_tray, self.georef_tray):
+        for dock in (self.tray, self.bim_tray, self.georef_tray,
+                     self.project_browser):
             dock.setTitleBarWidget(QWidget(dock))
         self.tray.raise_()
         self._build_sidebar_handle()
+        self._setup_side_docks()
         self.viewport.sceneVersionChanged.connect(
             lambda _v: self.tray.on_scene_changed())
         self.viewport.sceneVersionChanged.connect(
             lambda _v: self.bim_tray.on_scene_changed())
         self.viewport.sceneVersionChanged.connect(
             lambda _v: self.georef_tray.on_scene_changed())
+        self.viewport.sceneVersionChanged.connect(
+            lambda _v: self.project_browser.on_scene_changed())
 
         # Styles, Shadows and Dimension style hang OFF THE TOOLBAR as
         # dropdown panels (user: the lateral bar was drowning, and floating
@@ -778,21 +857,63 @@ class MainWindow(QMainWindow):
         self.toolbars["views"] = views_tb
         # Order as Marco reads them (2026-09-14): iso, top, front, right,
         # left, back, bottom — the two you use most right after the iso.
-        for key, label, icon in [
-            ("iso", "Isometric", "view_iso"),
-            ("top", "Top", "view_top"),
-            ("front", "Front", "view_front"),
-            ("right", "Right", "view_right"),
-            ("left", "Left", "view_left"),
-            ("back", "Back", "view_back"),
-            ("bottom", "Bottom", "view_bottom"),
+        # The keys go by comfort, not by this order: the left hand holds
+        # Ctrl with the little finger and reaches 1-4 without leaving the
+        # keys, so the four daily views (plan, elevation, side, 3D) take
+        # them and the rare ones sit further away. The digits alone type a
+        # measure in the value box (views/shortcuts.py, reserved_reason).
+        self._view_actions = {}
+        for key, label, icon, keys in [
+            ("iso", "Isometric", "view_iso", "Ctrl+4"),
+            ("top", "Top", "view_top", "Ctrl+1"),
+            ("front", "Front", "view_front", "Ctrl+2"),
+            ("right", "Right", "view_right", "Ctrl+3"),
+            ("left", "Left", "view_left", "Ctrl+6"),
+            ("back", "Back", "view_back", "Ctrl+5"),
+            ("bottom", "Bottom", "view_bottom", "Ctrl+7"),
         ]:
             act = QAction(tool_icon(icon), tr(label), self)
-            act.setToolTip(tr(label))
+            act.setShortcut(QKeySequence(keys))
             act.setStatusTip(tr(_VIEW_TIPS[key]))
+            set_tooltip(act, tr(label))
             act.triggered.connect(lambda _c, k=key: self._on_standard_view(k))
             views_tb.addAction(act)
             self._icon_actions.append((act, icon))
+            self._view_actions[key] = act
+
+        # Projection quick buttons, one click each instead of Camera ▸:
+        # parallel, perspective, two-point (verticals kept vertical, the
+        # usual view for an architectural presentation). One of the three
+        # is always down; the viewport says when anything else (Shift+P, a
+        # scene, a saved view) changed the projection.
+        views_tb.addSeparator()
+        self._projection_group = QActionGroup(self)
+        self._projection_group.setExclusive(True)
+        self._projection_actions: dict[str, QAction] = {}
+        for mode, label, tip in [
+            ("parallel", "Parallel Projection",
+             "No vanishing points: measured elevations, plans and "
+             "isometrics."),
+            ("perspective", "Perspective",
+             "The view as the eye sees it."),
+            ("two_point", "Two-Point Perspective",
+             "Vertical lines stay vertical, the usual view for "
+             "architectural presentations."),
+        ]:
+            icon = "proj_" + mode
+            act = QAction(tool_icon(icon), tr(label), self)
+            act.setObjectName("projection_" + mode)
+            act.setCheckable(True)
+            act.setStatusTip(tr(tip))
+            set_tooltip(act, tr(label))     # names the keys, if given any
+            act.triggered.connect(
+                lambda _c, m=mode: self.viewport.set_projection(m))
+            self._projection_group.addAction(act)
+            views_tb.addAction(act)
+            self._icon_actions.append((act, icon))
+            self._projection_actions[mode] = act
+        self.viewport.projectionChanged.connect(self._sync_projection_buttons)
+        self._sync_projection_buttons(self.viewport.camera.projection_mode())
 
     def _describe_buttons(self) -> None:
         """A toolbar button's tooltip says what it does under its name and
@@ -804,6 +925,11 @@ class MainWindow(QMainWindow):
                 tip = act.statusTip()
                 if tip and tip not in act.toolTip():
                     act.setToolTip(f"{act.toolTip()}\n{tip}")
+
+    def _sync_projection_buttons(self, mode: str) -> None:
+        act = self._projection_actions.get(mode)
+        if act is not None and not act.isChecked():
+            act.setChecked(True)
 
     def _refresh_toolbar_icons(self) -> None:
         """Re-draw the programmatic toolbar icons for the current palette so a
@@ -850,9 +976,12 @@ class MainWindow(QMainWindow):
         self._redo_action = QAction(tr("Redo"), self)
         self._redo_action.setStatusTip(tr(
             "Bring back the change that was just undone."))
-        # Cover both classic Windows (Ctrl+Y) and Linux/macOS (Ctrl+Shift+Z).
+        # Both keys, spelled out: Ctrl+Y (Windows' habit) and Ctrl+Shift+Z
+        # (Linux and macOS). The platform's «Redo» key is Ctrl+Shift+Z on
+        # KDE and GNOME, so it came out twice and Ctrl+Y not at all — and a
+        # key listed twice on one action did not fire (#313, @RaphaelNunes10).
         self._redo_action.setShortcuts(
-            [QKeySequence.Redo, QKeySequence("Ctrl+Shift+Z")]
+            [QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")]
         )
         self._redo_action.triggered.connect(self._on_redo)
         edit_menu.addAction(self._redo_action)
@@ -946,6 +1075,14 @@ class MainWindow(QMainWindow):
         invert_action.triggered.connect(self._on_invert_selection)
         edit_menu.addAction(invert_action)
 
+        # Edit ▸ Select none, the usual shortcut.
+        select_none_action = QAction(tr("Select None"), self)
+        select_none_action.setStatusTip(tr(
+            "Deselect everything: edges, faces, groups and dimensions."))
+        select_none_action.setShortcut(QKeySequence("Ctrl+T"))
+        select_none_action.triggered.connect(self._on_select_none)
+        edit_menu.addAction(select_none_action)
+
         edit_menu.addSeparator()
 
         group_action = QAction(tr("Make Group"), self)
@@ -1004,8 +1141,11 @@ class MainWindow(QMainWindow):
         # Edit ▸ Hide and Edit ▸ Unhide ▸ Last / All. Hide takes
         # the selected OBJECTS (groups, components) and edges; there was
         # only «Ocultar aristas» and Rafael looked for the object one and
-        # did not find it (2026-09-16, 38:40).
+        # did not find it (2026-09-16, 38:40). The keys sit on Ctrl+H
+        # because H alone is Pan and Shift+H the Protractor; Shift adds
+        # the way back for everything.
         hide_action = QAction(tr("Hide"), self)
+        hide_action.setShortcut(QKeySequence("Ctrl+H"))
         hide_action.setStatusTip(tr(
             "Stop showing the selected objects, faces and edges; they "
             "stay in the document until unhidden."))
@@ -1025,6 +1165,7 @@ class MainWindow(QMainWindow):
         unhide_last_action.triggered.connect(self._on_unhide_last)
         unhide_menu.addAction(unhide_last_action)
         unhide_all_action = QAction(tr("All"), self)
+        unhide_all_action.setShortcut(QKeySequence("Ctrl+Shift+H"))
         unhide_all_action.setStatusTip(tr(
             "Show again everything that is hidden."))
         unhide_all_action.triggered.connect(self._on_unhide_all)
@@ -1061,19 +1202,10 @@ class MainWindow(QMainWindow):
         camera_menu = menubar.addMenu(tr("Camera"))
 
         standard_menu = camera_menu.addMenu(tr("Standard Views"))
-        for label, key in [
-            ("Top", "top"),
-            ("Bottom", "bottom"),
-            ("Front", "front"),
-            ("Back", "back"),
-            ("Left", "left"),
-            ("Right", "right"),
-            ("Isometric", "iso"),
-        ]:
-            action = QAction(tr(label), self)
-            action.setStatusTip(tr(_VIEW_TIPS[key]))
-            action.triggered.connect(lambda _checked, k=key: self._on_standard_view(k))
-            standard_menu.addAction(action)
+        # The SAME actions as the toolbar buttons: two actions holding one
+        # key leave it dead (tests/test_shortcuts.py).
+        for key in ("top", "bottom", "front", "back", "left", "right", "iso"):
+            standard_menu.addAction(self._view_actions[key])
 
         camera_menu.addAction(self._act_zoom_extents)   # la MISMA del botón
         camera_menu.addAction(self._act_zoom_selection)
@@ -1092,18 +1224,13 @@ class MainWindow(QMainWindow):
         action_proj.triggered.connect(self.viewport.toggle_projection)
         camera_menu.addAction(action_proj)
 
-        # Two-Point Perspective: verticals stay vertical, as an
-        # architectural drawing wants them (José Castro Basso, FADU–UDELAR).
-        self._act_two_point = QAction(tr("Two-Point Perspective"), self)
-        self._act_two_point.setCheckable(True)
-        self._act_two_point.setStatusTip(tr(
-            "Perspective with vertical lines kept vertical"))
-        self._act_two_point.triggered.connect(self.viewport.toggle_two_point)
-        camera_menu.addAction(self._act_two_point)
-        camera_menu.aboutToShow.connect(
-            lambda: self._act_two_point.setChecked(
-                self.viewport.camera.two_point
-                and self.viewport.camera.perspective))
+        # The Camera menu: Parallel Projection / Perspective /
+        # Two-Point Perspective (verticals stay vertical, as an
+        # architectural drawing wants them — José Castro Basso,
+        # FADU–UDELAR). The SAME actions as the quick buttons on the
+        # Standard Views bar, so a shortcut given to one is the other's.
+        for mode in ("parallel", "perspective", "two_point"):
+            camera_menu.addAction(self._projection_actions[mode])
 
         # Styles: the model's display look — face mode, edges,
         # background. Scenes remember the style; the composer's live-look
@@ -1181,6 +1308,27 @@ class MainWindow(QMainWindow):
                 lambda _c=False, k=key: self.viewport.set_edit_rest_mode(k))
             rest_menu.addAction(act)
             self._rest_actions[key] = act
+
+        # Camera ▸ Component Edit, with keys of their own: Alt+Q
+        # toggles the rest of the model between hidden and the mode it had
+        # (fade or normal), Alt+W hides the other copies of the component
+        # being edited.
+        comp_menu = camera_menu.addMenu(tr("Component Edit"))
+        self._act_hide_rest = QAction(tr("Hide Rest of Model"), self)
+        self._act_hide_rest.setCheckable(True)
+        self._act_hide_rest.setShortcut(QKeySequence("Alt+Q"))
+        self._act_hide_rest.triggered.connect(self._on_toggle_hide_rest)
+        comp_menu.addAction(self._act_hide_rest)
+        self._act_hide_similar = QAction(tr("Hide Similar Components"), self)
+        self._act_hide_similar.setCheckable(True)
+        self._act_hide_similar.setShortcut(QKeySequence("Alt+W"))
+        self._act_hide_similar.triggered.connect(self._on_toggle_hide_similar)
+        comp_menu.addAction(self._act_hide_similar)
+        self._rest_shown_mode = (self.viewport.edit_rest_mode
+                                 if self.viewport.edit_rest_mode != "hide"
+                                 else "fade")
+        self._sync_component_edit_menu()
+        camera_menu.aboutToShow.connect(self._sync_component_edit_menu)
 
         # Sun shadows (core/sun.py) — the checkbox mirrors the tray panel.
         self._act_shadows = QAction(tr("Shadows"), self)
@@ -1322,6 +1470,15 @@ class MainWindow(QMainWindow):
         window_menu.addAction(self._act_sidebar)
 
         window_menu.addSeparator()
+        # Ctrl+U: the units panel straight away (the Preferences page).
+        units_action = QAction(tr("Units…"), self)
+        units_action.setShortcut(QKeySequence("Ctrl+U"))
+        units_action.setStatusTip(tr(
+            "Choose the units lengths, areas, volumes and angles are shown "
+            "and typed in."))
+        units_action.triggered.connect(self._on_units)
+        window_menu.addAction(units_action)
+        self._act_units = units_action
         prefs_action = QAction(tr("Preferences…"), self)
         prefs_action.setStatusTip(tr(
             "Change the units, auto-save, icons and the rest of the "
@@ -1398,12 +1555,20 @@ class MainWindow(QMainWindow):
             lang_menu.addAction(action)
 
     # ---- Sidebar strip (LibreOffice-style) ---------------------------------
+    #: Trays that start closed until the user opens them (Window ▸
+    #: Panels): the specialised workspaces. Properties, the Browser and
+    #: the bundled AI and Render tabs open. An extension may
+    #: ask the same for a panel of its own (``add_panel(start_hidden=True)``).
+    DEFAULT_HIDDEN_TRAYS = frozenset({"tray_bim", "tray_georef"})
+
     def _show_default_trays(self, st) -> None:
-        """Properties, BIM and Terrain always open at start-up — a tray
-        stays closed only when it was closed from the Window menu (Marco,
+        """The trays open at start-up as the user left them in Window ▸
+        Panels — a tray stays closed only when it was closed there (Marco,
         24-09: «que siempre se muestren por defecto con opción de ocultarlas
         desde el menú Ventana»). A saved layout alone (a folded sidebar, a
-        tray lost by the old fold) does not keep one away."""
+        tray lost by the old fold) does not keep one away. Before any
+        choice, the ones most work needs open and the rest wait there
+        (``DEFAULT_HIDDEN_TRAYS``)."""
         hidden = self._hidden_tray_names(st)
         docks = self._sidebar_docks()
         for d in docks:
@@ -1412,6 +1577,11 @@ class MainWindow(QMainWindow):
             # Qt's own dock list (right-click on a toolbar) hides one too.
             d.toggleViewAction().triggered.connect(
                 lambda on, dock=d: self._remember_tray_choice(dock, on))
+        if st.contains("ui/hidden_trays"):
+            # Seen now: a panel that asked to start hidden has had its
+            # first start; from here on the user's choice rules it.
+            st.setValue("ui/hidden_trays", sorted(hidden))
+        self._mark_trays_known(st, [d.objectName() for d in docks])
         if not self.tray.isHidden():
             self.tray.raise_()
         # Filled now too, not only when it opens: F3 finds each tab there.
@@ -1434,12 +1604,22 @@ class MainWindow(QMainWindow):
             if dock is not self.tray:
                 self.tabifyDockWidget(self.tray, dock)
 
-    @staticmethod
-    def _hidden_tray_names(st) -> set:
+    def _hidden_tray_names(self, st) -> set:
+        """The trays kept closed. A first run (nothing chosen yet) opens
+        the ones most work needs and leaves the rest in Window ▸ Panels;
+        once any is opened or closed there, the whole choice is saved and
+        kept. An extension panel that asks to start hidden starts hidden
+        the first time it is seen, whenever it is installed."""
+        asked = set(getattr(self, "_start_hidden", ()))
+        if not st.contains("ui/hidden_trays"):
+            return set(self.DEFAULT_HIDDEN_TRAYS) | asked
         raw = st.value("ui/hidden_trays", []) or []
         if isinstance(raw, str):
             raw = [raw]
-        return {str(x) for x in raw}
+        known = st.value("ui/known_trays", []) or []
+        if isinstance(known, str):
+            known = [known]
+        return {str(x) for x in raw} | (asked - {str(k) for k in known})
 
     def _remember_tray_choice(self, dock, shown: bool) -> None:
         st = QSettings()
@@ -1449,6 +1629,58 @@ class MainWindow(QMainWindow):
         else:
             hidden.add(dock.objectName())
         st.setValue("ui/hidden_trays", sorted(hidden))
+        self._mark_trays_known(st, [dock.objectName()])
+
+    @staticmethod
+    def _mark_trays_known(st, names) -> None:
+        """Seen: a panel that asked to start hidden has had its first
+        start, and the user's choice (``ui/hidden_trays``) rules it now."""
+        known = st.value("ui/known_trays", []) or []
+        if isinstance(known, str):
+            known = [known]
+        st.setValue("ui/known_trays",
+                    sorted({str(k) for k in known} | set(names)))
+
+    #: The factory order of the side tray's tabs, all on the right:
+    #: Properties first, the model's tree next, then the workspaces.
+    def _default_tray_order(self) -> list:
+        return [self.tray, self.project_browser, self.bim_tray,
+                self.georef_tray]
+
+    def _lay_out_trays(self) -> None:
+        """The trays in their factory place: every one on the right, tabbed
+        in the default order, extension panels after them."""
+        order = self._default_tray_order()
+        order += [d for d in getattr(self, "_extension_docks", ())
+                  if d not in order]
+        for d in order:
+            self.addDockWidget(Qt.RightDockWidgetArea, d)
+        for first, nxt in zip(order, order[1:]):
+            self.tabifyDockWidget(first, nxt)
+
+    def restore_default_trays(self) -> None:
+        """Window ▸ Panels ▸ Restore default panels: the factory layout of
+        the side tray back — Properties and the Browser open, the
+        rest closed and listed here — and the choice forgotten, so it
+        stands as a first run's would."""
+        from PySide6.QtCore import QTimer
+        st = QSettings()
+        st.remove("ui/hidden_trays")
+        st.remove("ui/known_trays")
+        self._lay_out_trays()
+        hidden = self._hidden_tray_names(st)
+        for d in self._sidebar_docks():
+            d.setVisible(d.objectName() not in hidden)
+        for act in (getattr(self, "_act_sidebar", None),
+                    getattr(self, "_act_left_sidebar", None)):
+            if act is not None and not act.isChecked():
+                act.blockSignals(True)
+                act.setChecked(True)
+                act.blockSignals(False)
+        self._left_was = []
+        self.tray.raise_()
+        QTimer.singleShot(0, self, self._style_dock_tabs)
+        QTimer.singleShot(0, self, self._place_sidebar_handle)
 
     def _fill_panels_menu(self, menu) -> None:
         """One checkable entry per side-tray tab (Marco, 29-09: «cuando
@@ -1467,6 +1699,11 @@ class MainWindow(QMainWindow):
         every = menu.addAction(tr("Show all panels"))
         every.setStatusTip(tr("Bring back every tab of the side tray."))
         every.triggered.connect(self._show_all_trays)
+        reset = menu.addAction(tr("Restore default panels"))
+        reset.setStatusTip(tr(
+            "Properties and the Browser open, the other panels closed, "
+            "all on the right in the factory order."))
+        reset.triggered.connect(self.restore_default_trays)
 
     def set_tray_shown(self, dock, shown: bool) -> None:
         """Show (in front) or hide one side-tray tab and remember it. A
@@ -1503,6 +1740,16 @@ class MainWindow(QMainWindow):
         of Qt's toolbar-and-dock menu."""
         if self._tray_tab_bar_at(event.pos()):
             menu = QMenu(self)
+            dock = self._dock_tab_at(event.pos())
+            if dock is not None:
+                left = self.dockWidgetArea(dock) == Qt.LeftDockWidgetArea
+                menu.addAction(
+                    tr("Move to the right side") if left
+                    else tr("Move to the left side"),
+                    lambda: self.move_dock(
+                        dock, Qt.RightDockWidgetArea if left
+                        else Qt.LeftDockWidgetArea))
+                menu.addSeparator()
             self._fill_panels_menu(menu)
             menu.exec(event.globalPos())
             event.accept()
@@ -1513,6 +1760,7 @@ class MainWindow(QMainWindow):
         return [d for d in (getattr(self, "tray", None),
                             getattr(self, "bim_tray", None),
                             getattr(self, "georef_tray", None),
+                            getattr(self, "project_browser", None),
                             *getattr(self, "_extension_docks", ()))
                 if d is not None]
 
@@ -1545,10 +1793,11 @@ class MainWindow(QMainWindow):
         btn.setToolTip(act.toolTip())
         btn.setCursor(Qt.PointingHandCursor)
         btn.setAutoRaise(True)
-        btn.setStyleSheet(
-            "QToolButton { background: palette(mid); border: none;"
-            " border-radius: 4px; }"
-            "QToolButton:hover { background: rgb(243, 115, 41); }")
+        from views.theme import style as theme_style
+        theme_style(btn,             # {accent_rgb}: Preferences ▸ Accent colour
+            "QToolButton {{ background: palette(mid); border: none;"
+            " border-radius: 4px; }}"
+            "QToolButton:hover {{ background: rgb({accent_rgb}); }}")
         btn.clicked.connect(lambda: act.setChecked(not act.isChecked()))
         self._sidebar_handle = btn
         self._icon_actions.append((btn, "side_collapse"))
@@ -1561,7 +1810,7 @@ class MainWindow(QMainWindow):
         children above the handle, which then vanishes behind the dock
         (Marco, 2026-09-14) — every dock change re-places (and re-raises) it."""
         from PySide6.QtCore import QTimer
-        bump = lambda *_: QTimer.singleShot(0, self._place_sidebar_handle)
+        bump = lambda *_: QTimer.singleShot(0, self, self._place_sidebar_handle)
         for d in self._sidebar_docks():
             d.visibilityChanged.connect(bump)
             d.dockLocationChanged.connect(bump)
@@ -1582,14 +1831,27 @@ class MainWindow(QMainWindow):
         btn.raise_()
         btn.setVisible(not self._act_clean_screen.isChecked()
                        if hasattr(self, "_act_clean_screen") else True)
+        left = getattr(self, "_left_handle", None)
+        if left is not None:
+            start = self.viewport.mapTo(self, QPoint(0, 0))
+            left.move(max(0, start.x() - left.width() // 2), max(0, y))
+            left.raise_()
+            clean = (self._act_clean_screen.isChecked()
+                     if hasattr(self, "_act_clean_screen") else False)
+            # Only while something is (or was) on the left.
+            left.setVisible(not clean and (
+                bool(self._side_docks(Qt.LeftDockWidgetArea))
+                or bool(getattr(self, "_left_was", None))))
 
     def _sidebar_visible(self) -> bool:
         return any(d.isVisible() for d in self._sidebar_docks())
 
     def _set_sidebar_visible(self, on: bool) -> None:
         """Fold the trays away (remembering which were open) or bring
-        them back; the chevron turns to point the way."""
-        docks = self._sidebar_docks()
+        them back; the chevron turns to point the way. The RIGHT side's
+        trays — the left side folds on its own (Ctrl+F6)."""
+        docks = [d for d in self._sidebar_docks()
+                 if self.dockWidgetArea(d) != Qt.LeftDockWidgetArea]
         if on:
             shown = getattr(self, "_sidebar_was", None) or docks[:1]
             for d in docks:
@@ -1613,7 +1875,7 @@ class MainWindow(QMainWindow):
             self._icon_actions = [(a, (key if a is btn else k))
                                   for a, k in self._icon_actions]
             from PySide6.QtCore import QTimer
-            QTimer.singleShot(0, self._place_sidebar_handle)   # after the relayout
+            QTimer.singleShot(0, self, self._place_sidebar_handle)   # after the relayout
 
     def _toggle_clean_screen(self, on: bool) -> None:
         """AutoCAD's Ctrl+0: fold away every toolbar, dock and bar so only
@@ -1632,6 +1894,8 @@ class MainWindow(QMainWindow):
             self._place_clean_screen_exit()
             if getattr(self, "_sidebar_handle", None) is not None:
                 self._sidebar_handle.hide()
+            if getattr(self, "_left_handle", None) is not None:
+                self._left_handle.hide()
         else:
             btn = getattr(self, "_clean_exit_btn", None)
             if btn is not None:
@@ -1642,7 +1906,7 @@ class MainWindow(QMainWindow):
             self.menuBar().show()
             self.statusBar().show()
             from PySide6.QtCore import QTimer
-            QTimer.singleShot(0, self._place_sidebar_handle)
+            QTimer.singleShot(0, self, self._place_sidebar_handle)
 
     def _clean_screen_exit_button(self):
         """A small «Exit clean screen» button floating at the viewport's
@@ -1658,11 +1922,12 @@ class MainWindow(QMainWindow):
         btn.setToolTip(tr("Back to the workspace (Ctrl+0)"))
         btn.setCursor(Qt.PointingHandCursor)
         btn.setAutoRaise(True)
-        btn.setStyleSheet(
-            "QToolButton { background: rgba(30, 36, 44, 170); color: white;"
+        from views.theme import style as theme_style
+        theme_style(btn,
+            "QToolButton {{ background: rgba(30, 36, 44, 170); color: white;"
             " border: 1px solid rgba(255, 255, 255, 90); border-radius: 6px;"
-            " padding: 4px 10px; font-weight: bold; }"
-            "QToolButton:hover { background: rgba(243, 115, 41, 220); }")
+            " padding: 4px 10px; font-weight: bold; }}"
+            "QToolButton:hover {{ background: rgba({accent_rgb}, 220); }}")
         btn.clicked.connect(lambda: self._act_clean_screen.setChecked(False))
         btn.hide()
         self._clean_exit_btn = btn
@@ -1683,19 +1948,327 @@ class MainWindow(QMainWindow):
                 QEvent.Resize, QEvent.Move, QEvent.Show):
             self._place_clean_screen_exit()
             self._place_sidebar_handle()
+        if self._side_dock_event(obj, event):
+            return True
         return super().eventFilter(obj, event)
+
+    # ---- Side trays on either side, as in the sheet composer ----------------
+    #: A tray tab dragged out of its bar: the dock's object name.
+    DOCK_MIME = "application/x-ingetrazo-dock"
+    _OUT_PX = 24
+
+    def _setup_side_docks(self) -> None:
+        """The trays as the composer's side panels: tabs on top, like the
+        composer's (Marco, 11-10, after Gabriel and Pedro), with their
+        whole names (scroll arrows when they do not fit), reordered by
+        dragging along the bar (Qt's own), moved to the other side by
+        dragging a tab out of it — onto the viewport's left or right half,
+        or onto the other side's tabs — or from its right-click menu; each
+        side folds with its handle (Ctrl+F5 right, Ctrl+F6 left). Where
+        each tray is is part of the window layout, saved with it."""
+        from PySide6.QtCore import QSize
+        from PySide6.QtWidgets import QTabWidget, QToolButton
+        self.setTabPosition(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea,
+                            QTabWidget.North)
+        self.viewport.setAcceptDrops(True)
+        self.installEventFilter(self)           # new tab bars, as Qt makes them
+        act = QAction(tr("Left sidebar"), self)
+        act.setCheckable(True)
+        act.setChecked(True)
+        act.setShortcut(QKeySequence("Ctrl+F6"))
+        from views.shortcuts import set_tooltip
+        set_tooltip(act, tr("Show or hide the left sidebar"))
+        act.toggled.connect(self._set_left_sidebar_visible)
+        self.addAction(act)
+        self._act_left_sidebar = act
+        btn = QToolButton(self)
+        btn.setObjectName("left_sidebar_handle")
+        btn.setFixedSize(14, 56)
+        btn.setIconSize(QSize(12, 12))
+        btn.setIcon(tool_icon("side_expand"))       # mirrored: folds left
+        btn.setToolTip(act.toolTip())
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setAutoRaise(True)
+        btn.setStyleSheet(self._sidebar_handle.styleSheet())
+        btn.clicked.connect(lambda: act.setChecked(not act.isChecked()))
+        self._left_handle = btn
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self, self._style_dock_tabs)
+        QTimer.singleShot(0, self, self._place_sidebar_handle)
+
+    def _side_docks(self, area) -> list:
+        return [d for d in self._sidebar_docks()
+                if not d.isHidden() and self.dockWidgetArea(d) == area]
+
+    def _dock_tab_bars(self) -> list:
+        from PySide6.QtWidgets import QTabBar
+        return [tb for tb in self.findChildren(QTabBar)
+                if tb.parent() is self]
+
+    def _style_dock_tabs(self) -> None:
+        """Whole names, scroll arrows: the composer's tabs. Qt makes a tab
+        bar per tabbed group as they form, so this runs again as children
+        come; each bar is watched once (drags out of it, drops on it)."""
+        from shiboken6 import isValid
+        for tb in self._dock_tab_bars():
+            if not isValid(tb):
+                continue
+            tb.setElideMode(Qt.ElideNone)
+            tb.setUsesScrollButtons(True)
+            if not tb.property("ingetrazo_watched"):
+                tb.setProperty("ingetrazo_watched", True)
+                tb.setAcceptDrops(True)
+                tb.installEventFilter(self)
+        # A tray alone on its side has no tab bar from Qt — only its title
+        # bar, an empty strip: it gets a tab of its own there, so it can
+        # still be dragged across, right-clicked and dropped on.
+        from PySide6.QtCore import QTimer
+        for d in self._sidebar_docks():
+            if d.property("ingetrazo_titles") is None:
+                d.setProperty("ingetrazo_titles", True)
+                bump = lambda *_a: QTimer.singleShot(0, self, self._style_dock_tabs)
+                d.visibilityChanged.connect(bump)
+                d.dockLocationChanged.connect(bump)
+            # Tabbed with others, Qt's tab bar already names it: an empty
+            # title bar, as the trays always had (its own tab would read
+            # twice). Alone on its side: its own tab.
+            tabbed = any(not o.isHidden() for o in self.tabifiedDockWidgets(d))
+            current = d.titleBarWidget()
+            if tabbed and isinstance(current, _DockTitleTab):
+                d.setTitleBarWidget(QWidget(d))
+                current.deleteLater()
+            elif not tabbed and not isinstance(current, _DockTitleTab):
+                d.setTitleBarWidget(_DockTitleTab(self, d))
+                if current is not None:
+                    current.deleteLater()
+
+    def _dock_of_tab(self, bar, index):
+        if index < 0:
+            return None
+        text = bar.tabText(index)
+        return next((d for d in self._sidebar_docks()
+                     if d.windowTitle() == text), None)
+
+    def _dock_tab_at(self, pos):
+        """The tray whose tab is under ``pos`` (window coordinates)."""
+        from PySide6.QtWidgets import QTabBar
+        child = self.childAt(pos)
+        while child is not None and not isinstance(child, QTabBar):
+            child = child.parentWidget()
+        if child is None:
+            return None
+        return self._dock_of_tab(child, child.tabAt(child.mapFrom(self, pos)))
+
+    def move_dock(self, dock, area) -> None:
+        """Put a tray on the ``area`` side (Qt.LeftDockWidgetArea /
+        RightDockWidgetArea), tabbed with what is there, in front, and that
+        side unfolded."""
+        from PySide6.QtCore import QTimer
+        if self.dockWidgetArea(dock) == area and not dock.isHidden():
+            dock.raise_()
+            return
+        others = [d for d in self._side_docks(area) if d is not dock]
+        self.addDockWidget(area, dock)
+        if others:
+            self.tabifyDockWidget(others[0], dock)
+        dock.show()
+        dock.raise_()
+        act = (self._act_left_sidebar if area == Qt.LeftDockWidgetArea
+               else self._act_sidebar)
+        if not act.isChecked():
+            act.blockSignals(True)
+            act.setChecked(True)
+            act.blockSignals(False)
+        QTimer.singleShot(0, self, self._style_dock_tabs)
+        QTimer.singleShot(0, self, self._place_sidebar_handle)
+
+    def _set_left_sidebar_visible(self, on: bool) -> None:
+        """Ctrl+F6 / the left handle: the trays on the left fold away and
+        come back, as Ctrl+F5 does on the right."""
+        from PySide6.QtCore import QTimer
+        if on:
+            shown = getattr(self, "_left_was", None) or []
+            for d in shown:
+                d.show()
+            if shown:
+                shown[0].raise_()
+            self._left_was = []
+        else:
+            self._left_was = self._side_docks(Qt.LeftDockWidgetArea)
+            for d in self._left_was:
+                d.hide()
+        btn = getattr(self, "_left_handle", None)
+        if btn is not None:
+            btn.setIcon(tool_icon("side_expand" if on else "side_collapse"))
+        QTimer.singleShot(0, self, self._place_sidebar_handle)
+
+    def _side_dock_event(self, obj, event) -> bool:
+        """The drag-a-tab-to-the-other-side part of the event filter: True
+        when the event was taken."""
+        from PySide6.QtCore import QEvent, QTimer
+        t = event.type()
+        if obj is self:
+            if t == QEvent.ChildAdded:
+                QTimer.singleShot(0, self, self._style_dock_tabs)
+            return False
+        is_bar = bool(obj.property("ingetrazo_watched")) \
+            if hasattr(obj, "property") else False
+        if is_bar:
+            if t == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                i = obj.tabAt(event.position().toPoint())
+                # Off the tabs, on the bar: the whole side goes (-2).
+                obj.setProperty("ingetrazo_press", i if i >= 0 else -2)
+            elif t == QEvent.MouseButtonRelease:
+                obj.setProperty("ingetrazo_press", -1)
+            elif t == QEvent.MouseMove and event.buttons() & Qt.LeftButton:
+                i = obj.property("ingetrazo_press")
+                if i is not None and (i >= 0 or i == -2):
+                    r = obj.rect().adjusted(-self._OUT_PX, -self._OUT_PX,
+                                            self._OUT_PX, self._OUT_PX)
+                    if not r.contains(event.position().toPoint()):
+                        obj.setProperty("ingetrazo_press", -1)
+                        self._drag_dock_tab(obj, i, event)
+                        return True
+            elif t in (QEvent.DragEnter, QEvent.DragMove) and \
+                    event.mimeData().hasFormat(self.DOCK_MIME):
+                event.acceptProposedAction()
+                return True
+            elif t == QEvent.Drop and \
+                    event.mimeData().hasFormat(self.DOCK_MIME):
+                here = self._dock_of_tab(obj, 0)
+                if here is not None:
+                    self.drop_on_side(event.mimeData(),
+                                      self.dockWidgetArea(here))
+                event.acceptProposedAction()
+                return True
+            return False
+        return False
+
+    def drop_dock_on_viewport(self, event) -> None:
+        """A tray tab dropped on the viewport (its own drop handler calls
+        this): to the left side on the left half, to the right on the
+        right half."""
+        x = event.position().x()
+        self.drop_on_side(event.mimeData(), Qt.LeftDockWidgetArea
+                          if x < self.viewport.width() / 2
+                          else Qt.RightDockWidgetArea)
+        event.acceptProposedAction()
+
+    def _dock_named(self, mime):
+        name = bytes(mime.data(self.DOCK_MIME)).decode("utf-8")
+        return next((d for d in self._sidebar_docks()
+                     if d.objectName() == name), None)
+
+    def drop_on_side(self, mime, area) -> None:
+        """What a dragged tab carries goes to the ``area`` side: one tray
+        (its object name), or a whole side (``group:<area>``)."""
+        text = bytes(mime.data(self.DOCK_MIME)).decode("utf-8")
+        if text.startswith("group:"):
+            self.move_side(Qt.DockWidgetArea(int(text[6:])), area)
+            return
+        dock = self._dock_named(mime)
+        if dock is not None:
+            self.move_dock(dock, area)
+
+    def move_side(self, from_area, to_area) -> None:
+        """Every tray of one side to the other, in their order, the one in
+        front staying in front: the whole sidebar dragged across."""
+        if from_area == to_area:
+            return
+        docks = self._side_docks(from_area)
+        if not docks:
+            return
+        front = next((d for d in docks
+                      if not d.visibleRegion().isEmpty()), docks[0])
+        for d in docks:
+            self.move_dock(d, to_area)
+        front.raise_()
+
+    # ---- Drop zones: where a dragged tab can go -------------------------------
+    def _drop_zones(self) -> list:
+        zones = getattr(self, "_zones", None)
+        if zones is None:
+            zones = self._zones = [
+                _DockDropZone(self, Qt.LeftDockWidgetArea,
+                              tr("Left side")),
+                _DockDropZone(self, Qt.RightDockWidgetArea,
+                              tr("Right side"))]
+        return zones
+
+    def show_drop_zones(self, on: bool) -> None:
+        """While a tab is dragged, a panel at each edge of the viewport
+        says where it can be docked; the one under the pointer lights up,
+        and dropping there docks it on that side."""
+        from PySide6.QtCore import QRect
+        vp = self.viewport
+        top_left = vp.mapTo(self, vp.rect().topLeft())
+        w = max(120, min(220, vp.width() // 4))
+        h = vp.height()
+        for zone in self._drop_zones():
+            if not on:
+                zone.hide()
+                continue
+            x = top_left.x() + (0 if zone.area == Qt.LeftDockWidgetArea
+                                else vp.width() - w)
+            zone.setGeometry(QRect(x, top_left.y(), w, h))
+            zone.set_hot(False)
+            zone.show()
+            zone.raise_()
+
+    def _drag_dock_tab(self, bar, index, event) -> None:
+        from PySide6.QtCore import QEvent, QMimeData
+        from PySide6.QtGui import QDrag, QMouseEvent
+        group = index == -2
+        dock = self._dock_of_tab(bar, 0 if group else index)
+        # End Qt's own move of the tab first, where it stands.
+        from PySide6.QtWidgets import QApplication
+        QApplication.sendEvent(bar, QMouseEvent(
+            QEvent.MouseButtonRelease, event.position(),
+            event.globalPosition(), Qt.LeftButton, Qt.NoButton,
+            event.modifiers()))
+        if dock is None:
+            return
+        data = QMimeData()
+        payload = (f"group:{int(self.dockWidgetArea(dock).value)}" if group
+                   else dock.objectName())
+        data.setData(self.DOCK_MIME, payload.encode("utf-8"))
+        drag = QDrag(bar)
+        drag.setMimeData(data)
+        drag.setPixmap(bar.grab() if group else bar.grab(bar.tabRect(index)))
+        self.show_drop_zones(True)
+        try:
+            drag.exec(Qt.MoveAction)
+        finally:
+            self.show_drop_zones(False)
 
     def _on_preferences(self) -> None:
         """Window ▸ Preferences: the scattered QSettings in one dialog."""
         self.open_preferences()
 
-    def open_preferences(self, shortcut_of=None) -> None:
+    def _on_units(self) -> None:
+        """Window ▸ Units… (Ctrl+U): Preferences on its Units page."""
+        self.open_preferences(page="units")
+
+    def offer_units_at_start(self) -> None:
+        """The units question at startup, while the document is still the
+        new, untouched one (a file opened from the command line has its
+        own units and is never asked about)."""
+        if (self._current_path is not None
+                or self.viewport.scene.version != self._saved_version):
+            return
+        from views.units_start_dialog import offer_at_start
+        offer_at_start(self)
+
+    def open_preferences(self, shortcut_of=None, page=None) -> None:
         """Preferences; on the Keyboard shortcuts page with that action
-        picked when ``shortcut_of`` is given (right click in F3)."""
+        picked when ``shortcut_of`` is given (right click in F3), or on
+        ``page`` (``"units"``)."""
         from views.preferences_dialog import PreferencesDialog
         dlg = PreferencesDialog(self)
         if shortcut_of is not None:
             dlg.show_shortcut_of(shortcut_of)
+        elif page == "units":
+            dlg.show_units_page()
         dlg.exec()
         # Freed now, not when the window goes: each opening used to leave
         # a hidden dialog hanging from the window until the app closed.
@@ -1721,9 +2294,62 @@ class MainWindow(QMainWindow):
         import logging
         from core.extensions import discover_plugins
 
-        log = logging.getLogger("ingetrazo.plugins")
         ext_menu = menubar.addMenu(tr("Extensions"))
+        self._ext_menu = ext_menu           # ExtensionApp.add_menu_action
+        # Plugin entries go above this mark; the static entries (examples,
+        # plugins folder, guide) sit below it from the start.
+        self._ext_anchor = ext_menu.addSeparator()
+        # The example extensions (Levels, Polygon properties, Windowizer)
+        # install from Manage extensions…, not from a submenu of their own.
+
+        ext_menu.addSeparator()
+        manage_action = ext_menu.addAction(tr("Manage extensions…"))
+        manage_action.setStatusTip(tr(
+            "Browse, install and update community extensions."))
+        manage_action.triggered.connect(self._on_manage_extensions)
+
+        # The on-ramp for plugin authors: their folder and the dev guide.
+        ext_menu.addSeparator()
+        act = ext_menu.addAction(tr("Open extensions folder"))
+        act.setStatusTip(tr(
+            "Open the folder of your extensions; one put there loads at the "
+            "next start."))
+        act.triggered.connect(self._on_open_plugins_folder)
+        act = ext_menu.addAction(tr("Develop an extension…"))
+        act.setStatusTip(tr(
+            "Open the guide to writing extensions for IngeTrazo."))
+        act.triggered.connect(self._on_develop_plugin)
+
+        # The app itself (main.py) defers the plugins' setup until the window
+        # is on screen (#440, @cdblue999: 26 third-party extensions held the
+        # first frame for 2.5 s). Anything else — tests, scripts — gets them
+        # loaded right here, as before.
+        if not self._defer_extensions:
+            self.load_extensions()
+
+    def load_extensions(self) -> None:
+        """Run every discovered plugin's ``setup(app)`` and add its entries
+        to the Extensions menu. Once; later calls do nothing.
+
+        Deferred (the app's own start-up), it runs after ``restoreState``:
+        a plugin panel finds its saved place by itself
+        (:meth:`_register_extension_dock`), but a plugin TOOLBAR is only
+        placed by ``restoreState`` — so if one appears, the saved layout is
+        applied again, followed by the same steps that follow it at
+        start-up."""
+        if getattr(self, "_extensions_loaded", False):
+            return
+        self._extensions_loaded = True
+        import logging
+        from core.extensions import discover_plugins
+
+        log = logging.getLogger("ingetrazo.plugins")
+        ext_menu = self._ext_menu
+        anchor = self._ext_anchor
+        bars_before = set(self.findChildren(QToolBar))
         plugins, errors = discover_plugins()
+        from core.extension_manager import extension_startup_state
+        self._extension_startup_state = extension_startup_state()
 
         # Shortcuts the app already claimed (toolbar tools, menus — all built
         # before this menu): first come, first served. A plugin asking for a
@@ -1731,7 +2357,27 @@ class MainWindow(QMainWindow):
         # ambiguity that silently disables the built-in key for both.
         taken = {a.shortcut().toString() for a in self.findChildren(QAction)
                  if not a.shortcut().isEmpty()}
-        self._ext_menu = ext_menu           # ExtensionApp.add_menu_action
+        # The tools that ship with IngeTrazo (Python Console, Model Info…)
+        # keep their keys whatever an extension's setup() asks for first:
+        # with Point Cloud Splat installed, the console lost Ctrl+Shift+P
+        # (extension bench, 10-10). Reserved here, granted to them below.
+        from pathlib import Path
+        from core.paths import app_root
+        bundled = (app_root() / "plugins").resolve()
+        reserved: dict = {}
+        for plug in plugins:
+            try:
+                ships = bundled in Path(plug.path).resolve().parents
+            except (OSError, TypeError):
+                ships = False
+            if not ships:
+                continue
+            for tool in plug.tools:
+                seq = (QKeySequence(tool.shortcut).toString()
+                       if tool.shortcut else "")
+                if seq and seq not in taken and seq not in reserved:
+                    reserved[seq] = f"plugin_{plug.stem}_{type(tool).__name__}"
+        taken |= set(reserved)
         self._ext_taken_keys = taken
 
         count = 0
@@ -1750,134 +2396,70 @@ class MainWindow(QMainWindow):
                 continue
             if not plug.tools:
                 count += 1                  # a panel-only extension counts
-        for plug in plugins:
-            for tool in plug.tools:
-                key = f"plugin_{plug.stem}_{type(tool).__name__}"
-                self._tools[key] = tool
-                action = QAction(tr(tool.name), self)
-                if tool.description:
-                    action.setStatusTip(tr(tool.description))
-                if tool.shortcut:
-                    seq = QKeySequence(tool.shortcut).toString()
-                    if seq and seq not in taken:
-                        action.setShortcut(QKeySequence(tool.shortcut))
-                        from views.shortcuts import set_tooltip
-                        set_tooltip(action, tr(tool.name))
-                        taken.add(seq)
-                    else:
-                        log.warning("plugin %r wants shortcut %r, already "
-                                    "taken; entry added without it",
-                                    plug.stem, tool.shortcut)
-                action.triggered.connect(
-                    lambda _c, k=key: self._activate_plugin_tool(k))
-                ext_menu.addAction(action)
-                count += 1
+        self._extension_load_errors = {
+            err.stem: {"error": err.error, "path": str(err.path)}
+            for err in errors
+        }
+        entries = sorted(((plug, tool) for plug in plugins
+                          for tool in plug.tools),
+                         key=lambda pt: getattr(pt[1], "menu_order", 0))
+        for plug, tool in entries:
+            key = f"plugin_{plug.stem}_{type(tool).__name__}"
+            self._tools[key] = tool
+            action = QAction(tr(tool.name), self)
+            if tool.description:
+                action.setStatusTip(tr(tool.description))
+            if tool.shortcut:
+                seq = QKeySequence(tool.shortcut).toString()
+                if seq and (seq not in taken or reserved.get(seq) == key):
+                    action.setShortcut(QKeySequence(tool.shortcut))
+                    from views.shortcuts import set_tooltip
+                    set_tooltip(action, tr(tool.name))
+                    taken.add(seq)
+                else:
+                    log.warning("plugin %r wants shortcut %r, already "
+                                "taken; entry added without it",
+                                plug.stem, tool.shortcut)
+            action.triggered.connect(
+                lambda _c, k=key: self._activate_plugin_tool(k))
+            ext_menu.insertAction(anchor, action)
+            count += 1
 
         for err in errors:
-            action = ext_menu.addAction(
-                tr("\u26a0 {name} (load error)", name=err.stem))
+            action = QAction(tr("\u26a0 {name} (load error)", name=err.stem), self)
             action.setEnabled(False)
             action.setToolTip(err.error)
+            ext_menu.insertAction(anchor, action)
 
         if count == 0 and not errors:
-            ext_menu.addAction(tr("(no plugins found)")).setEnabled(False)
+            action = QAction(tr("(no plugins found)"), self)
+            action.setEnabled(False)
+            ext_menu.insertAction(anchor, action)
 
-        self._add_example_extensions_menu(ext_menu)
+        if self._defer_extensions and set(self.findChildren(QToolBar)) - bars_before:
+            st = QSettings()
+            state = st.value("ui/window_state")
+            if state:
+                self.restoreState(state)
+                self._show_default_trays(st)
+                self._place_new_toolbars(st)
+                self._pack_toolbars()
 
-        # The on-ramp for plugin authors: their folder and the dev guide.
-        ext_menu.addSeparator()
-        act = ext_menu.addAction(tr("Open plugins folder"))
-        act.setStatusTip(tr(
-            "Open the folder for your plugins; one put there loads at the "
-            "next start."))
-        act.triggered.connect(self._on_open_plugins_folder)
-        act = ext_menu.addAction(tr("Develop a plugin…"))
-        act.setStatusTip(tr(
-            "Open the guide to writing plugins for IngeTrazo."))
-        act.triggered.connect(self._on_develop_plugin)
-
-    @staticmethod
-    def example_extensions() -> list:
-        """``(path, title, blurb)`` of each example extension shipped with
-        the app (``examples/extensions``) — installed by the user, never
-        loaded on their own: what only some need stays out of the core."""
-        import ast
-        from core.paths import app_root
-        folder = app_root() / "examples" / "extensions"
-        out = []
-        # A single ``x.py`` or a package ``x/__init__.py`` — a bigger
-        # extension (CAM, PR #132) is a folder, and the loader takes both.
-        entries = sorted(folder.iterdir()) if folder.is_dir() else []
-        for path in entries:
-            if path.suffix == ".py" and path.is_file():
-                src = path
-            elif path.is_dir() and (path / "__init__.py").is_file():
-                src = path / "__init__.py"
-            else:
-                continue
-            try:
-                doc = ast.get_docstring(ast.parse(src.read_text("utf-8"))) or ""
-            except (OSError, SyntaxError, ValueError):
-                doc = ""
-            first, _, rest = doc.partition("\n")
-            title = first.split(" — ")[0].strip() or path.stem
-            blurb = rest.strip().split("\n\n")[0].replace("\n", " ")
-            out.append((path, title, blurb))
-        return out
-
-    def _add_example_extensions_menu(self, ext_menu) -> None:
-        """Extensions ▸ Example extensions: each one ticked when installed;
-        a click installs it into the user's plugins folder, or removes it.
-        Takes effect at the next start, like any plugin."""
-        examples = self.example_extensions()
-        if not examples:
-            return
-        from PySide6.QtWidgets import QMenu
-        from core.extensions import user_plugins_dir
-        ext_menu.addSeparator()
-        sub = QMenu(tr("Example extensions"), ext_menu)
-        ext_menu.addMenu(sub)
-        for path, title, blurb in examples:
-            act = sub.addAction(title)
-            act.setCheckable(True)
-            act.setChecked((user_plugins_dir() / path.name).exists())
-            act.setToolTip(blurb)
-            act.setStatusTip(blurb)
-            act.toggled.connect(
-                lambda on, p=path, t=title: self._toggle_example_extension(
-                    p, t, on))
-        sub.setToolTipsVisible(True)
-
-    def _toggle_example_extension(self, path, title: str, on: bool) -> None:
-        import shutil
-        from core.extensions import user_plugins_dir
-        target = user_plugins_dir() / path.name
-        try:
-            if on:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if path.is_dir():
-                    shutil.rmtree(target, ignore_errors=True)
-                    shutil.copytree(path, target, ignore=shutil.ignore_patterns(
-                        "__pycache__", "*.pyc"))
-                else:
-                    shutil.copyfile(path, target)
-                msg = tr("«{name}» installed. Restart IngeTrazo to use it.",
-                         name=title)
-            elif target.is_dir():
-                shutil.rmtree(target)
-                msg = tr("«{name}» removed. Restart IngeTrazo to unload it.",
-                         name=title)
-            else:
-                target.unlink(missing_ok=True)
-                msg = tr("«{name}» removed. Restart IngeTrazo to unload it.",
-                         name=title)
-        except OSError as exc:
-            QMessageBox.warning(self, tr("Example extensions"), str(exc))
-            return
-        QMessageBox.information(self, tr("Example extensions"), msg)
+    def _on_manage_extensions(self) -> None:
+        from views.extension_manager_dialog import ExtensionManagerDialog
+        dialog = ExtensionManagerDialog(self)
+        dialog.exec()
+        dialog.deleteLater()
 
     PLUGIN_GUIDE_URL = ("https://github.com/ingelibre/ingetrazo"
                         "/blob/main/docs/plugins.md")
+
+    @staticmethod
+    def example_extensions() -> list:
+        """``(path, title, blurb)`` of each extension shipped with the app
+        (``examples/extensions``); the extension manager installs them."""
+        from core.extension_manager import example_extension_files
+        return example_extension_files()
 
     def _on_open_plugins_folder(self) -> None:
         """Open (creating if needed) the per-user plugins directory — drop
@@ -1909,13 +2491,30 @@ class MainWindow(QMainWindow):
         - **a first place** when there is none: tabbed with the trays;
         - **a way back** when closed: Window ▸ Panels lists every tab."""
         if not self.restoreDockWidget(dock):
-            self.addDockWidget(Qt.RightDockWidgetArea, dock)
-            anchor = next((d for d in reversed(self._sidebar_docks())
-                           if d is not dock and d.objectName() != dock.objectName()), None)
-            if anchor is not None:
-                self.tabifyDockWidget(anchor, dock)
+            # Tabbed with Properties, on whichever side it is: the last
+            # tray of the list may have been moved to the other side, and
+            # tabbing with it put the extensions in a group of their own.
+            area = self.dockWidgetArea(self.tray)
+            if area == Qt.NoDockWidgetArea:
+                area = Qt.RightDockWidgetArea
+            self.addDockWidget(area, dock)
+            self.tabifyDockWidget(self.tray, dock)
         self._extension_docks.append(dock)
         self._keep_docked(dock)
+        # A panel added after start-up (the first time its tool runs) gets
+        # the same rule as the others: closed if the user closed it, or if
+        # it asks to start hidden and has not been seen yet.
+        st = QSettings()
+        hidden = self._hidden_tray_names(st)
+        if dock.objectName() in hidden:
+            dock.hide()
+        elif self.isVisible():
+            # Made after the window showed, a widget starts hidden until
+            # shown: the tab the extension asked for would not appear.
+            dock.show()
+        if st.contains("ui/hidden_trays"):
+            st.setValue("ui/hidden_trays", sorted(hidden))
+        self._mark_trays_known(st, [dock.objectName()])
         menu = getattr(self, "_panels_menu", None)
         if menu is not None:
             self._fill_panels_menu(menu)
@@ -2533,6 +3132,224 @@ class MainWindow(QMainWindow):
             self.viewport.history.execute(MakeUniqueCommand(g))
         self.viewport.update()
 
+    def _replacement_choices(self, sel) -> list:
+        """``[(label, instance)]``: one row per component definition in the
+        model that the selection could be swapped for — one instance stands
+        for its definition. The selected components' own definitions are
+        left out, and so are the face-me cutouts, as the tray does."""
+        own = {id(g.mesh) for g in sel
+               if isinstance(g, Group) and g.is_component()}
+        scene = self.viewport.scene
+        pool = list(scene.groups)
+        ctx = scene.edit_group
+        if ctx is not None:
+            pool += [c for c in (ctx.children or ()) if c not in pool]
+        by_proto: dict = {}
+        for g in pool:
+            if (not isinstance(g, Group) or not g.is_component()
+                    or getattr(g, "billboard", False) or id(g.mesh) in own):
+                continue
+            by_proto.setdefault(id(g.mesh), []).append(g)
+        # Definitions kept in the file count even with no copy placed:
+        # (definition, copies) per prototype.
+        rows = [(gs[0], len(gs)) for gs in by_proto.values()]
+        rows += [(t, 0) for t in scene.kept_components
+                 if id(t.mesh) not in by_proto and id(t.mesh) not in own]
+        rows.sort(key=lambda r: ((r[0].name or "").lower(), -r[1]))
+        out = []
+        seen: set = set()
+        for definition, n in rows:
+            name = definition.name or tr("Component")
+            label = f"{name}  ({n}×)"
+            k = 2
+            while label in seen:                # two definitions, one name
+                label = f"{name} [{k}]  ({n}×)"
+                k += 1
+            seen.add(label)
+            out.append((label, definition))
+        return out
+
+    def _on_replace_component(self) -> None:
+        """Replace Component…: the selected component instances take
+        another definition from the model, each keeping its place, turn and
+        scale. Select ▸ All Instances first to swap every copy."""
+        from PySide6.QtWidgets import QInputDialog
+        sel = list(self.viewport.scene.selection)
+        targets = [g for g in sel if isinstance(g, Group) and g.is_component()]
+        if not targets:
+            self.viewport.flash_status(tr("Select a component first"))
+            return
+        choices = self._replacement_choices(sel)
+        if not choices:
+            self.viewport.flash_status(tr(
+                "There is no other component in the model to replace it with"))
+            return
+        labels = [lb for lb, _g in choices]
+        label, ok = QInputDialog.getItem(
+            self, tr("Replace Component"),
+            tr("Replace {n} selected instances with:", n=len(targets)),
+            labels, 0, False)
+        if not ok or label not in labels:
+            return
+        self.replace_selection_with(choices[labels.index(label)][1])
+
+    def keep_component(self, definition, keep: bool = True) -> None:
+        """Keep in File on or off for ``definition``'s component (an
+        instance or a kept template), undoable."""
+        from core.history import KeepComponentCommand
+        self.viewport.history.execute(KeepComponentCommand(definition, keep))
+        self.viewport.notify_scene_changed()
+        if keep:
+            text = tr("{name} is kept in the file, even with no copy placed",
+                      name=definition.name)
+        else:
+            text = tr("{name} is no longer kept in the file",
+                      name=definition.name)
+        self.statusBar().showMessage(text, 4000)
+
+    def replace_selection_with(self, source) -> int:
+        """Swap the selected component instances for ``source``'s
+        definition, as one undo step; how many changed. The menu's dialog
+        and the tray's «In model» list both land here."""
+        from core.history import (CompoundCommand, KeepComponentCommand,
+                                  ReplaceComponentCommand)
+        from core.kept_components import orphaned_by
+        cmd = ReplaceComponentCommand(
+            [g for g in self.viewport.scene.selection
+             if isinstance(g, Group)], source)
+        if not cmd.targets:
+            return 0
+        # Swapping every copy away would drop a definition from the file
+        # for good: say which, and offer to keep it — in the same undo step.
+        orphans = orphaned_by(self.viewport.scene, cmd.targets)
+        steps = [cmd]
+        if orphans:
+            keep = self._ask_keep_orphans(orphans)
+            if keep is None:
+                return 0
+            if keep:
+                steps = [KeepComponentCommand(g) for g in orphans] + [cmd]
+        self.viewport.history.execute(
+            steps[0] if len(steps) == 1 else CompoundCommand(steps))
+        self.viewport.notify_scene_changed()
+        self.viewport.update()
+        self.statusBar().showMessage(tr(
+            "{n} instances replaced with {name}", n=len(cmd.targets),
+            name=source.name), 4000)
+        return len(cmd.targets)
+
+    def _ask_keep_orphans(self, orphans):
+        """True = keep them in the file, False = let them go, None =
+        cancel the replacement."""
+        names = ", ".join(sorted({g.name or tr("Component") for g in orphans}))
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle(tr("Replace Component"))
+        box.setText(tr("No copy of {names} will be left in the model.",
+                       names=names))
+        box.setInformativeText(tr(
+            "Keep it in the file, to place it or swap back to it later?"))
+        keep = box.addButton(tr("Keep in File"), QMessageBox.AcceptRole)
+        drop = box.addButton(tr("Let It Go"), QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(keep)
+        box.exec()
+        if box.clickedButton() is keep:
+            return True
+        if box.clickedButton() is drop:
+            return False
+        return None
+
+    def keep_selected_components(self, keep: bool = True) -> None:
+        """Keep in File, on or off, for every component definition the
+        selection uses — one undo step."""
+        from core.history import CompoundCommand, KeepComponentCommand
+        seen: set = set()
+        cmds = []
+        for g in self.viewport.scene.selection:
+            if (isinstance(g, Group) and g.is_component()
+                    and id(g.mesh) not in seen):
+                seen.add(id(g.mesh))
+                cmds.append(KeepComponentCommand(g, keep))
+        if not cmds:
+            return
+        self.viewport.history.execute(
+            cmds[0] if len(cmds) == 1 else CompoundCommand(cmds))
+        self.viewport.notify_scene_changed()
+        if keep:
+            text = tr("{n} components kept in the file", n=len(cmds))
+        else:
+            text = tr("{n} components no longer kept in the file",
+                      n=len(cmds))
+        self.statusBar().showMessage(text, 4000)
+
+    def rename_component(self, definition) -> None:
+        """Rename a component definition: every copy, placed or nested,
+        and the kept template take the new name, as one undo step."""
+        from core.history import CompoundCommand, RenameGroupCommand
+        from core.kept_components import copies_of, kept_template
+        scene = self.viewport.scene
+        name, ok = _prompts.get_text(
+            self, tr("Rename Component"), tr("Component name:"),
+            text=definition.name or "")
+        name = name.strip()
+        if not ok or not name or name == definition.name:
+            return
+        targets = copies_of(scene, definition.mesh)
+        kept = kept_template(scene, definition.mesh)
+        if kept is not None and kept not in targets:
+            targets.append(kept)
+        if definition not in targets:
+            targets.append(definition)
+        self.viewport.history.execute(CompoundCommand(
+            [RenameGroupCommand(g, name) for g in targets]))
+        self.viewport.notify_scene_changed()
+
+    def _on_components_from_file(self) -> None:
+        start = (str(self._current_path.parent)
+                 if getattr(self, "_current_path", None) else "")
+        path, _ = file_dialogs.getOpenFileName(
+            self, tr("Components from File"), start,
+            tr("IngeTrazo document (*.igz)"))
+        if not path:
+            return
+        try:
+            n = self.import_kept_components(path)
+        except Exception as exc:  # noqa: BLE001 - any unreadable file
+            QMessageBox.warning(self, tr("Components from File"),
+                                tr("Could not read {p}: {e}", p=path, e=exc))
+            return
+        if n:
+            text = tr("{n} components added to the list, ready to place",
+                      n=n)
+        else:
+            text = tr("That file holds no components")
+        self.statusBar().showMessage(text, 5000)
+
+    def import_kept_components(self, path) -> int:
+        """Bring every component definition of another document into this
+        one as KEPT components — in the list, none placed: a library to
+        draw from. Its materials and layers come along by name, as Insert
+        does. Returns how many; nothing changes for a file without one."""
+        from core.history import AddKeptComponentsCommand
+        from core.insert import ensure_layers, merge_materials
+        from core.kept_components import definitions_of
+        from core.scene import Scene as _Scene
+        from formats import igz as _igz
+        temp = _Scene()
+        _igz.load_into(temp, Path(path))       # raises before anything moves
+        templates = definitions_of(temp)
+        if not templates:
+            return 0
+        scene = self.viewport.scene
+        for t in templates:
+            merge_materials(getattr(temp, "materials", {}) or {},
+                            scene.materials, t)
+            ensure_layers(scene, t)
+        self.viewport.history.execute(AddKeptComponentsCommand(templates))
+        self.viewport.notify_scene_changed()
+        return len(templates)
+
     @_repeatable("Merge Groups")
     def _on_merge_groups(self) -> None:
         from core.history import MergeGroupsCommand
@@ -2707,6 +3524,9 @@ class MainWindow(QMainWindow):
     def _set_section_visibility(self, attr: str, on: bool) -> None:
         setattr(self.viewport.scene, attr, bool(on))
         self.viewport.update()
+        browser = getattr(self, "project_browser", None)
+        if browser is not None:
+            browser.outliner.on_scene_changed()
 
     def _sync_section_menu(self) -> None:
         scene = self.viewport.scene
@@ -2724,6 +3544,37 @@ class MainWindow(QMainWindow):
             act.blockSignals(True)
             act.setChecked(value)
             act.blockSignals(False)
+
+    def _sync_component_edit_menu(self) -> None:
+        """The Component Edit checkmarks and the rest-mode radios follow
+        the viewport: Preferences changes the same mode."""
+        mode = self.viewport.edit_rest_mode
+        if mode != "hide":
+            self._rest_shown_mode = mode
+        self._act_hide_rest.setChecked(mode == "hide")
+        act = self._rest_actions.get(mode)
+        if act is not None:
+            act.setChecked(True)
+        self._act_hide_similar.setChecked(bool(getattr(
+            self.viewport.scene, "hide_similar_components", False)))
+
+    def _on_toggle_hide_rest(self, _checked: bool = False) -> None:
+        """Hide Rest of Model (Alt+Q). Reads the viewport, not
+        the checkmark, which Preferences may have left stale."""
+        mode = self.viewport.edit_rest_mode
+        if mode == "hide":
+            self.viewport.set_edit_rest_mode(self._rest_shown_mode)
+        else:
+            self._rest_shown_mode = mode
+            self.viewport.set_edit_rest_mode("hide")
+        self._sync_component_edit_menu()
+
+    def _on_toggle_hide_similar(self, _checked: bool = False) -> None:
+        """Hide Similar Components (Alt+W)."""
+        on = not bool(getattr(self.viewport.scene,
+                              "hide_similar_components", False))
+        self.viewport.set_hide_similar_components(on)
+        self._sync_component_edit_menu()
 
     def _set_hidden_view(self, attr: str, on: bool) -> None:
         """View ▸ Hidden Objects / Geometry: a scene flag (it travels in the
@@ -2846,6 +3697,9 @@ class MainWindow(QMainWindow):
             return
         setattr(style, name, bool(value))
         self.viewport.update()
+        browser = getattr(self, "project_browser", None)
+        if browser is not None and name == "section_fill":
+            browser.outliner.on_scene_changed()
 
     def _sync_style_menu(self) -> None:
         """Reflect the scene's active style in the menu (loads, scene recall)."""
@@ -3129,6 +3983,19 @@ class MainWindow(QMainWindow):
                 menu.addAction(tr("Merge Groups"), self._on_merge_groups)
             if any(isinstance(e, Group) and e.is_component() for e in sel):
                 menu.addAction(tr("Make Unique"), self._on_make_unique)
+                if self._replacement_choices(sel):
+                    menu.addAction(tr("Replace Component…"),
+                                   self._on_replace_component)
+                from core.kept_components import kept_template
+                comps = [e for e in sel
+                         if isinstance(e, Group) and e.is_component()]
+                kept = all(kept_template(self.viewport.scene, g.mesh)
+                           is not None for g in comps)
+                act = menu.addAction(tr("Keep in File"))
+                act.setCheckable(True)
+                act.setChecked(kept)
+                act.triggered.connect(
+                    lambda on: self.keep_selected_components(bool(on)))
             if len(groups) == 1 and len(sel) == 1:
                 menu.addAction(tr("Change Axes"),
                                lambda g=groups[0]: self._on_change_axes(g))
@@ -3245,7 +4112,8 @@ class MainWindow(QMainWindow):
         touches or what it shares (issue #106, @pacaeiro). Each entry acts
         in the current editing context only, like Select All."""
         from core.select_ops import (all_connected, bounding_edges,
-                                     same_layer, same_material)
+                                     same_definition, same_layer,
+                                     same_material)
         has_mesh = any(isinstance(e, (Edge, Face)) for e in sel)
         has_face = any(isinstance(e, Face) for e in sel)
         has_group = any(isinstance(e, Group) for e in sel)
@@ -3278,6 +4146,11 @@ class MainWindow(QMainWindow):
                 grow(lambda s: same_material(scene, s)))
         sub.addAction(tr("All on Same Layer")).triggered.connect(
             grow(lambda s: same_layer(scene, s)))
+        if any(isinstance(e, Group) and e.is_component() for e in sel):
+            # Every copy of the selected components — the first half of
+            # swapping them all for another (Replace Component…).
+            sub.addAction(tr("All Instances")).triggered.connect(
+                grow(lambda s: same_definition(scene, s)))
 
     def _add_layer_submenu(self, menu, sel) -> None:
         """Right-click ▸ Layer ▸ the document's layers, the selection's own
@@ -3698,6 +4571,9 @@ class MainWindow(QMainWindow):
         (Marco, 23-09: «en el modelo solo alternar entre el modelo y la
         lámina… cuando regrese a lámina, que regrese a la lámina 2»). A
         document without sheets offers «+» instead."""
+        composer = getattr(self, "_composer", None)
+        if composer is not None and hasattr(composer, "views_panel"):
+            composer.views_panel.on_scene_changed()
         tabs = getattr(self, "_sheet_tabs", None)
         if tabs is None:
             return
@@ -3941,6 +4817,16 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             tr("Selection inverted ({n} entities)", n=n), 2500)
 
+    def _on_select_none(self) -> None:
+        """Deselect everything (Ctrl+T), the counterpart of Select All
+        (Ctrl+A). Emptying the selection is a change of what is shown, not
+        of the document, so the drawing is not marked unsaved (issue #38)."""
+        n = len(self.viewport.scene.selection)
+        self.viewport.scene.clear_selection()
+        self.viewport.notify_scene_changed()
+        self.statusBar().showMessage(
+            tr("Selection cleared ({n} entities)", n=n), 2500)
+
     # ---- Undo / redo --------------------------------------------------------
     def _on_undo(self) -> None:
         # A tool in the middle of something answers Ctrl+Z first: the Line
@@ -3949,13 +4835,32 @@ class MainWindow(QMainWindow):
         tool = self.viewport.active_tool
         handler = getattr(tool, "on_undo", None)
         if callable(handler) and handler(self.viewport):
+            inference = getattr(self.viewport, "inference", None)
+            if inference is not None:
+                inference.clear_references()
             self.viewport.notify_scene_changed()
             return
         if self.viewport.history.undo():
+            inference = getattr(self.viewport, "inference", None)
+            if inference is not None:
+                inference.clear_references()
             self.viewport.notify_scene_changed()
 
     def _on_redo(self) -> None:
+        # The same first refusal as undo: Push/Pull ends a drag whose staged
+        # preview sits in the model, so the redo lands on the clean one.
+        tool = self.viewport.active_tool
+        handler = getattr(tool, "on_redo", None)
+        if callable(handler) and handler(self.viewport):
+            inference = getattr(self.viewport, "inference", None)
+            if inference is not None:
+                inference.clear_references()
+            self.viewport.notify_scene_changed()
+            return
         if self.viewport.history.redo():
+            inference = getattr(self.viewport, "inference", None)
+            if inference is not None:
+                inference.clear_references()
             self.viewport.notify_scene_changed()
 
     # ---- File handling ------------------------------------------------------
@@ -3965,8 +4870,14 @@ class MainWindow(QMainWindow):
 
     def _camera_dict(self) -> dict:
         """The live camera as the document keeps it (the .skp format
-        saves the camera in the file too; @pacaeiro, issue #60)."""
+        saves the camera in the file too; @pacaeiro, issue #60).
+
+        A camera that is not a real pose (NaN or inf) is not written: the
+        save refused the whole document over it and the user's work could
+        not be saved (#383). The document keeps the view it had."""
         cam = self.viewport.camera
+        if not cam.is_finite():
+            return getattr(self.viewport.scene, "camera_home", None)
         t = cam.target
         out = {"target": [float(t.x()), float(t.y()), float(t.z())]}
         for k in self._CAMERA_FIELDS:
@@ -4115,6 +5026,7 @@ class MainWindow(QMainWindow):
         self.viewport.end_group_edit()
         if not self._confirm_discard(tr("Discard current drawing?")):
             return
+        self.viewport.inference.reset()
         # The discarded drawing's recovery slot dies with it.
         from core import autosave
         autosave.clear(self._current_path)
@@ -4281,16 +5193,32 @@ class MainWindow(QMainWindow):
         # seconds with nothing on screen, «feeling of freeze». Small ones
         # never show it (the dialog waits 400 ms before appearing).
         dlg, cb = self._import_progress(tr("Opening {name}…", name=path.name))
+        # The viewport stays still while the document comes in: each
+        # progress tick lets the window repaint, and a paint over a model
+        # half loaded built every drawing chunk in one go — 61 s without
+        # answering the desktop on the model of #158.
+        self.viewport.setUpdatesEnabled(False)
         try:
-            igz_format.load_into(self.viewport.scene,
-                                 slot if recovered else path, progress=cb)
-        except Exception as exc:  # noqa: BLE001 - surface any IO/parse error to the user
-            dlg.close()
-            QMessageBox.critical(self, tr("Open failed"), str(exc))
-            return False
+            try:
+                igz_format.load_into(self.viewport.scene,
+                                     slot if recovered else path, progress=cb)
+            except Exception as exc:  # noqa: BLE001 - surface any IO/parse error to the user
+                dlg.close()
+                QMessageBox.critical(self, tr("Open failed"), str(exc))
+                return False
+            self.viewport.history.clear()
+            self.viewport.reset_texture_cache()
+            # The first paint of a huge model built its drawing data in one
+            # go, long enough for the desktop to call the app «not
+            # responding»: it is built here, under the same dialog (#158).
+            try:
+                self.viewport.prepare_drawing(cb)
+            except Exception:  # noqa: BLE001 - the first paint builds it anyway
+                pass
+        finally:
+            self.viewport.setUpdatesEnabled(True)
         dlg.close()
-        self.viewport.history.clear()
-        self.viewport.reset_texture_cache()
+        self.viewport.inference.reset()
         self._apply_camera_home()
         self._current_path = path
         self._remember_recent(path)
@@ -4356,9 +5284,14 @@ class MainWindow(QMainWindow):
         object graph, and the young-generation threshold that keeps the
         collector out of the way while drawing (see ``GC_THRESHOLD0``)."""
         import gc
+        import sys
         gc.unfreeze()                 # (in case an older session froze it)
         gc.set_threshold(self.GC_THRESHOLD0, 10, 0)
-        gc.collect()
+        # Past 40 M blocks (the plaza is 3 M; the model of #158, 58.6 M) a
+        # full collection is seconds of a window that does not answer, and
+        # the desktop says so: skipped, as the autosave housekeeping is.
+        if sys.getallocatedblocks() <= 40_000_000:
+            gc.collect()
 
     def _on_save(self) -> None:
         if self._workspace is not None:
@@ -4397,7 +5330,7 @@ class MainWindow(QMainWindow):
         # Backup BEFORE writing (Preferences ▸ General): the previous good
         # version survives even a save that dies mid-write — which a syncing
         # drive has actually produced (pCloud truncation).
-        if str(QSettings().value("general/backup", "1")) != "0" \
+        if str(_gs.value("backup", "1")) != "0" \
                 and path.is_file():
             import shutil
             try:
@@ -4641,16 +5574,17 @@ class MainWindow(QMainWindow):
         thickness) → the parameters dict, or ``None`` when cancelled or
         blank. ``params`` pre-fills it (editing an existing text).
 
-        Height and thickness read in METRES, the model's unit everywhere
-        else (Marco, 2026-09-20: «debería ser la unidad en metros»), with
-        no low ceiling: Rafael typed «20» for the extrusion and a 10 m cap
-        refused it (2026-09-16, f000845) — the cap was the fault, not the
-        unit. Three decimals, so 0.05 m reads as such."""
+        Height and thickness are kept in METRES, the model's unit (Marco,
+        2026-09-20), and shown and typed in the DOCUMENT's units like every
+        other readout (#287: a millimetre model showed them in metres) — a
+        bare «20» is 20 mm there, «2cm» is 2 cm anywhere. No low ceiling:
+        Rafael typed «20» for the extrusion and a 10 m cap refused it
+        (2026-09-16, f000845) — the cap was the fault, not the unit."""
         from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox,
-                                       QDoubleSpinBox, QFontComboBox,
-                                       QFormLayout, QLineEdit)
+                                       QFontComboBox, QFormLayout, QLineEdit)
         from PySide6.QtGui import QFont
         from core.text3d import text_params
+        from views.length_field import LengthSpinBox
         params = params or {}
         dlg = QDialog(self)
         dlg.setWindowTitle(tr("3D Text"))
@@ -4668,19 +5602,11 @@ class MainWindow(QMainWindow):
         italic_check = QCheckBox()
         italic_check.setChecked(bool(params.get("italic", False)))
         form.addRow(tr("Italic:"), italic_check)
-        height_spin = QDoubleSpinBox()
-        height_spin.setRange(0.001, 1000.0)
-        height_spin.setDecimals(3)
-        height_spin.setSingleStep(0.05)
+        height_spin = LengthSpinBox(minimum=0.001, maximum=1000.0)
         height_spin.setValue(float(params.get("height", 0.25)))
-        height_spin.setSuffix(" m")
         form.addRow(tr("Height:"), height_spin)
-        depth_spin = QDoubleSpinBox()
-        depth_spin.setRange(0.0, 1000.0)
-        depth_spin.setDecimals(3)
-        depth_spin.setSingleStep(0.01)
+        depth_spin = LengthSpinBox(minimum=0.0, maximum=1000.0)
         depth_spin.setValue(float(params.get("thickness", 0.05)))
-        depth_spin.setSuffix(" m")
         depth_spin.setToolTip(tr("0 leaves flat faces (no extrusion)"))
         form.addRow(tr("Extruded:"), depth_spin)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok
@@ -5956,7 +6882,36 @@ class MainWindow(QMainWindow):
                n=count, path=path_str), 5000)
 
     def _on_export_stl(self) -> None:
-        self._export("STL", "stl", tr("STL mesh (*.stl)"), stl_format.save_stl)
+        # An STL records no unit and slicers read it as millimetres, so the
+        # model's own metres came out 1000x too small (#513): ask, the way
+        # the import does, with millimetres first and the last choice kept.
+        from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
+                                       QFormLayout)
+
+        keys = ["mm", "cm", "m", "in", "ft"]
+        labels = [tr("Millimetres"), tr("Centimetres"), tr("Metres"),
+                  tr("Inches"), tr("Feet")]
+        settings = QSettings()
+        guess = str(settings.value("export/stl_unit", "mm") or "mm")
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("Export STL"))
+        form = QFormLayout(dialog)
+        units = QComboBox(dialog)
+        units.addItems(labels)
+        units.setCurrentIndex(keys.index(guess) if guess in keys else 0)
+        form.addRow(tr("Unit of the STL file (3D printing programs expect "
+                       "millimetres)"), units)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        unit = keys[units.currentIndex()]
+        settings.setValue("export/stl_unit", unit)
+        self._export("STL", "stl", tr("STL mesh (*.stl)"),
+                     lambda scene, path: stl_format.save_stl(scene, path, unit))
 
     def _on_export_obj(self) -> None:
         self._export("OBJ", "obj", tr("Wavefront OBJ (*.obj)"), obj_format.save_obj)
@@ -5964,8 +6919,43 @@ class MainWindow(QMainWindow):
     def _on_export_glb(self) -> None:
         """Single-file 3D export (geometry + materials + textures embedded).
         Best format for 'send it so a colleague can view it' — no texture folder
-        to lose, opens in Blender / web viewers / Windows 3D Viewer."""
-        self._export("GLB", "glb", tr("glTF binary (*.glb)"), gltf_format.save_glb)
+        to lose, opens in Blender / web viewers / Windows 3D Viewer.
+
+        With something selected, it asks first whether the file takes the
+        whole model or just the selection (#353)."""
+        only = self._ask_export_scope()
+        if only is False:
+            return                          # cancelled
+        if only:
+            def writer(scene, path):
+                gltf_format.save_glb(scene, path, only=only)
+        else:
+            writer = gltf_format.save_glb
+        self._export("GLB", "glb", tr("glTF binary (*.glb)"), writer)
+
+    def _ask_export_scope(self):
+        """With a selection: ``set`` of the selected entities to export
+        only them, ``None`` for the whole model, ``False`` if cancelled.
+        Without one: ``None`` at once."""
+        sel = set(self.viewport.scene.selection)
+        if not sel:
+            return None
+        box = QMessageBox(
+            QMessageBox.Question, tr("Export"),
+            tr("Export the whole model, or only what is selected?"),
+            QMessageBox.NoButton, self)
+        box.setOption(QMessageBox.Option.DontUseNativeDialog, True)
+        whole = box.addButton(tr("Whole model"), QMessageBox.AcceptRole)
+        part = box.addButton(tr("Only the selection"), QMessageBox.AcceptRole)
+        box.addButton(QMessageBox.Cancel).setText(tr("Cancel"))
+        box.setDefaultButton(part)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is part:
+            return sel
+        if clicked is whole:
+            return None
+        return False
 
     def _on_export_dae(self) -> None:
         """COLLADA export — the 'open it back in the original program' bridge. Copies the

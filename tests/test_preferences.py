@@ -77,9 +77,9 @@ def test_ok_writes_the_settings(settings_file):
     assert st.value("georef/coord_mode") == "utm"
     assert st.value("ia/modelo") == "llama-3.3-70b"
     assert st.value("ia/capturas") == "0"
-    assert st.value("general/autosave") == "1"
-    assert int(st.value("general/autosave_min")) == 10
-    assert st.value("general/backup") == "0"
+    assert st.value("General/autosave") == "1"
+    assert int(st.value("General/autosave_min")) == 10
+    assert st.value("General/backup") == "0"
     assert st.value("nav/invert_wheel") == "1"
     assert st.value("nav/invert_orbit_y") == "1"
     assert int(st.value("walk/look_sensitivity")) == 40

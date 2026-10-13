@@ -75,7 +75,7 @@ CONTRIBUTORS = [
      "https://github.com/Ronyleonel6"),
     ("Carlos Martins",
      "Bug reports with videos that pinned down guides, group paint and "
-     "exploded groups.",
+     "exploded groups; the Project Structure plugin behind the Outliner.",
      "https://github.com/fafecm"),
     ("mnavarromugas",
      "First to test the 3D mouse on a real SpaceMouse; per-axis inversion.",
@@ -84,6 +84,9 @@ CONTRIBUTORS = [
      "Reports from mechanical modelling: pulling against a wall, units "
      "for new files.",
      "https://github.com/xyont"),
+    ("Roy Méndez Castro",
+     "Wrote down the Outliner: what a tree of nested groups needs.",
+     "https://github.com/roymendezcastro"),
     ("kagehak",
      "STL import and Simplify Mesh.",
      "https://github.com/kagehak"),

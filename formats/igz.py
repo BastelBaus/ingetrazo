@@ -37,6 +37,13 @@ nothing about containers.
 Untextured documents stay **plain JSON at format 1**: the common case remains
 diffable, hand-editable, and readable by older builds. ``load_into`` sniffs the
 ZIP magic, so both shapes open transparently.
+
+**Large documents are format 3** (see ``_LARGE_DOCUMENT``): always a ZIP, and
+each big mesh is a ``{"geom": {...}}`` block instead of ``edges``/``faces``
+lists — its distinct points once as float32, edges and face rings as int32
+indices, edge flags and a shared table of face attributes, in one raw
+member under ``geom/`` (layout in the JSON, no pickles). Builds that read
+only up to format 2 refuse it with a message instead of opening it empty.
 """
 from __future__ import annotations
 
@@ -56,7 +63,9 @@ from georef.geopath import GeoPath
 
 
 PLAIN_FORMAT = 1        # bare JSON document (no images to carry)
-CURRENT_FORMAT = 2      # ZIP container: document.json + textures/
+CONTAINER_FORMAT = 2    # ZIP container: document.json + textures/
+GEOMETRY_FORMAT = 3     # + big meshes as binary blocks under geom/
+CURRENT_FORMAT = GEOMETRY_FORMAT   # the newest this build reads
 _ZIP_MAGIC = b"PK\x03\x04"
 _DOC_ENTRY = "document.json"
 _TEX_PREFIX = "textures/"
@@ -65,12 +74,39 @@ _TEX_PREFIX = "textures/"
 # whatever the user syncs them with).
 _ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
+# A document with more faces + edges than this is written COMPACT (no
+# indentation) and deflated at level 1. Indented, the 14 M-face model of
+# #158 was 3.3 GB of text — every coordinate on a line of its own — and
+# saving it peaked at 16 GB of memory; compact it is 1.4 GB, and level 1
+# deflates it in 4 s instead of 20 (the file grows ~35 %). Nobody reads a
+# document that size by hand, while a small one stays indented and
+# diffable, at the default level where deflating costs nothing anyway.
+_LARGE_DOCUMENT = 20_000
+
+# Format 3 — a LARGE document (above) stores each mesh of at least this many
+# corners as a binary block instead of JSON lists: every distinct point once
+# as float32 (exactly what the QVector3D of the live mesh holds, so nothing
+# is lost), and edges and faces as int32 indices into it. On the #158 model
+# the JSON spelled out 19 M points to describe 2 M distinct ones, and
+# parsing that text was half of the minute it took to open. Structure —
+# groups, layers, materials, the face attributes — stays JSON. Small meshes
+# stay JSON too: the reader rebuilds a small mesh entity by entity, a big
+# one in one bulk pass (see :func:`_bulk_sized`), and the two number their
+# vertices differently — a mesh goes binary only where the JSON reader
+# would take the bulk pass, so either way it reopens the same.
+_GEOM_PREFIX = "geom/"
+_BULK_MIN = 1024
+#: The dtypes a geometry block may declare — anything else is refused, so a
+#: crafted document cannot make the reader build arbitrary objects.
+_GEOM_DTYPES = frozenset(("<f4", "<i4", "<i8", "|u1"))
+
 
 # Keys the texture walk never needs to enter: pure coordinate blocks, and
 # the edge list (fixed ``_edge_json`` schema — no attrs, no textures).
 # Descending into every vertex triple and edge dict made the walk itself
 # cost seconds on a 300k-face document.
-_TEXTURE_WALK_SKIP = frozenset(("vertices", "holes", "a", "b", "edges"))
+_TEXTURE_WALK_SKIP = frozenset(("vertices", "holes", "a", "b", "edges",
+                                "arrays"))
 
 
 def _texture_entries(node):
@@ -101,7 +137,7 @@ def _pack_textures(payload) -> tuple[dict, int]:
     their ``"path"``, so a document whose cache was wiped saves no worse than
     before instead of losing the reference outright."""
     import hashlib
-    from core.texture import texture_file_name
+    from core.texture import is_image_file, texture_file_name
 
     blobs: dict = {}
     resolved: dict = {}          # source path → member name ("" = unreadable)
@@ -110,6 +146,10 @@ def _pack_textures(payload) -> tuple[dict, int]:
         nonlocal missing
         member = resolved.get(src)
         if member is None:
+            if not is_image_file(src):
+                resolved[src] = ""
+                missing += 1
+                return ""
             try:
                 data = Path(src).read_bytes()
             except OSError:
@@ -198,6 +238,14 @@ def _face_json(f) -> dict:
         entry["holes"] = [
             [list(v.position.toTuple()) for v in loop] for loop in f.hole_loops
         ]
+    entry.update(_face_attrs_json(f))
+    return entry
+
+
+def _face_attrs_json(f) -> dict:
+    """Everything a face stores besides its loops — the part a format-3
+    geometry block keeps as JSON, in a table shared by equal faces."""
+    entry: dict = {}
     # Material colour (the Paint tool), written only when set.
     color = getattr(f, "attrs", {}).get("color")
     if color is not None:
@@ -249,11 +297,143 @@ def _edge_json(e) -> dict:
     return entry
 
 
-def _mesh_json(mesh) -> dict:
+def _mesh_json(mesh, geom_sink=None) -> dict:
+    """The mesh block. With a ``geom_sink`` (a large document) a big mesh
+    goes to a binary block in the sink and the JSON keeps only its
+    reference and face-attribute table (format 3)."""
+    if geom_sink is not None and _bulk_sized(len(mesh.edges),
+                                             len(mesh.faces)):
+        return {"geom": _pack_geometry(mesh, geom_sink)}
     return {
         "edges": [_edge_json(e) for e in mesh.edges],
         "faces": [_face_json(f) for f in mesh.faces],
     }
+
+
+def _bulk_sized(n_edges: int, n_faces: int) -> bool:
+    """Whether a mesh this size is rebuilt in one bulk pass (a rough corner
+    count) — the same test for the JSON reader and the format-3 writer."""
+    return n_edges + n_faces * 4 >= _BULK_MIN
+
+
+def _pack_geometry(mesh, sink: dict) -> dict:
+    """Write ``mesh`` as a format-3 geometry block into ``sink`` (member
+    name → bytes) and return its JSON side.
+
+    The points are numbered in the order a JSON document lists them —
+    every edge's two ends, then every face's outer ring and holes — so
+    the reader's weld meets them in the same order and rebuilds the same
+    vertices. Holes nested in a bigger hole are dropped here, where the
+    JSON reader drops them (:func:`core.topology._maximal_holes`)."""
+    import numpy as np
+    from core.topology import _maximal_holes
+
+    edges = mesh.edges
+    corners: list = []
+    for e in edges:
+        corners.append(e.v0)
+        corners.append(e.v1)
+    ring_sizes: list = []
+    ring_counts: list = []
+    face_attr: list = []
+    table: list = []
+    table_index: dict = {}
+    for f in mesh.faces:
+        loop = f.loop
+        holes = f.hole_loops or ()
+        if len(holes) > 1:
+            pos = [[QVector3D(v.position) for v in h] for h in holes]
+            kept = {id(k) for k in _maximal_holes(pos)}
+            holes = [h for h, p in zip(holes, pos) if id(p) in kept]
+        ring_counts.append(1 + len(holes))
+        ring_sizes.append(len(loop))
+        corners.extend(loop)
+        for h in holes:
+            ring_sizes.append(len(h))
+            corners.extend(h)
+        attrs = _face_attrs_json(f) if f.attrs else None
+        if attrs:
+            key = json.dumps(attrs, sort_keys=True, separators=(",", ":"))
+            k = table_index.get(key)
+            if k is None:
+                k = table_index[key] = len(table)
+                table.append(attrs)
+            face_attr.append(k)
+        else:
+            face_attr.append(-1)
+
+    # Number the vertex objects by first appearance.
+    ids = np.fromiter((id(v) for v in corners), dtype=np.uint64,
+                      count=len(corners))
+    _u, first, inverse = np.unique(ids, return_index=True,
+                                   return_inverse=True)
+    order = np.argsort(first, kind="stable")
+    rank = np.empty_like(order)
+    rank[order] = np.arange(len(order))
+    index = rank[inverse.reshape(-1)].astype(np.int32)
+    pos = np.array([corners[i].position.toTuple()
+                    for i in first[order].tolist()],
+                   dtype=np.float32).reshape(-1, 3)
+    if not np.isfinite(pos).all():
+        raise NonFiniteDocumentError("geometry")
+
+    ne = len(edges)
+    arrays = {
+        "pos": pos,
+        "edges": index[:2 * ne].reshape(-1, 2),
+        "rings": index[2 * ne:],
+        "ring_sizes": np.asarray(ring_sizes, dtype=np.int32),
+        "ring_counts": np.asarray(ring_counts, dtype=np.int32),
+        "face_attr": np.asarray(face_attr, dtype=np.int32),
+    }
+    flags = np.zeros(ne, dtype=np.uint8)
+    curves = layers = None
+    layer_table: list = []
+    layer_index: dict = {}
+    for i, e in enumerate(edges):
+        if e.soft:
+            flags[i] |= 1
+        if e.hidden:
+            flags[i] |= 2
+        if e.curve is not None:
+            if curves is None:
+                curves = np.full(ne, -1, dtype=np.int64)
+            curves[i] = e.curve
+        if e.layer is not None:
+            if layers is None:
+                layers = np.full(ne, -1, dtype=np.int32)
+            k = layer_index.get(e.layer)
+            if k is None:
+                k = layer_index[e.layer] = len(layer_table)
+                layer_table.append(e.layer)
+            layers[i] = k
+    arrays["edge_flags"] = flags
+    if curves is not None:
+        arrays["edge_curve"] = curves
+    if layers is not None:
+        arrays["edge_layer"] = layers
+
+    # One raw blob, each array at an 8-byte-aligned offset: no pickles, no
+    # per-save timestamps (an .npz carries them), so two saves of the same
+    # model stay byte-identical.
+    layout: dict = {}
+    chunks: list = []
+    offset = 0
+    for name, arr in arrays.items():
+        arr = np.ascontiguousarray(arr)
+        data = arr.tobytes()
+        layout[name] = [arr.dtype.str, list(arr.shape), offset]
+        pad = (-len(data)) % 8
+        chunks.append(data + b"\0" * pad)
+        offset += len(data) + pad
+    member = f"{_GEOM_PREFIX}{len(sink)}.bin"
+    sink[member] = b"".join(chunks)
+    meta = {"member": member, "arrays": layout}
+    if table:
+        meta["face_attrs"] = table
+    if layer_table:
+        meta["edge_layers"] = layer_table
+    return meta
 
 
 def save_scene(scene, path: Path) -> dict:
@@ -262,9 +442,14 @@ def save_scene(scene, path: Path) -> dict:
     be read (those keep pointing at their original path)."""
     # Accept a Scene or a bare Mesh (the M1 read-compat path feeds a Mesh).
     mesh = scene.mesh if hasattr(scene, "mesh") else scene
-    payload = _mesh_json(mesh)
+    # Decided BEFORE anything is serialized: a large document writes its
+    # big meshes as binary blocks (format 3) and never builds their JSON.
+    large = _live_element_count(scene) > _LARGE_DOCUMENT
+    geom: dict | None = {} if large else None
+    payload = _mesh_json(mesh, geom)
     groups = getattr(scene, "groups", None)
-    if groups:
+    kept = getattr(scene, "kept_components", None)
+    if groups or kept:
         # Component prototypes: each shared instance mesh is written ONCE —
         # including the ones only NESTED placements reference, which is what
         # keeps a component's internal repetition (the hedge: 9600 faces
@@ -279,7 +464,7 @@ def save_scene(scene, path: Path) -> dict:
                 if idx is None:
                     idx = proto_index[id(g.mesh)] = len(protos)
                     protos.append(None)          # reserve: recursion is depth
-                    protos[idx] = _mesh_json(g.mesh)
+                    protos[idx] = _mesh_json(g.mesh, geom)
                 entry = {"proto": idx,
                          "xform": [float(x) for x in xf.data()]}
                 # Group or component (issue #90): a group of groups and a
@@ -288,7 +473,7 @@ def save_scene(scene, path: Path) -> dict:
                 # the reader tells apart its own way. Older readers ignore it.
                 entry["component"] = bool(getattr(g, "component", True))
             else:
-                entry = _mesh_json(g.mesh)
+                entry = _mesh_json(g.mesh, geom)
             # The name — never written until 2026-09-11, so every reopened
             # document renumbered its groups and a "Pérgola" came back as
             # "Group 7". Older readers ignore the key.
@@ -324,6 +509,8 @@ def save_scene(scene, path: Path) -> dict:
                 entry["uid"] = g.uid
             if getattr(g, "hidden", False):
                 entry["hidden"] = True
+            if getattr(g, "locked", False):
+                entry["locked"] = True          # older readers ignore it
             if getattr(g, "exploded", None):
                 # An exploded view and each part's share of it, so the
                 # document reopens able to reassemble (core/explode.py).
@@ -337,7 +524,12 @@ def save_scene(scene, path: Path) -> dict:
                 entry["children"] = [_entry(c) for c in kids]
             return entry
 
-        payload["groups"] = [_entry(g) for g in groups]
+        payload["groups"] = [_entry(g) for g in groups or ()]
+        if kept:
+            # Definitions kept with no copy placed: written like instances
+            # through the SAME prototype table, so one still in use is not
+            # written twice. Older readers ignore the key (and lose them).
+            payload["kept_components"] = [_entry(t) for t in kept]
         if protos:
             payload["protos"] = protos
     layers = getattr(scene, "layers", None)
@@ -368,8 +560,11 @@ def save_scene(scene, path: Path) -> dict:
     if style:
         payload["dimension_style"] = dict(style)
     cam = getattr(scene, "camera_home", None)
-    if isinstance(cam, dict):
+    if isinstance(cam, dict) and _non_finite_where(cam) == "scene":
         payload["camera"] = dict(cam)      # what the author was looking at
+    # A camera holding a NaN is left out instead of refusing the save: it is
+    # only the view, and the file opens framed on the model (#485). The
+    # geometry keeps its own guard below.
     units = getattr(scene, "units", None)
     if isinstance(units, dict) and units != {"length": "m", "precision": 2}:
         payload["units"] = dict(units)     # only when not the metre default
@@ -463,22 +658,45 @@ def save_scene(scene, path: Path) -> dict:
         payload["photo_mesh"] = meta
         blobs.update(survey_blobs)
     data = {
-        "igz_format": CURRENT_FORMAT if blobs else PLAIN_FORMAT,
+        "igz_format": (GEOMETRY_FORMAT if geom else
+                       CONTAINER_FORMAT if blobs else PLAIN_FORMAT),
         "app_version": __version__,
         "scene": payload,
     }
     try:
-        doc = json.dumps(data, indent=2, allow_nan=False)
+        if large:
+            doc = json.dumps(data, separators=(",", ":"), allow_nan=False)
+        else:
+            doc = json.dumps(data, indent=2, allow_nan=False)
     except ValueError:
         # A NaN or an infinity in a coordinate (#185). Python would write
         # it as the bare word NaN — not JSON, and a broken shape for good.
         # Refuse, and leave the file on disk as it was.
         raise NonFiniteDocumentError(_non_finite_where(payload)) from None
-    if blobs:
-        _write_container(path, doc, blobs)
+    if blobs or geom:
+        _write_container(path, doc, blobs, fast=large, deflated=geom)
     else:
         _write_atomic(path, doc.encode("utf-8"))
     return {"embedded": len(blobs), "missing": missing}
+
+
+def _live_element_count(scene) -> int:
+    """Faces + edges the document will hold: the loose mesh, and every
+    distinct mesh of the groups (a component prototype is written once,
+    however many times it is placed). Only list lengths."""
+    mesh = scene.mesh if hasattr(scene, "mesh") else scene
+    total = len(mesh.faces) + len(mesh.edges)
+    seen: set = set()
+    stack = (list(getattr(scene, "groups", None) or ())
+             + list(getattr(scene, "kept_components", None) or ()))
+    while stack:
+        g = stack.pop()
+        m = getattr(g, "mesh", None)
+        if m is not None and id(m) not in seen:
+            seen.add(id(m))
+            total += len(m.faces) + len(m.edges)
+        stack.extend(getattr(g, "children", None) or ())
+    return total
 
 
 class NonFiniteDocumentError(ValueError):
@@ -524,9 +742,12 @@ def _write_atomic(path: Path, data: bytes) -> None:
         raise
 
 
-def _write_container(path: Path, doc: str, blobs: dict) -> None:
+def _write_container(path: Path, doc: str, blobs: dict,
+                     fast: bool = False, deflated: dict | None = None) -> None:
     """The ZIP shape: ``document.json`` deflated, images stored as-is (PNG/JPG
-    are already compressed — deflating them again costs time for nothing)."""
+    are already compressed — deflating them again costs time for nothing).
+    ``fast`` deflates at level 1 (see ``_LARGE_DOCUMENT``). ``deflated``
+    holds members compressed like the document — the geometry blocks."""
     import io
     import zipfile
 
@@ -534,7 +755,12 @@ def _write_container(path: Path, doc: str, blobs: dict) -> None:
     with zipfile.ZipFile(buf, "w") as zf:
         info = zipfile.ZipInfo(_DOC_ENTRY, date_time=_ZIP_EPOCH)
         info.compress_type = zipfile.ZIP_DEFLATED
-        zf.writestr(info, doc)
+        zf.writestr(info, doc, compresslevel=1 if fast else None)
+        for member in sorted(deflated or ()):
+            info = zipfile.ZipInfo(member, date_time=_ZIP_EPOCH)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            zf.writestr(info, deflated[member],
+                        compresslevel=1 if fast else None)
         for member in sorted(blobs):
             info = zipfile.ZipInfo(member, date_time=_ZIP_EPOCH)
             info.compress_type = zipfile.ZIP_STORED
@@ -542,18 +768,42 @@ def _write_container(path: Path, doc: str, blobs: dict) -> None:
     _write_atomic(path, buf.getvalue())
 
 
-def _read_document(path: Path):
+def _parse_json(text, pump=None):
+    """``json.loads`` — in a worker thread while ``pump`` keeps the window
+    answering, when given. A 3.3 GB document took 24 s in one call, and the
+    desktop flagged IngeTrazo as «not responding» after five (Marco, 01-10,
+    the model of #158); the parser lets the main thread in every ~0.4 s."""
+    if pump is None:
+        return json.loads(text, parse_constant=_note_constant)
+    import threading
+    box: dict = {}
+
+    def work():
+        try:
+            box["data"] = json.loads(text, parse_constant=_note_constant)
+        except BaseException as exc:  # noqa: BLE001 — re-raised below
+            box["error"] = exc
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    while th.is_alive():
+        th.join(0.1)
+        pump()
+    if "error" in box:
+        raise box["error"]
+    return box["data"]
+
+
+def _read_document(path: Path, pump=None):
     """``(data, archive)`` for a document of either shape — the archive is
     ``None`` for a plain-JSON one, and stays open while the caller extracts
     embedded images."""
     raw = path.read_bytes()
     if not raw.startswith(_ZIP_MAGIC):
-        return json.loads(raw.decode("utf-8"), parse_constant=_note_constant), None
+        return _parse_json(raw.decode("utf-8"), pump), None
     import zipfile
     archive = zipfile.ZipFile(path)
     try:
-        data = json.loads(archive.read(_DOC_ENTRY).decode("utf-8"),
-                          parse_constant=_note_constant)
+        data = _parse_json(archive.read(_DOC_ENTRY).decode("utf-8"), pump)
     except KeyError:
         archive.close()
         raise ValueError(
@@ -646,10 +896,17 @@ def _load_into_inner(scene, path: Path, progress=None) -> None:
     _saw_nonfinite[0] = False
 
     tick(0.05, "Reading the document…")
-    data, archive = _read_document(path)
+    data, archive = _read_document(
+        path, pump=(lambda: tick(0.1, "Reading the document…"))
+        if progress is not None else None)
     survey = None
+    geom: dict = {}
     try:
         if archive is not None:
+            # Format 3's binary geometry blocks, read while the archive is
+            # open (it closes below).
+            geom = {n: archive.read(n) for n in archive.namelist()
+                    if n.startswith(_GEOM_PREFIX)}
             tick(0.2, "Unpacking textures…")
             _unpack_textures(data.get("scene", {}), archive)
             # Rebuilt here, while the archive is still open — it closes below
@@ -677,7 +934,7 @@ def _load_into_inner(scene, path: Path, progress=None) -> None:
     scene.tile_layer = None
 
     tick(0.35, "Building geometry…")
-    _load_mesh(scene.mesh, payload)
+    _load_mesh(scene.mesh, payload, geom)
     raw_layers = payload.get("layers")
     if raw_layers:
         from core.layers import DEFAULT_LAYER, Layer
@@ -712,10 +969,19 @@ def _load_into_inner(scene, path: Path, progress=None) -> None:
             logging.getLogger(__name__).warning(
                 "sheet %r skipped: %s", r.get("name", "?"), exc)
     proto_meshes: list = []
-    for raw in payload.get("protos", []):
+    import time as _time
+    raw_protos = payload.get("protos", [])
+    last = _time.monotonic()
+    for k, raw in enumerate(raw_protos):
         m = Mesh()
-        _load_mesh(m, raw)
+        _load_mesh(m, raw, geom)
         proto_meshes.append(m)
+        if _time.monotonic() - last > 0.25:
+            # Thousands of components took 25 s here without a word to the
+            # window, which the desktop reads as a hang (#158).
+            tick(0.35 + 0.25 * k / max(1, len(raw_protos)),
+                 "Building geometry…")
+            last = _time.monotonic()
     names: list = []
 
     def _group_from(raw, depth=0):
@@ -731,7 +997,7 @@ def _load_into_inner(scene, path: Path, progress=None) -> None:
             group.xform = QMatrix4x4(*rm)
         else:
             group = Group(name=name)
-            _load_mesh(group.mesh, raw)
+            _load_mesh(group.mesh, raw, geom)
         if isinstance(raw.get("axes"), list) and len(raw["axes"]) == 16:
             from PySide6.QtGui import QMatrix4x4
             vals = [float(x) for x in raw["axes"]]
@@ -751,6 +1017,8 @@ def _load_into_inner(scene, path: Path, progress=None) -> None:
             group.uid = str(raw["uid"])   # older documents keep the fresh one
         if raw.get("hidden"):
             group.hidden = True
+        if raw.get("locked"):
+            group.locked = True
         if isinstance(raw.get("material"), dict):
             group.material = dict(raw["material"])
         if isinstance(raw.get("exploded"), dict):
@@ -776,6 +1044,11 @@ def _load_into_inner(scene, path: Path, progress=None) -> None:
         if i % 50 == 0:
             tick(0.6 + 0.35 * i / max(1, len(raw_groups)), "Placing groups…")
         scene.groups.append(_group_from(raw))
+    scene.kept_components = [
+        t for t in (_group_from(raw) for raw in
+                    payload.get("kept_components", []) or []
+                    if isinstance(raw, dict))
+        if t.is_component()]
     tick(0.96, "Finishing…")
     if names:
         from core.group import reserve_group_names
@@ -875,7 +1148,51 @@ def _load_into_inner(scene, path: Path, progress=None) -> None:
     for raw in payload.get("image_planes", []):
         scene.image_planes.append(ImagePlane.from_dict(raw))
 
+    if progress is not None:
+        _release_in_steps(data, lambda: tick(0.98, "Finishing…"))
+    data = payload = None
     scene.version += 1
+
+
+def _bulky(node) -> bool:
+    """A container worth taking apart before dropping: a long list, or a
+    dict holding one (a group, a prototype, the scene). Coordinates and
+    small face records just go with their parent."""
+    if isinstance(node, list):
+        return len(node) > 64
+    if isinstance(node, dict):
+        return any(isinstance(v, (list, dict)) and len(v) > 64
+                   for v in node.values())
+    return False
+
+
+def _release_in_steps(data, pump) -> None:
+    """Drop the parsed document a slice at a time, ``pump()`` between
+    slices. Released in one go when the loader returned, the JSON tree of
+    a 3.3 GB document — tens of millions of objects — kept the window from
+    answering for 8 s, long enough for the desktop to call IngeTrazo «not
+    responding» (#158)."""
+    import time
+    last = time.monotonic()
+    stack = [data]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key in list(node):
+                child = node.pop(key)
+                if _bulky(child):
+                    stack.append(child)
+        elif isinstance(node, list):
+            while node:
+                child = node.pop()
+                if _bulky(child):
+                    stack.append(child)
+                if time.monotonic() - last > 0.25:
+                    pump()
+                    last = time.monotonic()
+        if time.monotonic() - last > 0.25:
+            pump()
+            last = time.monotonic()
 
 
 def _face_attrs_from_json(raw) -> dict | None:
@@ -934,20 +1251,26 @@ def _load_mesh_small(mesh, payload) -> None:
             face.attrs.update(attrs)
 
 
-def _load_mesh(mesh, payload) -> None:
+def _load_mesh(mesh, payload, geom=None) -> None:
     """Rebuild a mesh from its JSON block in ONE bulk pass: every edge
     endpoint and face corner welds through :meth:`Mesh.bulk_weld` at once,
     then the edges and faces are created vectorized — the per-entity
     ``add_edge``/``add_face`` walk dominated opening big documents. Small
-    groups take the plain walk (the bulk pass's fixed cost loses there)."""
+    groups take the plain walk (the bulk pass's fixed cost loses there).
+    A format-3 block (``"geom"``) is read from ``geom``, the document's
+    binary members."""
     import numpy as np
     import core.mesh as _mesh_mod
     from core.topology import _maximal_holes
 
+    if "geom" in payload:
+        _load_geometry(mesh, payload["geom"], geom or {})
+        return
+
     payload = _without_nonfinite(payload)
     raw_edges = payload.get("edges", [])
     raw_faces = payload.get("faces", [])
-    if len(raw_edges) + len(raw_faces) * 4 < 1024:   # ~corner estimate
+    if not _bulk_sized(len(raw_edges), len(raw_faces)):
         _load_mesh_small(mesh, payload)
         return
     flat: list = []
@@ -993,3 +1316,138 @@ def _load_mesh(mesh, payload) -> None:
     if ring_counts:
         mesh.add_faces_welded(vobjs, inverse[n_edge_pts:], ring_sizes,
                               ring_counts, attrs_list, edge_map=emap)
+
+
+def _geometry_arrays(meta, blob: bytes) -> dict:
+    """The arrays of a format-3 block, checked: known dtypes, inside the
+    blob, and every index pointing at something that exists. A damaged or
+    crafted document fails with a ValueError instead of building garbage."""
+    import numpy as np
+
+    def bad(why):
+        return ValueError(f"damaged geometry block ({why})")
+
+    layout = meta.get("arrays") if isinstance(meta, dict) else None
+    if not isinstance(layout, dict):
+        raise bad("no layout")
+    out = {}
+    for name, spec in layout.items():
+        try:
+            dtype, shape, offset = spec
+            shape = tuple(int(n) for n in shape)
+            offset = int(offset)
+        except (TypeError, ValueError):
+            raise bad(name) from None
+        if dtype not in _GEOM_DTYPES or offset < 0 or any(n < 0 for n in shape):
+            raise bad(name)
+        count = 1
+        for n in shape:
+            count *= n
+        size = count * np.dtype(dtype).itemsize
+        if offset + size > len(blob):
+            raise bad(name)
+        out[name] = np.frombuffer(blob, dtype=dtype, count=count,
+                                  offset=offset).reshape(shape)
+    for name in ("pos", "edges", "rings", "ring_sizes", "ring_counts",
+                 "face_attr", "edge_flags"):
+        if name not in out:
+            raise bad(f"missing {name}")
+    pos = out["pos"]
+    nv = len(pos)
+    ne = len(out["edges"])
+    if pos.ndim != 2 or pos.shape[1] != 3:
+        raise bad("pos")
+    if out["edges"].ndim != 2 or out["edges"].shape[1] != 2:
+        raise bad("edges")
+    for name in ("edges", "rings"):
+        a = out[name]
+        if a.size and (a.min() < 0 or a.max() >= nv):
+            raise bad(name)
+    sizes, counts = out["ring_sizes"], out["ring_counts"]
+    if (sizes.size and sizes.min() < 1) or (counts.size and counts.min() < 1):
+        raise bad("rings")
+    if int(sizes.sum()) != len(out["rings"]) or int(counts.sum()) != len(sizes):
+        raise bad("rings")
+    n_attrs = len(meta.get("face_attrs") or ())
+    fa = out["face_attr"]
+    if len(fa) != len(counts) or (fa.size and (fa.min() < -1
+                                               or fa.max() >= n_attrs)):
+        raise bad("face_attr")
+    n_layers = len(meta.get("edge_layers") or ())
+    for name in ("edge_flags", "edge_curve", "edge_layer"):
+        if name in out and len(out[name]) != ne:
+            raise bad(name)
+    el = out.get("edge_layer")
+    if el is not None and el.size and (el.min() < -1 or el.max() >= n_layers):
+        raise bad("edge_layer")
+    return out
+
+
+def _load_geometry(mesh, meta, geom: dict) -> None:
+    """Rebuild a mesh from its format-3 block — the same weld and the same
+    bulk edge/face creation as the JSON path, fed from arrays."""
+    import numpy as np
+    import core.mesh as _mesh_mod
+
+    member = meta.get("member") if isinstance(meta, dict) else None
+    blob = geom.get(member)
+    if blob is None:
+        raise ValueError(f"the document lost its geometry block {member!r}")
+    a = _geometry_arrays(meta, blob)
+    pos = a["pos"]
+    edges, rings = a["edges"], a["rings"]
+    sizes, counts = a["ring_sizes"], a["ring_counts"]
+    face_attr = a["face_attr"]
+    flags, curves, layers = (a["edge_flags"], a.get("edge_curve"),
+                             a.get("edge_layer"))
+
+    bad = ~np.isfinite(pos).all(axis=1)
+    if bad.any():
+        # Never written by this build (it refuses to save such a point),
+        # but a damaged document opens like a JSON one: the pieces touching
+        # the bad points are left out and counted (#185).
+        keep_e = ~(bad[edges[:, 0]] | bad[edges[:, 1]])
+        ring_bad = np.add.reduceat(bad[rings].astype(np.int64),
+                                   np.cumsum(sizes) - sizes) > 0 \
+            if len(sizes) else np.zeros(0, dtype=bool)
+        face_bad = np.add.reduceat(ring_bad.astype(np.int64),
+                                   np.cumsum(counts) - counts) > 0 \
+            if len(counts) else np.zeros(0, dtype=bool)
+        _dropped_nonfinite[0] += int((~keep_e).sum() + face_bad.sum())
+        edges, flags = edges[keep_e], flags[keep_e]
+        curves = curves[keep_e] if curves is not None else None
+        layers = layers[keep_e] if layers is not None else None
+        ring_face = np.repeat(np.arange(len(counts)), counts)
+        keep_r = ~face_bad[ring_face]
+        rings = rings[np.repeat(keep_r, sizes)]
+        sizes, counts = sizes[keep_r], counts[~face_bad]
+        face_attr = face_attr[~face_bad]
+    if not len(pos) or not (len(edges) or len(counts)):
+        return
+
+    vobjs, inverse = mesh.bulk_weld(pos.astype(np.float64))
+    emap = None
+    if len(edges):
+        eflags = None
+        if flags.any() or curves is not None or layers is not None:
+            names = meta.get("edge_layers") or []
+            soft = (flags & 1).astype(bool).tolist()
+            hidden = (flags & 2).astype(bool).tolist()
+            cl = (curves.tolist() if curves is not None
+                  else [-1] * len(edges))
+            ll = (layers.tolist() if layers is not None
+                  else [-1] * len(edges))
+            eflags = [(s, c if c >= 0 else None, names[l] if l >= 0 else None,
+                       h) for s, c, l, h in zip(soft, cl, ll, hidden)]
+            if curves is not None and curves.size:
+                top = int(curves.max())
+                if top >= _mesh_mod._CURVE_COUNTER:
+                    _mesh_mod._CURVE_COUNTER = top + 1
+        emap = mesh.add_edges_welded(vobjs, inverse[edges[:, 0]],
+                                     inverse[edges[:, 1]], eflags)
+    if len(counts):
+        table = meta.get("face_attrs") or []
+        attrs = [_face_attrs_from_json(table[k]) if k >= 0 else None
+                 for k in face_attr.tolist()]
+        mesh.add_faces_welded(vobjs, inverse[rings], sizes, counts, attrs,
+                              edge_map=emap)

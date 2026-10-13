@@ -447,7 +447,10 @@ def _load_glb_inner(scene, path, progress=None) -> None:
 
     tick(0.05, "Reading file…")
     batches, js = read_triangles(Path(path))
-    s = _guess_scale(batches)
+    # Our own files are in metres, as glTF says: guessing would shrink a
+    # model wider than 40 m to inches (a 18 m² layout read back as 0.012).
+    ours = (js.get("asset", {}) or {}).get("generator") == "IngeTrazo"
+    s = 1.0 if ours else _guess_scale(batches)
     if s != 1.0:
         batches = [(tris * s, uvs, r) for tris, uvs, r in batches]
     mesh = build_mesh(batches, progress=progress)

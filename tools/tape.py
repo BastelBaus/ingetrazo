@@ -55,7 +55,7 @@ class TapeMeasureTool(Tool):
     magnetic_axis_deg = 3.0
     screen_axis_px = 9.0
     #: The viewport shows «On axis» while this tool hovers a model axis
-    #: before its first click (``Viewport._axis_source_cue``).
+    #: before its first click (``InferenceEngine._axis_source_cue``).
     axis_source = True
 
     def __init__(self) -> None:

@@ -75,6 +75,23 @@
   <url type="vcs-browser">https://github.com/ingelibre/ingetrazo</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.5.8" date="2026-10-12">
+      <description>
+        <p>An Extension Manager to browse, install, update and disable
+        extensions from the catalog; document units (metric, millimetres,
+        imperial or custom); a Model Browser with every group and component
+        in a tree; editing inside large groups and push/pull on terrain
+        several times faster; huge models that open, save and weigh much
+        less; and more than forty fixes.</p>
+        <p xml:lang="es">Un gestor de extensiones para explorar, instalar,
+        actualizar y desactivar las del catálogo; unidades del documento
+        (métricas, milímetros, imperiales o a medida); un Navegador del
+        modelo con todos los grupos y componentes en árbol; editar dentro de
+        grupos grandes y empujar en terreno varias veces más rápido; modelos
+        enormes que abren, guardan y pesan mucho menos; y más de cuarenta
+        arreglos.</p>
+      </description>
+    </release>
     <release version="0.5.7" date="2026-09-30">
       <description>
         <p>Parametric windows with the Windowizer example extension, the

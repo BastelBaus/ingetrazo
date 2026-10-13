@@ -22,6 +22,7 @@ import io
 import json
 import math
 import sys
+import re
 import traceback
 import urllib.error
 import time
@@ -155,6 +156,15 @@ def _recipe_helpers(scene) -> dict:
             for i in range(n):
                 a, b = ring[i], ring[(i + 1) % n]
                 mesh.add_face([a, b, b + v, a + v])
+
+    def box(origin, size, name=None, color=None):
+        """A box: ``origin`` its lowest corner (x, y, z), ``size`` (dx, dy,
+        dz). Small local models asked for «un cubo» reached for ``wall``
+        with openings (#461); one obvious name stops that."""
+        x, y, z = (float(c) for c in origin)
+        dx, dy, dz = (float(c) for c in size)
+        return extrude([(x, y), (x + dx, y), (x + dx, y + dy), (x, y + dy)],
+                       z, z + dz, name=name, color=color)
 
     def prism(loop, vec, holes=None, name=None, color=None):
         """Solid from a flat polygon (3D points, optional hole loops) swept
@@ -342,8 +352,32 @@ def _recipe_helpers(scene) -> dict:
         out.append(_finish(roof_mesh, roof_color, f"{name} · Techo"))
         return out
 
-    return {"revolve": revolve, "extrude": extrude, "prism": prism,
-            "wall": wall, "house": house}
+    return {"box": box, "revolve": revolve, "extrude": extrude,
+            "prism": prism, "wall": wall, "house": house}
+
+
+def _tidy_groups(scene) -> None:
+    """The helpers already add their groups, yet models append them again
+    (qwen3.5 wrote ``groups.append(house(...))`` testing #461): a group
+    listed twice, or the LIST house() returns sitting in scene.groups,
+    where the next paint dies on ``'list' object has no attribute
+    'mesh'``. Flatten and drop repeats instead of failing the recipe."""
+    from core.group import Group
+    seen, tidy = set(), []
+
+    def add(item) -> None:
+        if isinstance(item, (list, tuple)):
+            for sub in item:
+                add(sub)
+        elif isinstance(item, Group) and id(item) not in seen:
+            seen.add(id(item))
+            tidy.append(item)
+
+    for g in scene.groups:
+        add(g)
+    if len(tidy) != len(scene.groups) or any(
+            a is not b for a, b in zip(tidy, scene.groups)):
+        scene.groups[:] = tidy
 
 
 def run_transactional(viewport, code: str, scope: dict) -> dict:
@@ -369,6 +403,7 @@ def run_transactional(viewport, code: str, scope: dict) -> dict:
                 if result is not None:
                     scope["_"] = result
                     print(repr(result))
+            _tidy_groups(_scene)
         except Exception:
             traceback.print_exc(file=err_buf)
             raise
@@ -421,8 +456,24 @@ DEFAULT_MODELS = {
     "gemini": "gemini-2.5-flash",
     "openrouter": "anthropic/claude-sonnet-5",
     "deepseek": "deepseek-chat",
-    "ollama": "llama3.2",
+    # A code model: llama3.2 (3B) wrote wall() for a cube and broke on
+    # plain Python in Rafael's review 6 (#461).
+    "ollama": "qwen2.5-coder:7b",
 }
+
+def small_local_model(provider: str, model: str) -> bool:
+    """A local model too small to write working recipes — under ~7B
+    parameters by its tag (``llama3.2`` is 3B, ``gemma2:2b``, ``phi3``…).
+    Only advice: nothing is refused."""
+    if provider != "ollama":
+        return False
+    name = model.lower()
+    size = re.search(r":(\d+(?:\.\d+)?)b\b", name)
+    if size:
+        return float(size.group(1)) < 7
+    return name.split(":")[0] in {"llama3.2", "phi3", "phi4-mini", "gemma3",
+                                  "tinyllama", "smollm2"}
+
 
 #: Providers whose default models take viewport screenshots.
 VISION = {"anthropic", "openai", "gemini", "openrouter"}
@@ -549,7 +600,13 @@ def build_request(provider: str, model: str, api_key: str,
                "User-Agent": USER_AGENT}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    payload = {"model": model, "max_tokens": max_tokens,
+    # OpenAI's own API deprecated max_tokens and its newer models reject
+    # it with HTTP 400 («Use 'max_completion_tokens' instead», #517); the
+    # new name works for every OpenAI model. The other OpenAI-compatible
+    # services (Groq, Gemini, OpenRouter, DeepSeek, Ollama) keep the name
+    # they have always accepted.
+    limit = "max_completion_tokens" if provider == "openai" else "max_tokens"
+    payload = {"model": model, limit: max_tokens,
                "messages": oai_msgs}
     return (f"{base}/chat/completions", headers,
             json.dumps(payload).encode())

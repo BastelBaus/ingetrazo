@@ -139,10 +139,80 @@ class _PackedTris:
     every triangle in pure Python — the O(F²·T) hot loop that froze the app as
     solids grew; one vectorised pass per ray replaces it."""
 
-    __slots__ = ("a", "e1", "e2", "face_idx")
+    __slots__ = ("a", "e1", "e2", "face_idx", "bvh")
 
     def __init__(self, a, e1, e2, face_idx) -> None:
         self.a, self.e1, self.e2, self.face_idx = a, e1, e2, face_idx
+        self.bvh = None             # _Clusters, built on first use
+
+
+#: Below this many triangles a ray just tests them all.
+_BVH_MIN_TRIS = 2048
+#: Triangles per cluster of the ray index.
+_BVH_LEAF = 32
+
+
+class _Clusters:
+    """A one-level ray index over a packed triangle set: triangles sorted
+    along a Morton curve of their centroids, cut into clusters of
+    ``_BVH_LEAF`` neighbours, each with a box grown far beyond the ray test's
+    tolerances (barycentric 1e-7, t > 1e-6). A ray keeps only the clusters
+    whose box it crosses; the exact Möller–Trumbore count then runs on those
+    triangles alone — the same count, since every triangle the exact test
+    would accept lies inside its cluster's box. Orienting one 25 797-face
+    component cast ~360 000 rays against every triangle: 3 minutes for one
+    push on the Plaza's terrain (09-10)."""
+
+    def __init__(self, packed: "_PackedTris") -> None:
+        import numpy as np
+        a, e1, e2 = packed.a, packed.e1, packed.e2
+        b, c = a + e1, a + e2
+        lo = np.minimum(np.minimum(a, b), c)
+        hi = np.maximum(np.maximum(a, b), c)
+        cen = (lo + hi) * 0.5
+        span = cen.max(axis=0) - cen.min(axis=0)
+        span[span <= 0] = 1.0
+        q = ((cen - cen.min(axis=0)) / span * 1023).astype(np.int64)
+        code = np.zeros(len(q), dtype=np.int64)
+        for bit in range(10):
+            for axis in range(3):
+                code |= ((q[:, axis] >> bit) & 1) << (3 * bit + axis)
+        order = np.argsort(code, kind="stable")
+        n = len(order)
+        starts = np.arange(0, n, _BVH_LEAF)
+        clo = np.minimum.reduceat(lo[order], starts, axis=0)
+        chi = np.maximum.reduceat(hi[order], starts, axis=0)
+        ext = (chi - clo).max(axis=1, keepdims=True)
+        big = np.maximum(np.abs(clo).max(axis=1, keepdims=True),
+                         np.abs(chi).max(axis=1, keepdims=True))
+        margin = 1e-5 + 1e-6 * big + 1e-5 * ext
+        self.lo, self.hi = clo - margin, chi + margin
+        self.cen = (self.lo + self.hi) * 0.5
+        self.half = np.linalg.norm(self.hi - self.lo, axis=1) * 0.5
+        self.order = order
+        self.counts = np.diff(np.append(starts, n))
+
+    def rows(self, origin, direction, spread: float):
+        """Rows of the triangles in a cluster any ray from ``origin`` within
+        ``spread`` radians of ``direction`` can cross: ONE slab test along
+        ``direction`` against each box grown by how far such a ray can stray
+        before leaving it (spread × the box's farthest distance) — the
+        jittered rays of one parity query differ by < 0.03°."""
+        import numpy as np
+        o = np.asarray(origin, dtype=np.float64)
+        reach = np.linalg.norm(self.cen - o, axis=1) + self.half
+        grow = (spread * reach)[:, None]
+        lo, hi = self.lo - grow, self.hi + grow
+        dv = np.asarray(direction, dtype=np.float64)
+        dv = np.where(np.abs(dv) < 1e-30, 1e-30, dv)
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            inv = 1.0 / dv
+            t1 = (lo - o) * inv
+            t2 = (hi - o) * inv
+            tmin = np.minimum(t1, t2).max(axis=1)
+            tmax = np.maximum(t1, t2).min(axis=1)
+        hit = (tmax >= tmin) & (tmax >= 0.0)
+        return self.order[np.repeat(hit, self.counts)]
 
 
 def _pack_lists(triangle_lists, face_ids=None) -> _PackedTris:
@@ -214,6 +284,33 @@ class _ParityQuery:
         ok &= t > _T_MIN
         return int(ok.sum())
 
+    def crossings_many(self, dirs) -> list:
+        """``crossings`` for several rays at once: the same arithmetic,
+        element by element, over a (rays × triangles) block instead of one
+        NumPy pass per ray (tests/test_orient_batched_rays.py checks the
+        counts against ``crossings`` itself)."""
+        import numpy as np
+        r = len(dirs)
+        if self.n == 0 or r == 0:
+            return [0] * r
+        D = np.array([[d.x(), d.y(), d.z()] for d in dirs], dtype=np.float64)
+        ax, ay, az = D[:, 0:1], D[:, 1:2], D[:, 2:3]
+        bx, by, bz = self.e2[:, 0], self.e2[:, 1], self.e2[:, 2]
+        p = np.stack((ay * bz - az * by,
+                      az * bx - ax * bz,
+                      ax * by - ay * bx), axis=-1)          # (r, n, 3)
+        det = np.einsum("ij,rij->ri", self.e1, p)
+        ok = (np.abs(det) >= _EPS) & self.base
+        inv = np.zeros((r, self.n))
+        inv[ok] = 1.0 / det[ok]
+        u = np.einsum("ij,rij->ri", self.tvec, p) * inv
+        ok &= (u >= -_EPS) & (u <= 1.0 + _EPS)
+        v = np.stack([self.q @ D[i] for i in range(r)]) * inv
+        ok &= (v >= -_EPS) & (u + v <= 1.0 + _EPS)
+        t = self.e2q * inv
+        ok &= t > _T_MIN
+        return [int(c) for c in ok.sum(axis=1)]
+
 
 def ray_parity_outside(origin: QVector3D, direction: QVector3D,
                        triangle_lists, rng: random.Random,
@@ -236,11 +333,10 @@ def ray_parity_outside(origin: QVector3D, direction: QVector3D,
     if packed is None:
         packed = _pack_lists(triangle_lists)
         mask = None
-    query = _ParityQuery(origin, packed, mask)
     n = direction.normalized()
     u, v = _basis(n)
-    outside_votes = 0
-    inside_votes = 0
+    # The rays first (the same draws from ``rng``, in the same order).
+    rays = []
     for r in range(_RAYS):
         if r == 0:
             d = n
@@ -248,7 +344,23 @@ def ray_parity_outside(origin: QVector3D, direction: QVector3D,
             d = (n
                  + u * rng.uniform(-_JITTER, _JITTER)
                  + v * rng.uniform(-_JITTER, _JITTER)).normalized()
-        crossings = query.crossings(d)
+        rays.append(d)
+    if packed.a.shape[0] >= _BVH_MIN_TRIS:
+        if packed.bvh is None:
+            packed.bvh = _Clusters(packed)
+        # Each jittered ray is within 2·√2·_JITTER of ``n`` (a unit vector
+        # nudged by two perpendicular offsets of at most _JITTER, then
+        # renormalised); the index is asked with three times that.
+        rows = packed.bvh.rows((origin.x(), origin.y(), origin.z()),
+                               (n.x(), n.y(), n.z()), 3.0 * 2.83 * _JITTER)
+        packed = _PackedTris(packed.a[rows], packed.e1[rows],
+                             packed.e2[rows], packed.face_idx[rows])
+        if mask is not None:
+            mask = mask[rows]
+    query = _ParityQuery(origin, packed, mask)
+    outside_votes = 0
+    inside_votes = 0
+    for crossings in query.crossings_many(rays):
         if crossings % 2 == 0:
             outside_votes += 1
         else:
@@ -475,8 +587,20 @@ def orient_outward(mesh, seed: int = 12345, only=None) -> list:
     # above are still computed for open meshes (a plan mixing raised rooms
     # with flat floors is open as a whole, yet its interior walls are real
     # partitions the volumetric queries must skip).
-    if not is_closed(mesh):
-        return []
+    mesh_closed = is_closed(mesh)
+    if not mesh_closed:
+        if only is None:
+            return []
+        # A scoped pass (an edit's own solids) judges closure per
+        # component: one open piece elsewhere in the mesh used to stop the
+        # pass for every solid, and a cube pushed beside a cube with a
+        # face deleted kept its base reversed (#230). An open component
+        # still has no outside, so its faces are never turned.
+        open_comps = {comp_of[f] for e in mesh.edges if len(e.faces) == 1
+                      for f in e.faces if f in comp_of}
+        scope = [f for f in scope if comp_of[f] not in open_comps]
+        if not scope:
+            return []
     rng = random.Random(seed)
     base_by_comp = _boundary_base(set(boundary))
     to_flip = []
@@ -489,6 +613,25 @@ def orient_outward(mesh, seed: int = 12345, only=None) -> list:
                             mask=base_by_comp[c] & (sp.face_idx != fidx[f])) \
                 == "inward":
             to_flip.append(f)
+    # Through an open mesh (the scoped path above) the flips are checked
+    # before they stay: a solid whose shared edges disagree MORE after the
+    # flips than before was misread by the parity rays, and keeps the
+    # windings it had. Measured on plaza.igz: of five solids this path
+    # would turn, four came out more consistent and one — a 51-face solid
+    # consistent to begin with — would have lost 52 edges (#230).
+    saved = {}
+    before_bad = {}
+    if not mesh_closed and to_flip:
+        import copy
+        for f in to_flip:
+            saved[f] = (copy.deepcopy(f.attrs), list(f.loop),
+                        [list(h) for h in f.hole_loops])
+        members: dict = {}
+        flip_comps = {comp_of[f] for f in to_flip}
+        for f in scope:
+            if comp_of[f] in flip_comps:
+                members.setdefault(comp_of[f], []).append(f)
+        before_bad = {c: _incoherent_edges(fs) for c, fs in members.items()}
     for f in to_flip:
         # Flip in place: reversing the loops reverses the winding (so the normal
         # flips) while keeping the *same* Face object and its shared edges/
@@ -497,4 +640,31 @@ def orient_outward(mesh, seed: int = 12345, only=None) -> list:
         # side keeps its own paint (``turn_face_over``): this pass corrects
         # windings, it must not move a brick texture indoors.
         turn_face_over(f)
+    if before_bad:
+        worse = {c for c, fs in members.items()
+                 if _incoherent_edges(fs) > before_bad[c]}
+        if worse:
+            for f in to_flip:
+                if comp_of[f] in worse:
+                    attrs, loop, holes = saved[f]
+                    f.attrs = attrs
+                    f.loop[:] = loop
+                    for h, old in zip(f.hole_loops, holes):
+                        h[:] = old
+            to_flip = [f for f in to_flip if comp_of[f] not in worse]
     return to_flip
+
+
+def _incoherent_edges(faces) -> int:
+    """How many edges two of ``faces`` both walk in the same direction. In
+    a consistently wound solid every shared edge is walked once each way,
+    so this counts the disagreements, independently of any ray."""
+    uses: dict = {}
+    for f in faces:
+        for loop in (f.loop, *f.hole_loops):
+            n = len(loop)
+            for i in range(n):
+                a, b = loop[i], loop[(i + 1) % n]
+                uses.setdefault(frozenset((id(a), id(b))), []).append(
+                    (id(a), id(b)))
+    return sum(1 for u in uses.values() if len(u) == 2 and u[0] == u[1])

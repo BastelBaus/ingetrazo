@@ -32,16 +32,22 @@ SCOPE = (
 #: The one-line builders. Hand-rolling these is the single biggest waste of
 #: turns we have measured — every model that was not told reinvented a
 #: ring-of-quads lathe, faceted and wrongly wound.
-RECIPES = """Recetario:
+RECIPES = """Recetario (usa PRIMERO estas funciones; existen ya, no las \
+definas):
+- CAJA / CUBO: g = box((x,y,z), (dx,dy,dz), name="Cubo", color=(r,g,b,1.0)) \
+— esquina inferior y medidas. Un cubo de 6 m es box((0,0,0), (6,6,6)). \
+Crea el grupo y lo agrega (igual que revolve, extrude, prism, wall y \
+house): NO hagas groups.append.
+- CASA COMPLETA: ver house(...) más abajo — para «una casa» úsala SIEMPRE \
+en vez de armar muros y techo a mano.
 - TORNO (prefiérelo para toda pieza redonda): g = revolve([(radio,z), ...], \
 name="Columna", color=(r,g,b,1.0), segments=32, scallop=None, closed=False) \
 — perfil de abajo a arriba; abierto se tapa solo; closed=True si el perfil \
 es una sección cerrada (p.ej. la pared de una taza); scallop=(profundidad, \
 lóbulos) talla festones/gallones en el borde. Crea el grupo y lo agrega.
 - PRISMA: g = extrude([(x,y), ...], z0, z1, name="Base", color=...) — \
-contorno en planta extruido; crea el grupo y lo agrega. Una CAJA (tablero, \
-pata, larguero, peldaño) es un extrude de cuatro puntos: no la armes cara \
-por cara.
+contorno en planta extruido; crea el grupo y lo agrega. Una caja \
+(tablero, pata, larguero, peldaño) es box(...): no la armes cara por cara.
 - LOSA / PLANCHA: g = prism([puntos 3D de un polígono plano], (dx,dy,dz), \
 holes=[[...]], name=..., color=...) — barre el polígono (con agujeros) \
 a lo largo del vector.

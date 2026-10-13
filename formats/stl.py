@@ -5,8 +5,9 @@
 Binary STL: every face (the loose mesh plus every group) is triangulated and
 written with its outward geometric normal. The engine keeps solids
 outward-consistent (``orient_outward``), so the normals come out right for
-slicers. STL carries no colour or units — it is pure geometry in the model's
-own coordinates (metres).
+slicers. STL carries no colour or units, so the file is written in the unit
+the caller picks: ``save_stl`` defaults to the model's own metres, and the
+export menu asks — millimetres first, which is what slicers assume (#513).
 """
 from __future__ import annotations
 
@@ -48,8 +49,9 @@ def _faces(scene):
 
 def iter_triangles(scene):
     """Yield ``(a, b, c)`` world-space triangles for the whole scene."""
+    from .meshexport import export_triangles
     for face in _faces(scene):
-        yield from face.triangulate()
+        yield from export_triangles(face)
 
 
 def _normal(a: QVector3D, b: QVector3D, c: QVector3D) -> QVector3D:
@@ -292,19 +294,22 @@ def add_stl_mesh(scene, path, target) -> None:
     scene.version += 1
 
 
-def save_stl(scene, path) -> None:
-    """Write the scene as a binary STL to ``path``."""
+def save_stl(scene, path, unit: str = "m") -> None:
+    """Write the scene as a binary STL to ``path``, its coordinates in
+    ``unit`` (a key of ``STL_UNITS``). The model is in metres; a slicer reads
+    an STL as millimetres, so a metre file came in 1000x too small (#513)."""
+    scale = 1.0 / STL_UNITS[unit]
     tris = list(iter_triangles(scene))
     with open(Path(path), "wb") as f:
         f.write(b"IngeTrazo STL export".ljust(80, b"\x00"))  # 80-byte header
         f.write(struct.pack("<I", len(tris)))
         for a, b, c in tris:
-            n = _normal(a, b, c)
+            n = _normal(a, b, c)    # unit length: the scale leaves it alone
             f.write(struct.pack(
                 "<12fH",
                 n.x(), n.y(), n.z(),
-                a.x(), a.y(), a.z(),
-                b.x(), b.y(), b.z(),
-                c.x(), c.y(), c.z(),
+                *_scaled_point((a.x(), a.y(), a.z()), scale),
+                *_scaled_point((b.x(), b.y(), b.z()), scale),
+                *_scaled_point((c.x(), c.y(), c.z()), scale),
                 0,  # attribute byte count
             ))

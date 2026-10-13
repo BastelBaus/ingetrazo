@@ -33,8 +33,10 @@ def _close(comp, win):
 def test_three_tabs_and_a_pick_in_the_list_stays_in_the_list(monkeypatch):
     comp, win = _composer(monkeypatch)
     try:
-        assert comp._tabs.count() == 3            # Layout, Items, Properties
-        comp._tabs.setCurrentIndex(1)
+        # Layout, Views and sheets, Items, Properties
+        assert comp._tabs.count() == 4
+        items = comp._tabs.indexOf(comp._pages["items"])
+        comp._tabs.setCurrentIndex(items)
         comp._refresh_items_list()
         frame = comp.comp.frames[0]
         row = next(r for r in comp._item_rows()
@@ -42,7 +44,7 @@ def test_three_tabs_and_a_pick_in_the_list_stays_in_the_list(monkeypatch):
         comp.items_list.setCurrentItem(row)       # picked in the list…
         _app.processEvents()
         assert comp._selected_item().model is frame
-        assert comp._tabs.currentIndex() == 1     # …stays there to rename
+        assert comp._tabs.currentIndex() == items  # …stays there to rename
     finally:
         _close(comp, win)
 
@@ -163,15 +165,15 @@ def test_a_hidden_item_is_not_printed(monkeypatch):
 def test_double_click_opens_the_properties(monkeypatch):
     comp, win = _composer(monkeypatch)
     try:
-        comp._tabs.setCurrentIndex(1)
+        comp._tabs.setCurrentWidget(comp._pages["items"])
         comp._refresh_items_list()
         frame = comp.comp.frames[0]
         row = next(r for r in comp._item_rows()
                    if r.data(0, Qt.UserRole) == id(frame))
         comp.items_list.setCurrentItem(row)
-        assert comp._tabs.currentIndex() == 1            # a click stays
+        assert comp._tabs.currentWidget() is comp._pages["items"]  # stays
         comp.items_list.itemDoubleClicked.emit(row, 2)
-        assert comp._tabs.currentIndex() == 2            # double: properties
+        assert comp._tabs.currentWidget() is comp._pages["props"]  # double
         assert comp._selected_item().model is frame
     finally:
         _close(comp, win)

@@ -35,7 +35,8 @@ from core.group import Group, copy_group, transformed_attrs
 from core.i18n import tr
 from core.mesh import Edge, Face, Mesh
 from core.dimension import Dimension
-from core.history import (AddEdgeCommand, AddFaceCommand, CompoundCommand,
+from core.history import (AddEdgeCommand, AddFaceCommand, Command,
+                          CompoundCommand,
                           InsertGroupCommand, MoveGroupCommand,
                           MoveDimensionsCommand, MoveTextLabelsCommand,
                           MoveVerticesCommand)
@@ -193,6 +194,29 @@ def rotation_grips(obb, eye: QVector3D) -> list:
     return out
 
 
+class _PlannedWhenRun(Command):
+    """Drawn edges planned when the command RUNS, not when it is built:
+    by then the copied faces before it in the same compound are in the
+    model, so the Line tool's planner splits the faces the edges land on
+    without laying another face over the copied ones (#379). Redo
+    replays the same plan."""
+
+    def __init__(self, segments) -> None:
+        self._segments = list(segments)
+        self._cmd = None
+
+    def do(self, scene) -> None:
+        if self._cmd is None:
+            from core.edits import build_add_edges
+            self._cmd = build_add_edges(scene, self._segments,
+                                        detect_faces=True)
+        self._cmd.do(scene)
+
+    def undo(self, scene) -> None:
+        if self._cmd is not None:
+            self._cmd.undo(scene)
+
+
 class MoveTool(Tool):
     name = "Move"
     shortcut = "M"
@@ -237,6 +261,7 @@ class MoveTool(Tool):
         self._dims: dict = {}                  # dimension → "line" | "rigid"
         self._preview_delta = QVector3D(0.0, 0.0, 0.0)  # currently applied live
         self._copy = False                     # Ctrl: move a COPY
+        self._ctrl_toggled = False             # …by the Ctrl still held down
         self._sel_faces: list = []             # loose geometry copy mode duplicates
         self._sel_edges: list = []
         self._base_segments: list = []         # wireframe for the copy preview
@@ -266,6 +291,13 @@ class MoveTool(Tool):
         self._copy = False
         self._last = None
 
+    @property
+    def cursor_plus(self) -> bool:
+        """The little + beside the cursor while Ctrl has it making a COPY,
+        as the Tape shows its guide mode: the status-bar flash alone was
+        easy to miss."""
+        return self._copy
+
     # ---- Keyboard -----------------------------------------------------------
     def on_key(self, viewport, key: int, modifiers) -> bool:
         print(f"mode: {key=} {modifiers=}")
@@ -273,22 +305,46 @@ class MoveTool(Tool):
             return self._grip_rot.on_key(viewport, key, modifiers)
         # Ctrl toggles copy mode (move a copy, the original stays).
         if key == Qt.Key_Control:
-            self._copy = not self._copy
-            if self._copy:
-                # The original stops following the cursor; the copy's
-                # wireframe takes over in rubber_band_lines.
-                self._revert_preview(viewport)
-                park = getattr(viewport, "set_groups_preview_offset", None)
-                if getattr(self, "_vp_preview", False) and park is not None:
-                    park(QVector3D(0.0, 0.0, 0.0))
-                viewport.flash_status(tr("Move a copy: on"))
-            else:
-                if self.grab is not None and self.hover_point is not None:
-                    self._apply_preview(viewport, self.hover_point - self.grab)
-                viewport.flash_status(tr("Move a copy: off"))
-            viewport.update()
+            self._toggle_copy(viewport)
+            self._ctrl_toggled = True
             return True
         return False
+
+    def _toggle_copy(self, viewport, say: bool = True) -> None:
+        self._copy = not self._copy
+        if self._copy:
+            # The original stops following the cursor; the copy's
+            # wireframe takes over in rubber_band_lines.
+            self._revert_preview(viewport)
+            park = getattr(viewport, "set_groups_preview_offset", None)
+            if getattr(self, "_vp_preview", False) and park is not None:
+                park(QVector3D(0.0, 0.0, 0.0))
+            if say:
+                viewport.flash_status(tr("Move a copy: on"))
+        else:
+            if self.grab is not None and self.hover_point is not None:
+                self._apply_preview(viewport, self.hover_point - self.grab)
+            if say:
+                viewport.flash_status(tr("Move a copy: off"))
+        apply = getattr(viewport, "_apply_tool_cursor", None)
+        if apply is not None:
+            apply()                      # the + appears or disappears now
+        viewport.update()
+
+    def on_key_release(self, viewport, key: int) -> bool:
+        if self._grip_rot is not None:
+            return self._grip_rot.on_key_release(viewport, key)
+        # The copy toggle happens on the Ctrl PRESS, so the + shows at
+        # once; a Ctrl that turns out to be part of a shortcut (Ctrl+Z,
+        # Ctrl+C…) takes it back on the release, silently — the Tape's
+        # #183, where Ctrl+Z switched its mode without a word.
+        if key != Qt.Key_Control or not self._ctrl_toggled:
+            return False
+        self._ctrl_toggled = False
+        tapped = getattr(viewport, "ctrl_tapped", None)
+        if callable(tapped) and not tapped():
+            self._toggle_copy(viewport, say=False)
+        return True
 
     # ---- Spatial input ------------------------------------------------------
     def on_click(self, ctx: ToolContext) -> None:
@@ -405,6 +461,21 @@ class MoveTool(Tool):
         self._commit(viewport, delta)
         return True
 
+    def array_pending(self, viewport) -> bool:
+        """Whether a copy was just made, so «3x» / «/3» would lay an array:
+        the viewport then lets a bare «x» open the value box (#542) instead
+        of switching to Text. The same test ``on_array_value`` applies."""
+        last = self._last
+        if last is None or self.start_point is not None:
+            return False
+        stack = getattr(viewport.history, "undo_stack", None)
+        return bool(stack) and stack[-1] is last["cmd"]
+
+    def close_array_window(self) -> None:
+        """Esc right after a copy: «3x» / «/3» stop applying and a bare X
+        is the Text shortcut again (#542)."""
+        self._last = None
+
     def on_array_value(self, viewport, count: int, mode: str,
                        step: float | None = None) -> bool:
         """Arrays, typed right after a Move-copy: ``3x`` lays
@@ -512,6 +583,15 @@ class MoveTool(Tool):
         if not edges and not groups:
             return None
         return edges, groups
+
+    def moving_face_ids(self) -> set:
+        """The loose faces the drag bends — any face with a corner on a
+        grabbed vertex. The viewport keeps the cursor from landing on
+        them (it chased its own face and shook)."""
+        if self.grab is None or self._copy:
+            return set()
+        return {id(f) for v in self._verts
+                for e in getattr(v, "edges", ()) for f in e.faces}
 
     # ---- Rotation grips (issue #115) ----------------------------------------
     @property
@@ -630,7 +710,22 @@ class MoveTool(Tool):
 
     # ---- Internals ----------------------------------------------------------
     def _gather(self, ctx: ToolContext):
+        vertex = self._hovered_vertex(ctx)
+        if vertex is not None:
+            return [], [QVector3D(vertex.position)]
         return gather_targets(ctx)
+
+    @staticmethod
+    def _hovered_vertex(ctx: ToolContext):
+        """With nothing selected, a grab ON a corner (the Endpoint snap of
+        loose geometry) takes that one vertex — not the edge or face it
+        belongs to, which is what the pick under the cursor would give."""
+        viewport = ctx.viewport
+        snap = getattr(ctx, "snap", None)
+        if (viewport.scene.selection or snap is None
+                or snap.kind != "endpoint" or snap.context):
+            return None
+        return viewport.scene.mesh.vertex_at(snap.point)
 
     def _gather_copy_entities(self, ctx: ToolContext) -> None:
         """The faces/edges copy mode duplicates, and the wireframe segments
@@ -701,6 +796,7 @@ class MoveTool(Tool):
         def build(deltas):
             cmds: list = []
             plain: list = []
+            bound: list = []
             for d in deltas:
                 m = QMatrix4x4()
                 m.translate(d)
@@ -717,9 +813,9 @@ class MoveTool(Tool):
                 for e in edges:
                     curve = getattr(e, "curve", None)
                     soft = getattr(e, "soft", False)
-                    if (scene is not None and curve is None and not soft
-                            and not _bounds_a_face(e)):
-                        plain.append((e.a + d, e.b + d))
+                    if scene is not None and curve is None and not soft:
+                        (bound if _bounds_a_face(e) else plain).append(
+                            (e.a + d, e.b + d))
                         continue
                     # Soft edges and curves keep their flags on the copy.
                     if curve is not None and curve not in id_map:
@@ -731,6 +827,14 @@ class MoveTool(Tool):
             if plain:
                 from core.edits import build_add_edges
                 cmds.append(build_add_edges(scene, plain, detect_faces=True))
+            if bound:
+                # The edges of a copied face go through the same planner,
+                # but planned once the faces are stamped: planned now, it
+                # would lay a second face over their loop, and sent the old
+                # way they never split the face they land on — the edge of
+                # a piece copied 1 cm down left its neighbour's face whole
+                # (#379, after #177).
+                cmds.append(_PlannedWhenRun(bound))
             if not cmds:
                 return None
             return cmds[0] if len(cmds) == 1 else CompoundCommand(cmds)
@@ -857,8 +961,23 @@ class MoveTool(Tool):
                 viewport.history.execute(commands[0])
             elif commands:
                 viewport.history.execute(CompoundCommand(commands))
+            self._tell_join(viewport, commands)
         self._reset()
         viewport.update()
+
+    @staticmethod
+    def _tell_join(viewport, commands) -> None:
+        """Say what became of a landing on other vertices: joined, or
+        refused (and the move undone) because the join would break a
+        face."""
+        flash = getattr(viewport, "flash_status", None)
+        if flash is None:
+            return
+        refused = getattr(viewport.history, "last_rejected", None)
+        if refused:
+            flash(refused, 8000)
+        elif any(getattr(c, "welded", False) for c in commands):
+            flash(tr("Vertices joined"))
 
     def _reset(self) -> None:
         self.start_point = None

@@ -16,6 +16,26 @@ from pathlib import Path
 # Cream painted on faces with no material colour (mirrors the viewport default).
 _DEFAULT_COLOR = (0.96, 0.95, 0.925)
 
+#: A triangle below this area (m²; 0.001 mm²) has three collinear corners:
+#: it draws nothing, and other programs refuse files that carry one (#314).
+_MIN_TRI_AREA = 1e-9
+
+
+def export_triangles(face):
+    """``face.triangulate()`` without the zero-area slivers. A face with
+    collinear corners along a mitred or subdivided edge triangulates into
+    some; a door of 1 156 faces carried 56 of them, and one other modeller
+    rejected the whole COLLADA file for it (#314, @ales-limon)."""
+    for tri in face.triangulate():
+        a, b, c = tri
+        ab = (b.x() - a.x(), b.y() - a.y(), b.z() - a.z())
+        ac = (c.x() - a.x(), c.y() - a.y(), c.z() - a.z())
+        cx = ab[1] * ac[2] - ab[2] * ac[1]
+        cy = ab[2] * ac[0] - ab[0] * ac[2]
+        cz = ab[0] * ac[1] - ab[1] * ac[0]
+        if 0.5 * (cx * cx + cy * cy + cz * cz) ** 0.5 >= _MIN_TRI_AREA:
+            yield tri
+
 
 def _has_billboard(group) -> bool:
     from core.group import iter_placements
@@ -264,19 +284,21 @@ def _add_face(face, materials, prims) -> None:
         sh = tex.get("sh", 1.0) or 1.0
         rot = float(tex.get("rot", 0.0))
         uvw = tex.get("uvw")
-        for tri in face.triangulate():
+        for tri in export_triangles(face):
             pts = list(tri)
             uv = affine_uv(uvw, pts) if uvw else planar_uv(n, pts, sw, sh, rot)
             prims.setdefault(key, []).append(
                 (n, [(pts[k], (uv[k][0], uv[k][1])) for k in range(3)]))
     else:
-        col = tuple(face.attrs.get("color") or _DEFAULT_COLOR)
+        # RGB: the AI recipes paint (r, g, b, 1.0) and every writer reads
+        # three channels (transparency is attrs["opacity"], above).
+        col = tuple(face.attrs.get("color") or _DEFAULT_COLOR)[:3]
         key = ("color", col) if op is None else ("color", col, op)
         materials.setdefault(key, {"color": col, "map": None,
                                    "opacity": op})
         if face.attrs.get("mat") and "mat" not in materials[key]:
             materials[key]["mat"] = face.attrs["mat"]
-        for tri in face.triangulate():
+        for tri in export_triangles(face):
             pts = list(tri)
             prims.setdefault(key, []).append(
                 (n, [(pts[k], None) for k in range(3)]))

@@ -350,6 +350,18 @@ def loop_normal(corners) -> QVector3D:
     return n
 
 
+def ctrl_clause(active: bool, on: str, off: str) -> str:
+    """The classic two-state modifier clause: «Ctrl = [copy] / original».
+
+    The state in force is the bracketed one, exactly the way the Tape and
+    the Protractor spell out their cycles, so the status bar says which way
+    the modifier is set RIGHT NOW and not just what it can do (Marco,
+    2026-09-17). ``on``/``off`` are source strings handed to ``tr``."""
+    from core.i18n import tr
+    on, off = tr(on), tr(off)
+    return "Ctrl = " + (f"[{on}] / {off}" if active else f"{on} / [{off}]")
+
+
 def face_the_plane(corners, plane_normal):
     """Wind ``corners`` so the face looks the way its plane does.
 
@@ -400,6 +412,10 @@ class Tool(ABC):
     #: which the tooltip and F3 already show beside it (Blender's
     #: descriptions). English; it goes through ``tr`` where it is shown.
     description: str | None = None
+    #: Where a plugin tool's entry goes in the Extensions menu among the
+    #: others: lower first, the same keeps the folder order. The Python
+    #: Console, a tool for developers, goes after the model tools.
+    menu_order: int = 0
     # Drawing tools snap to geometry and show the snap markers/tooltips
     # (Endpoint, On Edge, On Face, ...). Tools that only pick existing
     # geometry (Select, Push/Pull) set this False: no snap engine, no markers.
@@ -510,6 +526,26 @@ class Tool(ABC):
         2026-09-17)."""
         return ""
 
+    @staticmethod
+    def ctrl_tapped(viewport) -> bool:
+        """Whether the Ctrl being RELEASED was a tap of its own.
+
+        A modifier toggled on the PRESS fires on every Ctrl+<key> chord too:
+        Ctrl+Z reaches the viewport only as a ShortcutOverride, so the mode
+        switched silently while undoing (issue #183, Alejandro Limón). Toggle
+        on the RELEASE and ask this first — the viewport knows whether some
+        other key came in between. Stand-ins without the tracker (tests)
+        count as a tap."""
+        tapped = getattr(viewport, "ctrl_tapped", None)
+        return bool(tapped()) if callable(tapped) else True
+
+    @staticmethod
+    def refresh_hint(viewport) -> None:
+        """Redraw the status bar, so ``status_clause`` shows the new mode."""
+        hint = getattr(viewport, "refresh_status_hint", None)
+        if callable(hint):
+            hint()
+
     # ---- Visual feedback hooks ---------------------------------------------
     def rubber_band_lines(self):
         """Return ``[(a, b), ...]`` line segments to draw as the live preview.
@@ -526,6 +562,14 @@ class Tool(ABC):
         drawn dashed like a real guide while the cursor moves (#89,
         @pacaeiro). Long segments are fine: the viewport clips them."""
         return []
+
+    def inference_guide_lines(self):
+        """``[(a, b, kind), ...]`` — reference segments drawn dashed in the
+        snap-kind colour while the tool is inferring (Push/Pull's «level with
+        that point» line from the geometry it locked onto to the moving cap).
+        Tools that infer nothing default to an empty list."""
+        return []
+
     def preview_faces(self):
         """Return ``Face`` objects to render shaded as a live solid preview.
 

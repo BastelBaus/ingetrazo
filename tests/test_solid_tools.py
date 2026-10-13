@@ -255,3 +255,41 @@ def test_union_runs_at_once_on_a_preselection():
     UnionTool().on_activate(vp)
     assert len(scene.groups) == 1
     assert math.isclose(solids.solid_volume(scene.groups[0]), 15.0, rel_tol=1e-6)
+
+
+def test_a_wall_with_two_doors_in_a_row_takes_a_third_cut():
+    """#227 (@fafecm): two door openings cut into a wall with their tops at
+    one height, then a third Subtract refused «a flaw the operation cannot
+    read». The wall face with two holes triangulates with a long edge
+    running past both holes' top corners — fine to draw, not a closed
+    triangle surface for the boolean. The conversion now splits those
+    triangles when, and only when, the boolean refuses the plain one."""
+    wall = _box(0, 0, 0, 10, 0.2, 3, RED, "wall")
+    for x0, x1 in ((2, 3), (5, 6)):           # tops and bottoms aligned
+        door = _box(x0, -1, 0.1, x1, 1, 2.1, BLUE, "door")
+        removed, created = solids.run(solids.SUBTRACT, [door, wall])
+        assert len(created) == 1
+        wall = created[0]
+    window = _box(7, -1, 1, 8, 1, 2, BLUE, "window")
+    removed, created = solids.run(solids.SUBTRACT, [window, wall])
+    assert len(created) == 1
+    expected = 10 * 0.2 * 3 - 2 * (1 * 0.2 * 2) - 1 * 0.2 * 1
+    assert abs(solids.solid_volume(created[0]) - expected) < 1e-6
+
+
+def test_the_t_junction_split_keeps_the_surface():
+    """The split adds a point inside each triangle it fans, never moves a
+    corner and never drops area."""
+    import numpy as np
+    v = np.array([[0, 0, 0], [2, 0, 0], [1, 1, 0], [1, 0, 0]], dtype=float)
+    t = np.array([[0, 1, 2]], dtype=np.uint32)      # (1,0,0) lies on 0-1
+    f = np.array([7], dtype=np.uint32)
+    v2, t2, f2 = solids._conform_t_junctions(v, t, f)
+    assert np.allclose(v2[:4], v)
+    assert set(f2.tolist()) == {7}
+    area = sum(np.linalg.norm(np.cross(v2[b] - v2[a], v2[c] - v2[a])) / 2
+               for a, b, c in t2.tolist())
+    assert abs(area - 1.0) < 1e-12
+    edges = {frozenset(e) for a, b, c in t2.tolist()
+             for e in ((a, b), (b, c), (c, a))}
+    assert frozenset((0, 1)) not in edges            # split at vertex 3

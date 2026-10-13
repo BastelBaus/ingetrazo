@@ -46,6 +46,12 @@ from views.fold_section import FoldSection, narrow, wrapping_form
 
 MAX_ROUNDS = 12
 
+#: Blocks in a row that raised before control goes back to the user. A
+#: small local model (llama3.2 in Rafael's review 6, #461) fed its own
+#: TypeError back for all 12 rounds — «toda la tarde» on a busy machine.
+#: MAX_ROUNDS stays the cap for multi-step work that keeps succeeding.
+MAX_FAILED_ROUNDS = 3
+
 #: Reply budget per turn. 4096 was not enough for chatty coders (gemini
 #: 2.5 flash got cut mid-```python and the loop ended with nothing drawn);
 #: every provider we speak accepts 8192 output tokens.
@@ -134,7 +140,9 @@ class AsistentePanel(QWidget):
         self._convo: list[dict] = []
         self._busy = False
         self._round = 0
+        self._failed = 0
         self._nudged = False
+        self._local_warm = False    # a local server answered once already
         self._last_prompt = ""
         self._foto: tuple[str, str, str] | None = None  # (b64, mime, name)
         self._reply.connect(self._on_reply, Qt.QueuedConnection)
@@ -440,6 +448,7 @@ class AsistentePanel(QWidget):
                         name=ai.PROVIDER_INFO[provider][0], model=model),
                      "muted")
         self._probar.setEnabled(False)
+        self._warn_local_load(provider, model)
 
         def worker() -> None:
             ok, msg = ai.probar_conexion(provider, model, key, ollama)
@@ -465,7 +474,10 @@ class AsistentePanel(QWidget):
         if encoded is None:
             self._append(tr("Could not read the image."), "err")
             return
-        name = path.rsplit("/", 1)[-1]
+        # Path(...).name, not a split on "/": a native Windows path
+        # (drag-and-drop, a pasted path) put its whole "C:\..." in the chip.
+        from pathlib import Path
+        name = Path(path).name
         self._foto = (*encoded, name)
         self._foto_chip.setText("📷 " + name)
         self._foto_chip.setVisible(True)
@@ -532,6 +544,7 @@ class AsistentePanel(QWidget):
             self._clear_foto()
         self._convo.append(message)
         self._round = 0
+        self._failed = 0
         self._nudged = False
         self._last_prompt = prompt
         self._next_turn()
@@ -541,6 +554,7 @@ class AsistentePanel(QWidget):
         self._send.setEnabled(False)
         self._append(tr("thinking…"), "muted")
         provider, model, key, ollama = self._config()
+        self._warn_local_load(provider, model)
         convo = ai.compact_messages(ai.slim_messages(
             self._convo, vision=ai.supports_vision(provider, model)))
 
@@ -591,6 +605,7 @@ class AsistentePanel(QWidget):
         if msg.get("probar"):
             self._probar.setEnabled(True)
             if msg.get("ok"):
+                self._local_warm = True
                 self._append(tr("Connection OK — the model answered."),
                              "ok")
             else:
@@ -609,6 +624,7 @@ class AsistentePanel(QWidget):
             self._append(tr("Error: {err}", err=msg.get("error")), "err")
             self._finish()
             return
+        self._local_warm = True
         text = ai.strip_thoughts(msg["text"])
         self._convo.append({"role": "assistant", "text": text})
         self._append(f"IA: {text}", "ai")
@@ -667,6 +683,7 @@ class AsistentePanel(QWidget):
             if len(out) > 1500:      # a print-happy recipe rides EVERY turn
                 out = out[:700] + "\n… (recortado) …\n" + out[-700:]
             summary.append(out)
+        self._failed = self._failed + 1 if result["error"] else 0
         if result["error"]:
             summary.append("ERROR (todo revertido): " + str(result["error"]))
             if result["stderr"]:
@@ -684,7 +701,34 @@ class AsistentePanel(QWidget):
             shot = self._screenshot_b64()
         self._convo.append({"role": "user", "text": feedback,
                             **({"image_png_b64": shot} if shot else {})})
+        if self._failed >= MAX_FAILED_ROUNDS:
+            # The error is already in the convo: «continúa» (or a clearer
+            # request) picks up from here with the model knowing why.
+            self._append(tr('{n} attempts in a row failed — stopping here. '
+                            'Rephrase the request or type "continue" to '
+                            'let it try again.', n=self._failed), "err")
+            if ai.small_local_model(provider, model):
+                self._append(self._small_model_hint(model), "muted")
+            self._finish()
+            return
         self._next_turn()
+
+    def _warn_local_load(self, provider: str, model: str) -> None:
+        """Ollama loads the model into memory on the first request — tens
+        of seconds of silence that read as a hang (#461). The first time,
+        also say if the model is too small to write recipes."""
+        if provider != "ollama" or self._local_warm:
+            return
+        self._append(tr("The local server is loading the model — the "
+                        "first answer takes longer."), "muted")
+        if ai.small_local_model(provider, model):
+            self._append(self._small_model_hint(model), "muted")
+
+    def _small_model_hint(self, model: str) -> str:
+        return tr("{model} is a small model and often fails at writing "
+                  "code. A code model works much better, e.g. {suggested} "
+                  "(ollama pull {suggested}).", model=model,
+                  suggested=ai.DEFAULT_MODELS["ollama"])
 
     def _finish(self) -> None:
         self._busy = False

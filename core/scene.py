@@ -80,6 +80,13 @@ class Scene:
     # presets — kept with the document so every frame of the file offers
     # them again (Marco, 2026-09-02).
     custom_scales: list = field(default_factory=list)
+    #: Component definitions the document keeps with no copy placed —
+    #: each a placement-free template :class:`~core.group.Group` (identity
+    #: ``xform``) that shares its prototype with any copies still in the
+    #: model. They never draw, pick or export; they wait in the «In model»
+    #: list to be placed again or to replace other copies. See
+    #: :mod:`core.kept_components`.
+    kept_components: list = field(default_factory=list)
     # Display style for dimension annotations (edited from the Tray).
     #: ``norma`` is the drafting standard the dimensions obey — ISO (and so
     #: the Spanish UNE) or the German/Japanese one. It belongs to the
@@ -135,6 +142,11 @@ class Scene:
     # False for hidden things; the ghost pass draws them.
     show_hidden_objects: bool = False
     show_hidden_geometry: bool = False
+    # Camera ▸ Component Edit ▸ Hide Similar Components: while a
+    # component instance is open, its sibling instances (the other copies of
+    # the same definition) leave the frame instead of fading with the rest.
+    # A view preference, not document content: only read while editing.
+    hide_similar_components: bool = False
     show_section_cuts: bool = True
     # Georeferencing anchor (Track G). ``None`` until the user sets a datum;
     # once set, geodetic ↔ local-metre conversion goes through it. Terrain and
@@ -223,17 +235,57 @@ class Scene:
         # render, pick, snap, bounds, export — whatever its layer says.
         # The hidden-things view does NOT change that: it draws them as a
         # ghost in its own pass and only makes them selectable.
-        if self.entity_hidden(entity):
+        if self.entity_hidden(entity) or self.similar_hidden(entity):
             return False
         return self._layer_state(entity)[0]
 
+    def edit_definition(self):
+        """The shared prototype mesh of the component instance open at the
+        innermost level, or ``None`` (at the root, or inside a classic
+        group)."""
+        if not self._edit_stack:
+            return None
+        return self._edit_stack[-1].get("definition")
+
+    def similar_hidden(self, entity) -> bool:
+        """Out of the frame by Hide Similar Components: another instance of
+        the definition being edited (or a nested placement of one). Nothing
+        is hidden at the root, so saving and exporting never see it."""
+        if not self.hide_similar_components or not self._edit_stack:
+            return False
+        if not hasattr(entity, "children") or entity is self.edit_group:
+            return False
+        definition = self.edit_definition()
+        if definition is None:
+            return False
+        for g in (entity, getattr(entity, "owner", None)):
+            if (g is not None and g is not self.edit_group
+                    and getattr(g, "xform", None) is not None
+                    and getattr(g, "mesh", None) is definition):
+                return True
+        return False
+
     def entity_selectable(self, entity) -> bool:
+        if self.similar_hidden(entity):
+            return False
         if self._object_hidden(entity) and not self.show_hidden_objects:
             return False
         if self._face_hidden(entity) and not self.show_hidden_geometry:
             return False
+        if self.entity_locked(entity):
+            return False
         visible, locked = self._layer_state(entity)
         return visible and not locked
+
+    @staticmethod
+    def entity_locked(entity) -> bool:
+        """Locked as an object: the group itself, or — for a placement the
+        viewport picks as part of its parent — the object that owns it."""
+        for g in (entity, getattr(entity, "owner", None)):
+            if g is not None and getattr(g, "locked", False) \
+                    and hasattr(g, "children"):
+                return True
+        return False
 
     def groups_by_uid(self) -> dict:
         """``uid → group`` over the whole tree (nested placements too)."""
@@ -282,6 +334,11 @@ class Scene:
         # group's axes, level by level.
         from core.group import group_frame
         frame = group_frame(group)
+        # The definition its sibling instances share, read before the entry
+        # below swaps the instance onto a world copy (Hide Similar).
+        is_comp = getattr(group, "is_component", None)
+        definition = (group.mesh if callable(is_comp) and is_comp()
+                      else None)
         if getattr(group, "children", None):
             # A container: its children stay children. What CANNOT stay is a
             # transform on it, because the tools work in world coordinates —
@@ -308,7 +365,7 @@ class Scene:
             self._loose_mesh = anterior
         self._edit_stack.append(
             {"group": group, "mesh": anterior, "share": self._edit_share,
-             "frame": frame})
+             "frame": frame, "definition": definition})
         self.mesh = group.mesh
         self.edit_group = group
         self.selection.clear()
@@ -552,7 +609,8 @@ class Scene:
                 or self.tile_layer or self.geo_paths or self.terrain
                 or self.guides or self.geo_points or self.text_labels
                 or self.saved_views or self.compositions
-                or self.image_planes or self.plugin_data):
+                or self.image_planes or self.plugin_data
+                or self.kept_components):
             self.mesh.clear()
             self.groups.clear()
             self.dimensions.clear()
@@ -564,6 +622,7 @@ class Scene:
             self.saved_views.clear()
             self.compositions.clear()
             self.custom_scales.clear()
+            self.kept_components.clear()
             self.plugin_data = {}
             self.selection.clear()
             from core.layers import DEFAULT_LAYER, Layer

@@ -9,7 +9,7 @@ import os
 import socket
 import sys
 import threading
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -137,7 +137,10 @@ def test_the_packaged_app_tells_windows_users_the_exe_to_run():
     assert cmd == [r"C:\Program Files\IngeTrazo\ingetrazo-mcp.exe"]
     assert mcp_command("linux", frozen=True, executable="/opt/it/ingetrazo") == \
         ["/opt/it/ingetrazo", "--mcp"]
-    assert mcp_command("linux", frozen=False, root=Path("/src/app")) == \
+    # A POSIX root even on a Windows host, where Path("/src/app") is
+    # already "\src\app" before mcp_command sees it.
+    assert mcp_command("linux", frozen=False,
+                       root=PurePosixPath("/src/app")) == \
         ["python3", "/src/app/scripts/ingetrazo_mcp.py"]
     assert mcp_command("win32", frozen=False, root=Path(r"C:\src\app"))[0] == "python"
     assert desktop_config_path("win32").endswith("claude_desktop_config.json")
@@ -176,7 +179,7 @@ def test_the_flatpak_ships_the_mcp_script():
     # `flatpak run <id> --mcp` runs scripts/ingetrazo_mcp.py from /app; the
     # manifest must copy scripts/ with the rest of the tree.
     from core.paths import app_root
-    manifest = (app_root() / "packaging" / "flatpak" / "com.ingetrazo.IngeTrazo.yml").read_text()
+    manifest = (app_root() / "packaging" / "flatpak" / "com.ingetrazo.IngeTrazo.yml").read_text(encoding="utf-8")
     line = next(l for l in manifest.splitlines() if "cp -a main.py" in l)
     assert " scripts " in line + " "
 
@@ -184,7 +187,7 @@ def test_the_flatpak_ships_the_mcp_script():
 def test_the_mcp_script_ships_with_the_app_and_the_flag_finds_it():
     from core.paths import app_root
     assert (app_root() / "scripts" / "ingetrazo_mcp.py").is_file()
-    spec = (app_root() / "ingetrazo.spec").read_text()
+    spec = (app_root() / "ingetrazo.spec").read_text(encoding="utf-8")
     assert "('scripts/ingetrazo_mcp.py',   'scripts')" in spec
     assert "name='ingetrazo-mcp'" in spec and "console=True" in spec
 
@@ -235,3 +238,69 @@ def test_the_packaged_app_would_notice_a_missing_recipe_book():
     check = source[source.index("def _self_check"):source.index("def main()")]
     assert "ingetrazo_mcp.py" in check
     assert "ai_recipes" in check
+
+
+def _send_raw(bridge, payload: bytes) -> bytes:
+    """Send ``payload`` as-is and read until the bridge closes or goes quiet,
+    pumping Qt events on this thread so anything it dispatches can run."""
+    app = QApplication.instance()
+    out: dict = {"got": b""}
+
+    def worker():
+        s = socket.socket()
+        s.settimeout(2.0)
+        s.connect(("127.0.0.1", bridge.port))
+        try:
+            s.sendall(payload)
+            while True:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                out["got"] += chunk
+        except OSError:
+            pass
+        finally:
+            s.close()
+
+    t = threading.Thread(target=worker)
+    t.start()
+    while t.is_alive():
+        app.processEvents()
+        t.join(timeout=0.01)
+    return out["got"]
+
+
+def test_a_web_page_cannot_run_code_through_the_bridge(monkeypatch):
+    """Loopback is not a wall against the browser on the same machine. A page
+    can POST to http://127.0.0.1:4763 with ``fetch(..., {mode: "no-cors",
+    body})``: a text/plain POST needs no CORS preflight, so the browser sends
+    it and only hides the answer. The bridge reads lines, so the HTTP request
+    line and headers fail as bad JSON — and the body line, a tool call, ran.
+    These are the bytes that request puts on the wire."""
+    from plugins.ai_bridge import _Bridge
+    from views.main_window import MainWindow
+    monkeypatch.setenv("INGETRAZO_AI_PORT", "0")
+    win = MainWindow()
+    try:
+        vp = win.viewport
+        bridge = _Bridge(vp)
+        bridge.start()
+        edges0 = len(vp.scene.mesh.edges)
+        body = (json.dumps({"id": 1, "tool": "run_python", "args": {"code": (
+            "mesh.add_edge(QVector3D(0,0,0), QVector3D(7,0,0))")}}) + "\n").encode()
+        request = (
+            f"POST / HTTP/1.1\r\nHost: 127.0.0.1:{bridge.port}\r\n"
+            "Origin: https://example.com\r\n"
+            "Content-Type: text/plain;charset=UTF-8\r\n"
+            f"Content-Length: {len(body)}\r\n\r\n").encode() + body
+        _send_raw(bridge, request)
+        assert len(vp.scene.mesh.edges) == edges0, (
+            "an HTTP request's body ran as a bridge tool call")
+
+        # The agent's own client is unaffected.
+        reply = _ask(bridge, "run_python", {"code": "1 + 1"})
+        assert reply["ok"]
+        bridge.stop()
+    finally:
+        win._saved_version = win.viewport.scene.version
+        win.close()

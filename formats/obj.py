@@ -13,6 +13,8 @@ from pathlib import Path, PurePosixPath
 
 from PySide6.QtGui import QVector3D
 
+from .meshexport import export_triangles
+
 # Cream painted on faces with no material colour (mirrors the viewport default).
 _DEFAULT_COLOR = (0.96, 0.95, 0.925)
 
@@ -89,7 +91,7 @@ def save_obj(scene, path) -> None:
             sh = tex.get("sh", 1.0) or 1.0
             rot = float(tex.get("rot", 0.0))
             uvw = tex.get("uvw")
-            for tri in face.triangulate():
+            for tri in export_triangles(face):
                 if uvw:
                     from core.texture import affine_uv
                     uv = affine_uv(uvw, list(tri))   # imported explicit UVs
@@ -98,12 +100,13 @@ def save_obj(scene, path) -> None:
                 groups.setdefault(key, []).append(
                     [(vidx(tri[k]), uvidx(uv[k])) for k in range(3)])
         else:
-            col = tuple(face.attrs.get("color") or _DEFAULT_COLOR)
+            # RGB only: an AI recipe's (r, g, b, 1.0) broke the .mtl writer.
+            col = tuple(face.attrs.get("color") or _DEFAULT_COLOR)[:3]
             key = ("color", col)
             materials.setdefault(key, {"color": col, "map": None})
             if face.attrs.get("mat") and "mat" not in materials[key]:
                 materials[key]["mat"] = face.attrs["mat"]
-            for tri in face.triangulate():
+            for tri in export_triangles(face):
                 groups.setdefault(key, []).append(
                     [(vidx(tri[k]), None) for k in range(3)])
 
@@ -114,18 +117,23 @@ def save_obj(scene, path) -> None:
     matname = export_names({k: materials[k] for k in keys})
 
     # Copy texture images next to the .obj so map_Kd resolves.
+    from core.texture import is_image_file
     for k in keys:
         mat = materials[k]
         if mat.get("map"):
             dst = path.parent / mat["map"]
             try:
-                if mat["src"].resolve() != dst.resolve():
+                if (mat["src"].resolve() != dst.resolve()
+                        and is_image_file(mat["src"])):
                     shutil.copy(mat["src"], dst)
             except Exception:  # noqa: BLE001 — best-effort; export still valid
                 pass
 
+    # UTF-8 on every platform: material names and texture files carry
+    # accents («Mármol»), and the locale default would write cp1252 on
+    # Windows — a file other machines read as mojibake.
     mtl_path = path.with_suffix(".mtl")
-    with open(mtl_path, "w") as m:
+    with open(mtl_path, "w", encoding="utf-8") as m:
         for k in keys:
             mat = materials[k]
             r, g, b = mat["color"]
@@ -135,7 +143,7 @@ def save_obj(scene, path) -> None:
                 m.write(f"map_Kd {mat['map']}\n")
             m.write("\n")
 
-    with open(path, "w") as o:
+    with open(path, "w", encoding="utf-8") as o:
         o.write("# IngeTrazo OBJ export\n")
         o.write(f"mtllib {mtl_path.name}\n")
         for x, y, z in verts:
@@ -151,6 +159,23 @@ def save_obj(scene, path) -> None:
 
 
 # ---- Import --------------------------------------------------------------------
+
+def read_obj_text(path) -> str:
+    """The text of an ``.obj`` or ``.mtl`` file, whatever machine wrote it.
+
+    OBJ declares no encoding. Our own export and most modern tools write
+    UTF-8, so that comes first, the same on every platform — Python's
+    default is the locale's, cp1252 on Windows, which read «Escultura
+    pública» back as «pÃºblica». A file that is not valid UTF-8 came from
+    an older Windows exporter and is read as cp1252, with ``errors=
+    "replace"``: a stray byte costs a character, never the model.
+    """
+    data = Path(path).read_bytes()
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode("cp1252", errors="replace")
+
 
 def _is_number(tok: str) -> bool:
     try:
@@ -206,9 +231,9 @@ def _parse_mtl(path: Path) -> dict:
     if not path.exists():
         return mats
     current = None
-    # errors="replace": these files carry whatever encoding the author's
-    # machine had, and a stray byte must not cost the model either.
-    for line in path.read_text(errors="replace").splitlines():
+    # These files carry whatever encoding the author's machine had, and a
+    # stray byte must not cost the model either (see read_obj_text).
+    for line in read_obj_text(path).splitlines():
         parts = line.split()
         if not parts:
             continue
@@ -330,7 +355,7 @@ def _load_obj_inner(scene, path, progress=None, scale: float = 1.0,
     current_g = ""
     pending: list[tuple[list[QVector3D], object, object, int, tuple]] = []
 
-    for line in path.read_text().splitlines():
+    for line in read_obj_text(path).splitlines():
         parts = line.split()
         if not parts:
             continue

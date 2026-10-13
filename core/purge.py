@@ -42,6 +42,15 @@ def iter_groups(groups):
             yield pg
 
 
+def _document_groups(scene) -> list:
+    """The groups in the model plus the component definitions kept in the
+    file with no copy placed (``scene.kept_components``): a material or a
+    layer only a kept definition wears is still in use — purging it would
+    strip the definition the user asked to keep."""
+    return (list(getattr(scene, "groups", None) or ())
+            + list(getattr(scene, "kept_components", None) or ()))
+
+
 def iter_meshes(scene):
     """The loose mesh plus every group's mesh, each distinct mesh once.
 
@@ -51,7 +60,7 @@ def iter_meshes(scene):
     """
     seen: set[int] = set()
     meshes = [scene.loose_mesh]
-    meshes += [g.mesh for g in iter_groups(getattr(scene, "groups", None))]
+    meshes += [g.mesh for g in iter_groups(_document_groups(scene))]
     for m in meshes:
         if m is not None and id(m) not in seen:
             seen.add(id(m))
@@ -72,7 +81,7 @@ def used_layers(scene) -> set[str]:
             used.add(layer_of(f))
         for e in mesh.edges:
             used.add(layer_of(e))
-    for g in iter_groups(getattr(scene, "groups", None)):
+    for g in iter_groups(_document_groups(scene)):
         if getattr(g, "layer", None):
             used.add(g.layer)
     for ent in _annotations(scene):
@@ -112,7 +121,7 @@ def used_materials(scene) -> set[str]:
     # A group's own paint (issue #47) lives on the group, not on its faces:
     # Purge used to delete a material that only a group wore (issue #133).
     from core.group import iter_placements
-    for top in getattr(scene, "groups", None) or ():
+    for top in _document_groups(scene):
         for g, _m in iter_placements(top):
             paint = getattr(g, "material", None) or {}
             if paint.get("mat"):

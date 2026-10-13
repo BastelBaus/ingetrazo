@@ -105,6 +105,34 @@ def test_the_real_viewport_finds_the_axis_under_the_cursor():
     assert vp.pick_axis(*far) is None
 
 
+def test_the_axis_cue_rule_lives_in_the_engine():
+    """Step 4 of the split: the cue that paints the axis square is the
+    engine's rule, and the viewport's name for it is a delegate. The pick
+    (``pick_axis``) stays a viewport service the engine calls."""
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from views.viewport import Viewport
+
+    class _AxisSourceTool:
+        axis_source = True
+        start_point = None
+
+    vp = Viewport(None)
+    vp.resize(1000, 600)
+    vp.camera.set_aspect(1000, 600)
+    vp.camera.set_view("top")
+    vp.camera.target = V(0, 0, 0)
+    vp.camera.distance = 12
+    vp.active_tool = _AxisSourceTool()
+    px = vp._world_to_pixel(V(3, 0, 0))
+    plain = SnapResult(V(3, 0, 0), "none")
+    got = vp.inference._axis_source_cue(plain, px[0], px[1] + 2)
+    assert got.kind == "on_axis" and got.axis == "x"
+    assert (got.point - V(3, 0, 0)).length() < 1e-6   # the foot on the axis
+    via_vp = vp._axis_source_cue(plain, px[0], px[1] + 2)
+    assert (via_vp.kind, via_vp.axis) == ("on_axis", "x")
+
+
 # ---- 2. a guide point with its segment ------------------------------------
 
 def test_from_a_vertex_the_second_click_leaves_a_guide_point_with_its_segment():

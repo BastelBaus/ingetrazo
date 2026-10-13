@@ -80,6 +80,9 @@ class RectangleTool(PlaneLock, Tool):
         self._viewport = None
         self._shift_square_lock = False
         self._arrow_square_lock = False
+        #: The side the cursor is stretching ("u" width / "v" height): a lone
+        #: typed number goes there and the other side stays as shown.
+        self._live_side: str | None = None
 
     # ---- Lifecycle ----------------------------------------------------------
     def on_activate(self, viewport) -> None:
@@ -153,6 +156,9 @@ class RectangleTool(PlaneLock, Tool):
         self._viewport = ctx.viewport
         # First: the plane follows a snapped far corner (``plane_points``),
         # so the square test below must see this point, not the last one.
+        if self.start_point is not None:
+            self._note_live_side(self.hover_point or self.start_point,
+                                 ctx.world)
         self.hover_point = ctx.world
         square_inference = (self.start_point is not None
                             and self._square_corner(
@@ -168,13 +174,25 @@ class RectangleTool(PlaneLock, Tool):
         """Type exact dimensions: ``"3;2"`` (or ``"3 2"``) + Enter lays a
         3 m × 2 m rectangle, in the quadrant the cursor is currently dragging
         toward. The first number runs along the work plane's horizontal axis,
-        the second along its vertical axis."""
+        the second along its vertical axis. A lone number sets the side the
+        cursor is stretching and keeps the other as it reads (both, with the
+        square locked)."""
         if self.start_point is None or self.hover_point is None:
             return False
         if isinstance(value, (int, float)) and not isinstance(value, bool):
-            if not self._square_locked():
-                return False
-            w = h = value
+            if self._square_locked():
+                w = h = value
+            else:
+                # One side already reads right (snapped to an edge, say):
+                # the number is the side being stretched, the other stays.
+                w, h = (abs(d) for d in self._dimensions(
+                    *self._span(self.hover_point)))
+                if self._live_side == "u":
+                    w = value
+                elif self._live_side == "v":
+                    h = value
+                else:
+                    return False
         elif isinstance(value, tuple) and len(value) == 2:
             w, h = value
         else:
@@ -260,6 +278,19 @@ class RectangleTool(PlaneLock, Tool):
             apply()
 
     # ---- Internals ----------------------------------------------------------
+    def _note_live_side(self, prev: QVector3D, new: QVector3D) -> None:
+        """Remember which side the last clear cursor move stretched. A move
+        mostly along one plane axis names that side; a diagonal one, or a
+        still cursor, keeps the previous answer."""
+        u, v = self._axes()
+        delta = new - prev
+        du = abs(QVector3D.dotProduct(delta, u))
+        dv = abs(QVector3D.dotProduct(delta, v))
+        if du > 2.0 * dv and du > 1e-6:
+            self._live_side = "u"
+        elif dv > 2.0 * du and dv > 1e-6:
+            self._live_side = "v"
+
     def _cursor_preview(self):
         """The little square on the cursor before the first corner,
         lying on the plane the rectangle would take (an arrow-key lock in
@@ -346,17 +377,33 @@ class RectangleTool(PlaneLock, Tool):
         viewport.update()
 
 
+    def _toggle_center(self, viewport, say: bool = True) -> None:
+        self._set_from_center(viewport, not self._from_center)
+        flash = getattr(viewport, "flash_status", None)
+        if say and callable(flash):
+            flash(tr("Rectangle from the centre") if self._from_center
+                  else tr("Rectangle from a corner"))
+        hint = getattr(viewport, "refresh_status_hint", None)
+        if callable(hint):
+            hint()
+
+    def on_key_release(self, viewport, key: int) -> bool:
+        # Toggled on the PRESS so the pencil's badge changes at once; a Ctrl
+        # that was part of a shortcut (Ctrl+Z…) takes it back on the
+        # release (#342).
+        if key != Qt.Key_Control or not getattr(self, "_ctrl_toggled", False):
+            return False
+        self._ctrl_toggled = False
+        tapped = getattr(viewport, "ctrl_tapped", None)
+        if callable(tapped) and not tapped():
+            self._toggle_center(viewport, say=False)
+        return True
+
     def on_key(self, viewport, key: int, modifiers) -> bool:
         if key == Qt.Key_Control:
             # Ctrl = corner ⇄ centre, like Move's Ctrl = copy (issue #39).
-            self._set_from_center(viewport, not self._from_center)
-            flash = getattr(viewport, "flash_status", None)
-            if callable(flash):
-                flash(tr("Rectangle from the centre") if self._from_center
-                      else tr("Rectangle from a corner"))
-            hint = getattr(viewport, "refresh_status_hint", None)
-            if callable(hint):
-                hint()
+            self._toggle_center(viewport)
+            self._ctrl_toggled = True
             return True
         if key == Qt.Key_Down and self.start_point is not None:
             if self._arrow_square_lock:
@@ -379,6 +426,7 @@ class RectangleTool(PlaneLock, Tool):
         self.wireframe_color = None
         self._shift_square_lock = False
         self._arrow_square_lock = False
+        self._live_side = None
         self.clear_plane_lock()
 
     def _square_locked(self) -> bool:

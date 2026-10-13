@@ -33,6 +33,10 @@ Behavior (the classic Paint Bucket, ``B``):
 
 The current colour is class-level (shared across activations) and is set from
 the toolbar swatch (a ``QColorDialog``); the tool only applies it.
+
+Every paint also puts the material at the head of ``PaintTool.recent``, the
+last few materials actually painted with; the tray shows them as a row of
+swatches so texturing does not mean digging through the library each time.
 """
 from __future__ import annotations
 
@@ -54,6 +58,34 @@ from tools.base import Tool, ToolContext
 # The default cream the viewport paints unpainted faces with — sampling an
 # unpainted face yields this, and it is what "no colour" reads as.
 DEFAULT_FACE_COLOR = (0.96, 0.95, 0.925)
+
+
+#: How many materials the «Recent» row keeps.
+RECENT_MAX = 6
+
+
+def recent_key(entry: dict) -> tuple:
+    """What makes two recent entries THE SAME material: its name when it
+    has one, else the image with its size and turn (or the colour)."""
+    if entry.get("mat"):
+        return ("m", entry["mat"])
+    tex = entry.get("texture")
+    if tex:
+        tint = tex.get("tint")
+        return ("t", tex.get("path"), tex.get("sw"), tex.get("sh"),
+                tex.get("rot", 0.0), tuple(tint) if tint else None,
+                entry.get("opacity"))
+    col = entry.get("color") or ()
+    return ("c", tuple(round(float(c), 4) for c in col),
+            entry.get("opacity"))
+
+
+def push_recent(entries: list, entry: dict, cap: int = RECENT_MAX) -> list:
+    """``entries`` with ``entry`` moved (or added) to the front, without
+    duplicates and at most ``cap`` long."""
+    key = recent_key(entry)
+    rest = [e for e in entries if recent_key(e) != key]
+    return [entry] + rest[:max(cap - 1, 0)]
 
 
 def _face_plane(face) -> tuple:
@@ -174,6 +206,10 @@ class PaintTool(Tool):
     # REMOVES the paint (@pacaeiro, #47 point 2). While it is set the
     # colour/texture fields above are ignored.
     current_is_default: bool = False
+    # The last materials painted with, newest first, as material dicts
+    # (``_current_as_material``). The tray loads them from the settings,
+    # shows them and saves them back (``recent_materials_changed``).
+    recent: list[dict] = []
 
     def on_activate(self, viewport) -> None:
         pass
@@ -182,8 +218,17 @@ class PaintTool(Tool):
         viewport.set_hover(None)
 
     def on_hover(self, ctx: ToolContext) -> None:
-        face, _group = ctx.viewport.pick_face_any(ctx.screen.x(), ctx.screen.y())
-        ctx.viewport.set_hover(face)
+        vp = ctx.viewport
+        # A face inside a component is marked through the placement it was
+        # reached through, or the marking is drawn where the part WOULD be
+        # unplaced and assembled, not where the placed, exploded part is.
+        pick = getattr(vp, "pick_face_placement", None)
+        if pick is not None:
+            face, placement = pick(ctx.screen.x(), ctx.screen.y())
+            vp.set_hover(face, placement)
+            return
+        face, _group = vp.pick_face_any(ctx.screen.x(), ctx.screen.y())
+        vp.set_hover(face)
 
     def on_click(self, ctx: ToolContext) -> None:
         vp = ctx.viewport
@@ -240,9 +285,11 @@ class PaintTool(Tool):
             # it stayed on the old paint after a sample (issue #47,
             # @pacaeiro: «the Active Material in Materials List is not
             # updated»).
-            tray = getattr(win, "tray", None)
-            if hasattr(tray, "sync_from_paint"):
-                tray.sync_from_paint()
+            # The swatch lives on the dock's Materials panel, not on the
+            # dock itself.
+            panel = getattr(getattr(win, "tray", None), "materials", None)
+            if hasattr(panel, "sync_from_paint"):
+                panel.sync_from_paint()
             vp.update()
             # Optional, like the other viewport niceties this package uses:
             # the tool has to work against a bare viewport too.
@@ -274,6 +321,7 @@ class PaintTool(Tool):
                     flash(tr("{name} painted as a whole; a face that already "
                              "had its own material keeps it",
                              name=getattr(obj, "name", "") or tr("Group")))
+                self._remember_current(vp)
                 vp.update()
                 return
 
@@ -309,6 +357,7 @@ class PaintTool(Tool):
                 SetFaceBackCommand(faces, [self._back_material_for(f)
                                            for f in faces]),
             ]))
+            self._remember_current(vp)
             vp.update()
             return
         tag = SetFaceMaterialTagCommand(
@@ -337,7 +386,24 @@ class PaintTool(Tool):
                 opacity,
                 tag,
             ]))
+        self._remember_current(vp)
         vp.update()
+
+    @classmethod
+    def _remember_current(cls, vp=None) -> None:
+        """Put the material just painted at the head of ``recent`` and let
+        the tray know. The «Default» material is not one: painting with it
+        takes paint off."""
+        if cls.current_is_default:
+            return
+        before = cls.recent
+        cls.recent = push_recent(cls.recent, cls._current_as_material())
+        if cls.recent == before:
+            return
+        win = vp.window() if hasattr(vp, "window") else None
+        panel = getattr(getattr(win, "tray", None), "materials", None)
+        if hasattr(panel, "recent_materials_changed"):
+            panel.recent_materials_changed()
 
     @classmethod
     def _current_as_material(cls) -> dict:

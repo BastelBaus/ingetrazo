@@ -129,3 +129,17 @@ def _context_groups(scene):
     ctx = getattr(scene, "edit_group", None)
     return scene.groups if ctx is None else (getattr(ctx, "children", None)
                                              or [])
+
+
+def same_definition(scene, entities) -> list:
+    """Every component instance in the current context that shares its
+    definition with one of the selected components (Select ▸ All
+    Instances). Copies share the prototype mesh, so identity is the test —
+    no geometry is compared. Groups that only carry a matrix are not
+    components and match nothing."""
+    protos = {id(g.mesh) for g in entities
+              if _is_group(g) and g.is_component()}
+    if not protos:
+        return []
+    return [g for g in _context_groups(scene)
+            if g.is_component() and id(g.mesh) in protos]
