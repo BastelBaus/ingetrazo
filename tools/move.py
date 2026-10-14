@@ -58,7 +58,7 @@ def _dedup(positions: list[QVector3D]) -> list[QVector3D]:
         k = _key(p)
         if k not in seen:
             seen.add(k)
-            #out.append(QVector3D(p))
+            out.append(QVector3D(p))
             out.append(p)
     return out
 

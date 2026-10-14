@@ -1073,8 +1073,10 @@ class Mesh:
         self._chunk_dirty = True
         self._mut_serial += 1
         old = _key(v.position)
-        #v.position = v.position + delta # this changes ID, the other not!
-        v.position += delta 
+
+        v.position = v.position + delta # this changes ID, the other not!
+        #v.position += delta # TODO: this start to flickert !!!
+
         new = _key(v.position)
         if old == new:
             return
@@ -1090,8 +1092,8 @@ class Mesh:
         self._chunk_dirty = True
         self._mut_serial += 1
         old = _key(v.position)
-        v.position = QVector3D(position)
-        #v.position = position
+        #v.position = QVector3D(position)
+        v.position = position
         new = _key(v.position)
         if old == new:
             return
