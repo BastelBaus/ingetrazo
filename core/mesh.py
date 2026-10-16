@@ -1074,15 +1074,16 @@ class Mesh:
         self._mut_serial += 1
         old = _key(v.position)
 
-        v.position = v.position + delta # this changes ID, the other not!
-        #v.position += delta # TODO: this start to flickert !!!
+        #v.position = v.position + delta # this changes ID, the other not!
+        v.position += delta # TODO: this start to flickert !!!
+        new_v = Vertex(v.position)
 
         new = _key(v.position)
         if old == new:
             return
-        if self._registry.get(old) is v:
+        if self._registry.get(old) is new_v:
             del self._registry[old]
-        self._registry.setdefault(new, v)
+        self._registry.setdefault(new, new_v)
 
     def place_vertex(self, v: Vertex, position: QVector3D) -> None:
         """Put a vertex AT ``position`` -- :meth:`move_vertex` with an
@@ -1092,7 +1093,7 @@ class Mesh:
         self._chunk_dirty = True
         self._mut_serial += 1
         old = _key(v.position)
-        #v.position = QVector3D(position)
+        #v.position = QVector3D(position)  # BAUS
         v.position = position
         new = _key(v.position)
         if old == new:
