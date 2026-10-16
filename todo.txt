@@ -1,0 +1,13 @@
+BAUS:
+
+
+undo --> links lost !!
+
+select text
+
+z axis snapp dimension
+
+DimonesMoveTOol( dims parameter unused / wrongly used !!
+
+
+after fuixed dimenbsion, free again the lock !
