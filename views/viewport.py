@@ -416,6 +416,17 @@ EDIT_REST_MODES = ("normal", "fade", "hide")
 #: as the subject.
 EDIT_REST_FADE = 0.75
 
+
+def edit_fade_color(background) -> tuple:
+    """What the rest of the model fades TOWARDS while a group is edited: a
+    grey half way between the background and a neutral mid grey. Fading
+    to the background itself left white faces on a light background
+    looking the same as before — nothing said you were inside a group
+    («quiero que lo demás quede gris», 14-10). Towards this grey the rest
+    reads grey on a light background and dim on a dark one, and what is
+    being edited keeps its colours."""
+    return tuple(0.5 * float(c) + 0.5 * 0.55 for c in list(background)[:3])
+
 #: X-ray: how opaque each translucent face layer is. Layers stack, so a face
 #: seen through another reads darker and an opening (no face) stays clear.
 XRAY_FACE_OPACITY = 0.6
@@ -1596,10 +1607,11 @@ class Viewport(QOpenGLWidget):
                   and getattr(self, "_edit_split_f", None) is not None)
         split_f = self._edit_split_f if fading else None
         split_e = self._edit_split_e if fading else None
-        if fading:
-            bg = style.background
+        if self.scene.edit_group is not None:
+            # One colour for every faded pass (loose, grouped, instanced).
             self._program.setUniformValue(
-                self._loc_fade_color, QVector3D(bg[0], bg[1], bg[2]))
+                self._loc_fade_color, QVector3D(*edit_fade_color(
+                    style.background)))
         spans = getattr(self, "_face_spans", None)
         if spans:
             face_spans, culled_fv = self._visible_spans(spans, planes, split_f)
@@ -2497,9 +2509,13 @@ class Viewport(QOpenGLWidget):
             # cache on every drag frame (81 ms a frame instead of 56).
             serial = (getattr(m, "_mut_serial", None)
                       if m is not None and m is not loose else None)
+            # ``locked`` too: the pick block lists a group as selectable or
+            # not, and a padlock that did not re-key it left the group
+            # movable and openable from the view.
             parts.append((id(g), id(m), serial,
                           tuple(xf.data()) if xf is not None else None,
                           g.layer, bool(g.billboard), bool(g.hidden),
+                          bool(getattr(g, "locked", False)),
                           _material_sig(getattr(g, "material", None))))
             for c in (g.children or ()):
                 walk(c)
@@ -7501,8 +7517,10 @@ class Viewport(QOpenGLWidget):
         # The same colours and words as the snap markers: a corner is the
         # endpoint green, an edge the on-edge red, a face the on-face blue
         # — the classic cue says "On edge" while you push level with one.
-        from core.snap import COLOR_ENDPOINT, COLOR_ON_EDGE, COLOR_ON_FACE
+        from core.snap import (COLOR_ENDPOINT, COLOR_ON_EDGE, COLOR_ON_FACE,
+                               COLOR_ORIGIN)
         palette = {
+            "origin": (COLOR_ORIGIN, "origin"),
             "edge": (COLOR_ON_EDGE, "on_edge"),
             "face": (COLOR_ON_FACE, "on_face"),
             "guide_line": (COLOR_ON_EDGE, "on_line"),
@@ -7690,9 +7708,22 @@ class Viewport(QOpenGLWidget):
         if not ok:
             return None, None
         p_near = inv.map(QVector3D(ndc_x, ndc_y, -1.0))
-        p_far = inv.map(QVector3D(ndc_x, ndc_y, 1.0))
-        direction = p_far - p_near
-        if direction.length() < 1e-9:
+
+        def finite(v):
+            return all(map(math.isfinite, (v.x(), v.y(), v.z())))
+        # The far plane gives the most exact direction, far from the near
+        # point. But a camera a few centimetres from a part (#583) has its
+        # near plane 0.4 mm out and the far one kilometres away: past
+        # float32 the depth term rounds to exactly -1, the far plane goes
+        # to infinity, and the ray came out NaN — and with it every snap
+        # built on the cursor. Then a point just short of it serves.
+        direction = None
+        for depth in (1.0, 0.999, 0.9, 0.0):
+            d = inv.map(QVector3D(ndc_x, ndc_y, depth)) - p_near
+            if finite(d) and d.length() >= 1e-9:
+                direction = d
+                break
+        if direction is None or not finite(p_near):
             return None, None
         return p_near, direction.normalized()
 
@@ -7766,6 +7797,72 @@ class Viewport(QOpenGLWidget):
         plane = getattr(self, "_last_work_plane", None)
         return plane[1] if plane is not None else None
 
+    @staticmethod
+    def _same_plane(a, b, tol: float = 1e-6) -> bool:
+        """Whether the ``(point, normal)`` planes ``a`` and ``b`` are the
+        same plane: parallel normals AND the same offset — two opposite
+        walls are parallel and are not the same plane."""
+        na = QVector3D(a[1]).normalized()
+        nb = QVector3D(b[1]).normalized()
+        if abs(QVector3D.dotProduct(na, nb)) < 1e-3:
+            return False
+        return abs(QVector3D.dotProduct(QVector3D(b[0]) - QVector3D(a[0]),
+                                        na)) < tol
+
+    def _planar_face_plane(self, tool, cursor, captured=None, face_plane=None):
+        """The plane of the face under the cursor when a PLANAR shape is
+        being drawn over one that is not its captured plane, else ``None``.
+
+        A rectangle, circle, polygon or arc lives in ONE plane, and its
+        first click captures the plane of the face it started on — the
+        viewport sets ``tool.work_plane`` and the tool lays its geometry
+        out there (``PlaneLock.drawing_plane``). A capture, though, also
+        FROZE the shape: moving the cursor onto another face left the point
+        and the preview on the captured plane while the badge went on
+        reading «On face» — @pacaeiro, #545: «se eu coloco o rato
+        directamente na face diz (on face), mas o plano permanece
+        imutável». A rectangle started on the top vertex of a cube and
+        drawn over its front face was the plain case: the cursor's point
+        stayed up on the horizontal plane through that vertex.
+
+        An EDGE off the plane already re-planned the shape, through the
+        tool's ``snapped_plane``, because its point comes off the plane; a
+        face did not, because the axis inference answered with a camera
+        plane while the status bar named the face. The face the cursor is
+        over is the same bargain and the plainer one: it is what the cursor
+        points at and what the badge names, so the shape lands on it.
+
+        A snap that names a POINT of the model (``core.snap.
+        POINT_SNAP_KINDS``) is not this bargain and is not decided here:
+        the user aimed at that point, not at the face it happens to lie
+        on, and the tool re-plans onto it through ``PlaneLock.
+        snapped_plane`` — which is where the face's claim is settled too
+        (``Tool.snap_kind``). Here the viewport only reads which face the
+        cursor is over.
+
+        ``None`` keeps the caller's plane: no cursor, no face under it, the
+        face the shape started on (``captured``), a tool that is not a
+        planar shape (a LINE keeps its chain coplanar with the face it was
+        started on), the arrows already locking a direction (anywhere else
+        in here a locked direction leaves the plane where it was), or the
+        user's own plane lock — ``plane_lock`` / the magenta ``plane_ref`` —
+        which never yields."""
+        if cursor is None or tool is None or self.axis_lock is not None:
+            return None
+        if (getattr(tool, "plane_lock", None) is not None
+                or getattr(tool, "plane_ref", None) is not None):
+            return None
+        from tools.base import PlaneLock
+        if not isinstance(tool, PlaneLock):
+            return None
+        if face_plane is None:
+            face_plane = self._hover_face_plane(cursor)
+        if face_plane is None:
+            return None
+        if captured is not None and self._same_plane(captured, face_plane):
+            return None        # the face it started on: nothing to re-plan
+        return face_plane
+
     def _ray_plane(self, origin: QVector3D, direction: QVector3D,
                    plane_point: QVector3D, plane_normal: QVector3D
                    ) -> Optional[QVector3D]:
@@ -7795,7 +7892,11 @@ class Viewport(QOpenGLWidget):
         """Return ``(point, normal)`` of the current drawing plane.
 
         Priority: tool-captured plane > camera-aware plane through the active
-        ``start_point`` > face under cursor (face-plane inference) > ground.
+        ``start_point`` > face under cursor (face-plane inference) > ground —
+        except that a PLANAR shape re-plans onto the face the cursor is over,
+        capture or not (#545, see :meth:`_planar_face_plane`). A shape lives
+        in ONE plane, and the face the cursor is over is the one the user
+        means.
         """
         tool = self.active_tool
         if tool is not None:
@@ -7809,6 +7910,15 @@ class Viewport(QOpenGLWidget):
                 return own
         captured = getattr(tool, "work_plane", None) if tool is not None else None
         if captured is not None:
+            # (#545) A planar shape re-plans onto the face the cursor is
+            # over, and takes its capture with it: the preview (drawn on the
+            # tool's own plane, ``PlaneLock.drawing_plane``) and the point
+            # would otherwise sit on two different planes — and that split
+            # IS the bug. ``_planar_face_plane`` holds the whole argument.
+            face_plane = self._planar_face_plane(tool, cursor, captured)
+            if face_plane is not None:
+                tool.work_plane = face_plane
+                return face_plane
             # The escape hatch: orbiting down to the horizon means "I
             # want to draw UPWARD now". A first click on a horizontal face
             # (the ground, a slab) captures its plane and would pin the whole
@@ -7874,6 +7984,33 @@ class Viewport(QOpenGLWidget):
             # (already vacated) faces.
             fp = self._hover_face_plane(cursor)
             if fp is not None:
+                from tools.base import PlaneLock
+                if isinstance(tool, PlaneLock):
+                    # A PLANAR shape does not get the axis escape below
+                    # (#545, @pacaeiro: «se eu coloco o rato directamente
+                    # na face diz (on face), mas o plano permanece
+                    # imutável»). An EDGE already re-planned the shape,
+                    # through ``snapped_plane``, because its point comes
+                    # off the plane; a face did not, because the axis
+                    # inference handed back the camera plane through the
+                    # first corner while the status bar went on reading
+                    # «On face» — and the shape's own axes had already
+                    # taken the wall's, so the preview and the point sat
+                    # on two different planes. A rectangle started on the
+                    # top vertex of a cube was the plain case: over the
+                    # front face the point came back at (2.00, -1.20,
+                    # 2.00), the horizontal plane through that vertex.
+                    # The point the cursor is over is the one the user
+                    # means: a shape lives in ONE plane, so the face wins
+                    # outright. The arrows and the Down reference never
+                    # reach this branch — a lock is captured as the
+                    # tool's ``work_plane`` by the first click and
+                    # returned above. A line drawn straight up over a
+                    # slab is not a PlaneLock and keeps rising. A snap
+                    # that names a POINT of the model is not this case
+                    # either: ``PlaneLock.snapped_plane`` re-plans the
+                    # shape onto the point (``Tool.snap_kind``).
+                    return fp
                 cand = self._ray_hit_plane(cursor, base)
                 angle = (getattr(tool, "magnetic_axis_deg", None)
                          or self.inference_angle_deg)
@@ -7893,13 +8030,20 @@ class Viewport(QOpenGLWidget):
         return not (grp is None and callable(moving) and id(face) in moving())
 
     def _hover_face_plane(self, cursor):
-        """World plane of an unselected face under the cursor, or None."""
+        """World plane of the face under the cursor, or None.
+
+        Selected geometry remains a valid plane target for planar drawing
+        tools; other tools must not land on geometry they are moving.
+        """
         face, grp = self.pick_face_placement(cursor[0], cursor[1])
         if face is None:
             return None
         sel = self.scene.selection
         owner = self._owner_of(grp) if grp is not None else None
-        if (owner is not None and owner in sel) or (grp is None and face in sel):
+        from tools.base import PlaneLock
+        if (not isinstance(self.active_tool, PlaneLock)
+                and ((owner is not None and owner in sel)
+                     or (grp is None and face in sel))):
             return None
         if grp is None:
             # A face the drag is bending (one corner on a grabbed vertex)
@@ -11754,7 +11898,15 @@ class Viewport(QOpenGLWidget):
         """Enter a group for editing (double-click-into-group). A
         component instance opens on a world copy of its definition; the
         session's commands are remembered so leaving can fold them into ONE
-        undoable share-back."""
+        undoable share-back.
+
+        A locked group (the Browser's padlock), or one inside a locked
+        group, does not open — whichever road asks: a double-click, the
+        right-click's Edit Group or a part clicked in the Parts tab."""
+        from core.outliner import locked_on_path
+        if locked_on_path(self.scene.groups, group):
+            self.flash_status(tr("Unlock it first"), 3000)
+            return
         parent = self.scene.edit_group
         in_definition = (parent is not None
                          and group in (getattr(parent, "children", None) or ())
@@ -12220,6 +12372,13 @@ class Viewport(QOpenGLWidget):
                 ev.position().x(), ev.position().y())
         ctx = self._build_ctx(ev)
         if ctx is not None:
+            # The tool hears the cursor's snap KIND before it is called, as on
+            # every hover (``_note_snap``): a click that never had its own
+            # hover would otherwise leave a stale — or absent — kind in the
+            # tool, and ``PlaneLock.snapped_plane`` decides with it whether
+            # the shape re-plans onto the clicked point (#37) or stays on the
+            # face under the cursor (#545).
+            self._note_snap(ctx.snap)
             _before = len(self.history.undo_stack)
             if double:
                 self.active_tool.on_double_click(ctx)
@@ -12602,7 +12761,7 @@ class Viewport(QOpenGLWidget):
         _hmark("ctx")
         if ctx is None:
             return
-        self.last_snap = ctx.snap
+        self._note_snap(ctx.snap)
         if self.active_tool.uses_snap:
             # Encouraging: the point the snap already found — no extra pick
             # per hover. A circle's rim encourages its CENTRE (found by the
@@ -12939,7 +13098,12 @@ class Viewport(QOpenGLWidget):
                 self.active_tool.on_key(self, ev.key(), ev.modifiers())
             return
         # 0. Shift state change → refresh snap immediately so the user sees
-        #    the contextual lock take effect without moving the mouse.
+        #the contextual lock take effect without moving the mouse.
+        if ev.key() == Qt.Key_Down and not ev.isAutoRepeat():
+            # A Down press takes the plane over from a held Shift (see
+            # _mark_plane_for_shift): what the user locks with it now
+            # outlives the key, so the Shift release must not undo it.
+            self._shift_plane_mark = None
         if ev.key() == Qt.Key_Shift and not ev.isAutoRepeat():
             self._capture_shift_lock()
             self._refresh_snap()
@@ -13239,8 +13403,12 @@ class Viewport(QOpenGLWidget):
         p = self._last_mouse_pos.toPoint()
         snap = self._snap_at(p.x(), p.y(), modifiers)
         if snap is None:
-            return
-        self.last_snap = snap
+            return                              # the ray casts no world point
+        # Same bookkeeping as a hover with movement: the tool reads the KIND
+        # of the snap it is being handed (``_note_snap``), and a modifier
+        # changing with the hand still is exactly when a planar shape has to
+        # know whether the cursor is on a FACE or on a point of the model.
+        self._note_snap(snap)
         ctx = ToolContext(
             viewport=self,
             world=snap.point,
@@ -13309,6 +13477,7 @@ class Viewport(QOpenGLWidget):
                 return
         if ev.key() == Qt.Key_Shift and not ev.isAutoRepeat():
             self._shift_lock = None
+            self._release_shift_plane_mark()
             self._refresh_snap()
         super().keyReleaseEvent(ev)
 
@@ -13318,6 +13487,7 @@ class Viewport(QOpenGLWidget):
         self._alt_tap = False
         self._alt_down = False        # its release will not reach us either
         self._ctrl_alone = False      # nor will Ctrl's
+        self._release_shift_plane_mark()   # nor Shift's: unmark the plane
         # Nor will the release of a held walking key (First Person).
         lost = getattr(self.active_tool, "on_focus_out", None)
         if callable(lost):
@@ -13331,9 +13501,14 @@ class Viewport(QOpenGLWidget):
     })
 
     def _capture_shift_lock(self) -> None:
-        """On Shift press, freeze the active inference's direction so it holds
-        even as the cursor wanders off it (inference lock)."""
+        """On Shift press, mark the plane the shape is drawing on and freeze
+        the active inference's direction so it holds even as the cursor
+        wanders off it (inference lock). Both at once, one does not take
+        the other's place: the mark only says WHICH plane, and the pointer
+        goes on marking midpoints, endpoints and alignments (Marco: «100%
+        aditivo»). Each side keeps its own guard."""
         self._shift_lock = None
+        self._mark_plane_for_shift()
         snap = self.last_snap
         tool = self.active_tool
         start = getattr(tool, "start_point", None) if tool is not None else None
@@ -13349,6 +13524,33 @@ class Viewport(QOpenGLWidget):
             d = snap.point - start
         if d.length() > 1e-6:
             self._shift_lock = (d.normalized(), snap.color)
+
+    def _mark_plane_for_shift(self) -> None:
+        """Shift marks the plane the shape would draw on — the tool's call
+        (``PlaneLock.mark_plane``). Unlike the inference lock above this is
+        HELD, not locked: the release hands the plane back
+        (``_release_shift_plane_mark``)."""
+        self._shift_plane_mark = None
+        tool = self.active_tool
+        if tool is None:
+            return
+        from tools.base import PlaneLock
+        if not isinstance(tool, PlaneLock):
+            return
+        if tool.mark_plane(self):
+            self._shift_plane_mark = tool
+
+    def _release_shift_plane_mark(self) -> None:
+        """Shift let go (or the window lost focus): hand the plane back.
+        Only the mark that Shift itself put there goes — a plane locked with
+        an arrow or with Down in the meantime outlives the key."""
+        tool = getattr(self, "_shift_plane_mark", None)
+        self._shift_plane_mark = None
+        if tool is None:
+            return
+        ref = getattr(tool, "plane_ref", None)
+        if ref is not None and ref[1] == "plane":
+            tool.plane_ref = None
 
     # ---- Numeric value buffer (VCB-style) ----------------------------------
     def _handle_value_key(self, ev) -> bool:
@@ -13456,9 +13658,20 @@ class Viewport(QOpenGLWidget):
             # typed length must drop the lock exactly like the second click.
             history = getattr(self, "history", None)
             _before = len(history.undo_stack) if history is not None else 0
+            typed = self._value_buffer
             self.active_tool.on_value(self, value)
             _drew = history is not None and len(history.undo_stack) > _before
             self._set_value_buffer("")
+            # The box falls back to the live reading, which only refreshes on
+            # a mouse move: it went on showing the preview from BEFORE the
+            # Enter, as if the typed size had been ignored (#607). What was
+            # drawn is what was typed, read as the canvas showed it. Nothing
+            # drawn: the preview the box shows is still the live one.
+            if _drew:
+                unitless = getattr(self.active_tool, "value_is_unitless", None)
+                self.measurementChanged.emit(
+                    typed if callable(unitless) and unitless()
+                    else _typed_value_text(typed))
             self._release_axis_lock_after_operation(committed=_drew)
             return True
 
@@ -13535,11 +13748,23 @@ class Viewport(QOpenGLWidget):
                 tail = self._current_token_tail()
                 if not tail or ":" in self._value_buffer:
                     return True
-            # Forbid two decimal separators in the current numeric token.
+            # A second decimal separator in the current numeric token: a
+            # "." is dropped, a "," starts the next value (#598) — dropping
+            # it turned «0.9,2.1» into 0.921.
             if text in (".", ","):
                 tail = self._current_token_tail()
+                comma_fields = (
+                    getattr(self.active_tool, "vcb_comma_lists", False)
+                    and ";" not in self._value_buffer
+                    and " " not in self._value_buffer)
+                if comma_fields:
+                    # Every comma separates a field here (#152).
+                    tail = tail.rsplit(",", 1)[-1]
                 if "." in tail or "," in tail:
-                    return True
+                    if text == ".":
+                        return True
+                    if not comma_fields:
+                        text = ";"
             self._set_value_buffer(self._value_buffer + text)
             return True
 
@@ -13703,3 +13928,20 @@ class Viewport(QOpenGLWidget):
             modifiers=ev.modifiers(),
             snap=snap,
         )
+
+    def _note_snap(self, snap: SnapResult) -> None:
+        """Record the cursor's snap and hand its KIND to the active tool
+        (``Tool.snap_kind``).
+
+        The kind is known only once the snap has been computed — the plane
+        comes first, the point and its snap second — so a planar tool
+        asking the viewport which face the cursor is over cannot be told
+        whether the cursor is on that face as a FACE or snapped to a point
+        that merely lies on it. The tool hears it here, on every hover and
+        click, before it is called: that is where ``PlaneLock.
+        snapped_plane`` decides whether the shape re-plans onto a point
+        (#37) or stays on the face under the cursor (#545)."""
+        self.last_snap = snap
+        tool = self.active_tool
+        if tool is not None:
+            tool.snap_kind = getattr(snap, "kind", None)

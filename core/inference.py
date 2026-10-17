@@ -42,6 +42,18 @@ def _no_snap_fast() -> bool:
     return bool(getattr(_viewport, "_NO_SNAP_FAST", False))
 
 
+def _magnet_may_leave_plane(tool) -> bool:
+    """Whether ``tool``'s axis magnet may infer OFF its drawing plane.
+
+    Only the tools that carry a magnet have an opinion
+    (``tools.base.AxisMagnet.magnet_off_plane``: a shape that lives in one
+    plane says no, a Line and the free placements say yes); a tool with no
+    magnet never runs the detector, so the default leaves the rules exactly
+    as they were."""
+    rule = getattr(tool, "magnet_off_plane", None)
+    return bool(rule()) if callable(rule) else True
+
+
 class InferenceEngine:
     """Snap-target state the viewport keeps between moves.
 
@@ -194,6 +206,7 @@ class InferenceEngine:
             linear_mode=vp.linear_inference_mode,
             work_plane_normal=vp._work_plane_normal(),
             radial_arm=bool(getattr(tool, "radial_arm", False)),
+            axis_in_plane=not _magnet_may_leave_plane(tool),
         )
         snap = self._axis_source_cue(snap, px_x, px_y)
         snap = self._extension_snap(snap, px_x, px_y)

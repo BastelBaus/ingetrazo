@@ -17,17 +17,21 @@ pattern); Cancel touches nothing.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import QSettings
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
     QLineEdit,
     QMessageBox,
+    QPushButton,
     QSpinBox,
     QTabWidget,
     QLabel,
@@ -152,6 +156,7 @@ class PreferencesDialog(QDialog):
         self._scale_figure.setChecked(
             str(st.value("new_document/scale_figure", "1")) != "0")
         form.addRow("", self._scale_figure)
+        self._build_figure_rows(form, st)
 
         self._invert = QCheckBox(tr("Invert mouse wheel zoom"))
         self._invert.setChecked(str(st.value("nav/invert_wheel", "0"))
@@ -376,6 +381,133 @@ class PreferencesDialog(QDialog):
         self._shortcuts.pick(action)
 
     # ---- Apply --------------------------------------------------------------
+    # ---- Scale figure of new documents (#655) ----------------------------
+
+    def _build_figure_rows(self, form, st) -> None:
+        """Which person stands in a new document: one of the bundled cutouts
+        or the user's own picture (a PNG on a transparent background, and
+        the height that person stands)."""
+        from core import scale_figure as sf
+        self._figure = QComboBox()
+        for p in sf.people():
+            icon = QIcon(str(sf.people_dir() / f"{p['key']}.png"))
+            self._figure.addItem(
+                icon, f"{tr(p['name'])} ({float(p['height']):.2f} m)",
+                p["key"])
+        self._figure.addItem(tr("My own picture…"), sf.CUSTOM)
+        pick = str(st.value(sf.KEY_PICK, sf.DEFAULT_PICK) or sf.DEFAULT_PICK)
+        self._figure.setCurrentIndex(max(0, self._figure.findData(pick)))
+        form.addRow(tr("Scale figure:"), self._figure)
+
+        # The user's own picture: what is stored, a new file only once OK
+        # copies it into the data folder (Cancel leaves nothing behind).
+        image = str(st.value(sf.KEY_IMAGE, "") or "")
+        self._figure_image = image if Path(image).is_file() else ""
+        self._figure_source = ""
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self._figure_pick_btn = QPushButton(tr("Choose picture…"))
+        self._figure_pick_btn.clicked.connect(self._choose_figure_picture)
+        self._figure_height = QDoubleSpinBox()
+        self._figure_height.setRange(sf.MIN_HEIGHT, sf.MAX_HEIGHT)
+        self._figure_height.setDecimals(2)
+        self._figure_height.setSingleStep(0.01)
+        self._figure_height.setSuffix(" m")
+        self._figure_height.setToolTip(tr("The height this person stands"))
+        try:
+            self._figure_height.setValue(float(st.value(sf.KEY_HEIGHT, 1.70)))
+        except (TypeError, ValueError):
+            self._figure_height.setValue(1.70)
+        self._figure_name = QLineEdit(str(st.value(sf.KEY_NAME, "") or ""))
+        self._figure_name.setPlaceholderText(tr("Name"))
+        lay.addWidget(self._figure_pick_btn)
+        lay.addWidget(self._figure_height)
+        lay.addWidget(self._figure_name, 1)
+        self._figure_custom_row = row
+        form.addRow("", row)
+        self._figure_file_label = QLabel()
+        self._figure_file_label.setWordWrap(True)
+        form.addRow("", self._figure_file_label)
+
+        self._figure.currentIndexChanged.connect(self._on_figure_pick)
+        self._scale_figure.toggled.connect(self._sync_figure_rows)
+        self._figure_last = self._figure.currentIndex()
+        self._sync_figure_rows()
+
+    def _figure_is_custom(self) -> bool:
+        from core import scale_figure as sf
+        return self._figure.currentData() == sf.CUSTOM
+
+    def _sync_figure_rows(self) -> None:
+        on = self._scale_figure.isChecked()
+        custom = self._figure_is_custom()
+        self._figure.setEnabled(on)
+        self._figure_custom_row.setVisible(custom)
+        self._figure_custom_row.setEnabled(on)
+        shown = self._figure_source or self._figure_image
+        self._figure_file_label.setVisible(custom and bool(shown))
+        if shown:
+            self._figure_file_label.setText(
+                "<small>" + Path(shown).name + "</small>")
+
+    def _on_figure_pick(self, _index: int) -> None:
+        # «My own picture…» with none chosen yet asks for one at once; a
+        # cancelled dialog goes back to the person shown before.
+        if (self._figure_is_custom() and not self._figure_image
+                and not self._figure_source
+                and not self._choose_figure_picture()):
+            self._figure.blockSignals(True)
+            self._figure.setCurrentIndex(self._figure_last)
+            self._figure.blockSignals(False)
+        self._figure_last = self._figure.currentIndex()
+        self._sync_figure_rows()
+
+    def _choose_figure_picture(self) -> bool:
+        from views.filedialogs import file_dialogs as fd
+        path, _ = fd.getOpenFileName(
+            self, tr("Choose the picture of your scale figure"), "",
+            tr("Images") + " (*.png *.webp);;" + tr("All files") + " (*)")
+        if not path:
+            return False
+        from PySide6.QtGui import QImage
+        img = QImage(path)
+        if img.isNull() or img.height() == 0:
+            QMessageBox.warning(self, tr("Scale figure"),
+                                tr("That file is not a picture IngeTrazo can read."))
+            return False
+        if not img.hasAlphaChannel():
+            QMessageBox.information(
+                self, tr("Scale figure"),
+                tr("This picture has no transparent background, so it will "
+                   "show as a rectangle. A PNG cut out around the person "
+                   "looks best."))
+        self._figure_source = path
+        if not self._figure_name.text().strip():
+            self._figure_name.setText(Path(path).stem.replace("_", " "))
+        self._sync_figure_rows()
+        return True
+
+    def _save_figure(self, st) -> None:
+        from core import scale_figure as sf
+        pick = self._figure.currentData()
+        if pick == sf.CUSTOM and self._figure_source:
+            try:
+                self._figure_image = str(sf.store_picture(self._figure_source))
+            except (OSError, ValueError):
+                QMessageBox.warning(
+                    self, tr("Scale figure"),
+                    tr("The picture could not be copied; the previous "
+                       "figure is kept."))
+                return
+        if pick == sf.CUSTOM and not self._figure_image:
+            return
+        st.setValue(sf.KEY_PICK, pick)
+        if pick == sf.CUSTOM:
+            st.setValue(sf.KEY_IMAGE, self._figure_image)
+            st.setValue(sf.KEY_HEIGHT, round(self._figure_height.value(), 3))
+            st.setValue(sf.KEY_NAME, self._figure_name.text().strip())
+
     def accept(self) -> None:  # noqa: D102 — QDialog override
         st = QSettings()
 
@@ -438,6 +570,7 @@ class PreferencesDialog(QDialog):
                     "1" if self._ask_section.isChecked() else "0")
         st.setValue("new_document/scale_figure",
                     "1" if self._scale_figure.isChecked() else "0")
+        self._save_figure(st)
         _gs.set_value("undo_steps", int(self._undo_steps.value()), st)
         history = getattr(getattr(self._window, "viewport", None), "history", None)
         if history is not None:

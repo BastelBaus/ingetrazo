@@ -7,7 +7,7 @@ import json
 import zipfile
 
 import pytest
-from PySide6.QtCore import QBuffer, QEventLoop, QIODevice, QTimer
+from PySide6.QtCore import QBuffer, QEventLoop, QIODevice, QObject, QTimer, Signal
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -1019,6 +1019,84 @@ def test_building_the_manager_never_shows_a_stray_window(tmp_path, monkeypatch):
         assert repository.isVisible()
         assert dialog._pages["browse"]["reviewed"].isVisible()
         assert not dialog._pages["installed"]["reviewed"].isVisibleTo(dialog)
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        app.processEvents()
+
+
+class _FakeReply(QObject):
+    finished = Signal()
+
+    def __init__(self, data: bytes, ok: bool):
+        super().__init__()
+        self._data, self._ok = data, ok
+        QTimer.singleShot(0, self.finished.emit)
+
+    def readAll(self):            # noqa: N802 — Qt's name
+        return self._data
+
+    def attribute(self, _what):
+        return 200 if self._ok else None
+
+    def error(self):
+        from PySide6.QtNetwork import QNetworkReply
+        return (QNetworkReply.NetworkError.NoError if self._ok
+                else QNetworkReply.NetworkError.HostNotFoundError)
+
+    def errorString(self):        # noqa: N802 — Qt's name
+        return "" if self._ok else "host not found"
+
+
+class _FakeNetwork:
+    """GitHub fails, the website answers — and every URL asked is kept."""
+
+    def __init__(self, png: bytes):
+        self.png, self.urls = png, []
+
+    def get(self, request):
+        url = request.url().toString()
+        self.urls.append(url)
+        return _FakeReply(self.png, "ingetrazo.com" in url)
+
+
+def test_a_screenshot_that_failed_is_asked_again_from_the_website(
+        tmp_path, monkeypatch):
+    """Caza 2 (16-10): a screenshot whose download failed once stayed
+    «Preview unavailable» until the list was scrolled; the website, which
+    serves the same files through its own cache, showed them all."""
+    from PySide6.QtCore import QByteArray
+    app = QApplication.instance() or QApplication([])
+    from views import extension_manager_dialog as dialog_module
+    extension = manager.Extension(**{
+        **_extension(b"one", "with_shot").__dict__,
+        "screenshot": "with_shot.png"})
+    _stub_catalog(monkeypatch, dialog_module, [extension])
+    monkeypatch.setattr(manager, "user_plugins_dir", lambda: tmp_path)
+    monkeypatch.setattr(dialog_module.QStandardPaths, "writableLocation",
+                        lambda _location: str(tmp_path / "data"))
+    monkeypatch.setattr(dialog_module, "_SCREENSHOT_RETRY_MS", 10)
+    pixmap = QPixmap(64, 40)
+    pixmap.fill(QColor("red"))
+    raw = QByteArray()
+    buf = QBuffer(raw)
+    buf.open(QIODevice.WriteOnly)
+    pixmap.save(buf, "PNG")
+    network = _FakeNetwork(bytes(raw))
+    dialog = dialog_module.ExtensionManagerDialog()
+    dialog._network = network
+    try:
+        _wait_for_catalog(dialog, app)
+        dialog.resize(1180, 800)
+        dialog.show()
+        loop = QEventLoop()
+        QTimer.singleShot(500, loop.quit)
+        loop.exec()
+        assert "with_shot" in dialog._screenshots       # without scrolling
+        assert "raw.githubusercontent.com" in network.urls[0]
+        assert network.urls[1].startswith(dialog_module._SCREENSHOT_MIRROR)
+        assert (tmp_path / "data" / "extension-screenshots"
+                / "with_shot.png").is_file()            # cached for next time
     finally:
         dialog.close()
         dialog.deleteLater()

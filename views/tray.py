@@ -1167,13 +1167,16 @@ class ComponentsPanel(QWidget):
     def _components_in_model(self) -> list:
         """``[(name, faces, [groups], template)]`` per distinct prototype,
         most copies first. Instances share their prototype mesh, so identity
-        groups them — no geometry is walked. ``template`` is the definition
+        groups them — no geometry is walked. Copies nested inside groups
+        count too: one put into a group from the Browser used to drop off
+        the list (#599, @chakkreetiya). ``template`` is the definition
         kept in the file (``None`` when it is not kept); a kept one with no
         copy placed is a row too, with an empty list."""
         from core.kept_components import kept_template
+        from core.purge import iter_groups
         scene = self._window.viewport.scene
         by_proto: dict = {}
-        for g in scene.groups:
+        for g in iter_groups(scene.groups):
             if not g.is_component() or getattr(g, "billboard", False):
                 continue
             by_proto.setdefault(id(g.mesh), []).append(g)
@@ -1235,10 +1238,27 @@ class ComponentsPanel(QWidget):
             self._in_model.addItem(item)
         if self._in_model.count() == 0:
             self._in_model.addItem(QListWidgetItem(tr("No components yet")))
+        self._mark_selected_row()
         self._in_model_filter.setVisible(
             self._in_model.count() >= self.FILTER_FROM
             or bool(self._in_model_filter.text()))
         self._apply_in_model_filter()
+
+    def _mark_selected_row(self) -> None:
+        """Light the row whose instances are what the model has selected.
+
+        A click on a row selects its instances, the selection bumps the
+        scene, and the refresh that follows rebuilt the list -- the row lit
+        for a fraction of a second and went dark (#636). Read from the
+        selection, the highlight also goes when the selection does."""
+        selected = {id(e) for e in self._window.viewport.scene.selection}
+        for i in range(self._in_model.count()):
+            item = self._in_model.item(i)
+            groups = item.data(Qt.UserRole) or []
+            if selected and {id(g) for g in groups} == selected:
+                self._in_model.setCurrentItem(item)
+                return
+        self._in_model.setCurrentItem(None)
 
     def _apply_in_model_filter(self, _text=None) -> None:
         """Hide the rows whose name does not hold the filter text (any
@@ -1320,13 +1340,40 @@ class ComponentsPanel(QWidget):
         menu.exec(self._in_model.viewport().mapToGlobal(pos))
 
     def _select_groups(self, groups) -> None:
-        scene = self._window.viewport.scene
+        """Select the copies. The view selects inside ONE open group, so
+        when they sit in several, the group holding most of them opens (the
+        one already open wins a tie, then the first in the model) and those
+        are selected; the status bar says how many are left elsewhere."""
+        from core import outliner
+        from views.outliner import open_to
+        vp = self._window.viewport
+        scene = vp.scene
+        by_path: dict = {}
+        for g in groups:
+            path = outliner.path_to(scene.groups, g)
+            if path is not None:
+                by_path.setdefault(tuple(id(p) for p in path),
+                                   (path, []))[1].append(g)
+        if not by_path:
+            return
+        here = tuple(id(p) for p in outliner.open_path(scene))
+        path, picks = max(by_path.values(), key=lambda pg: (
+            len(pg[1]), tuple(id(p) for p in pg[0]) == here))
+        if not open_to(vp, path):
+            vp.flash_status(tr(
+                "A group around it is hidden or locked: show or unlock "
+                "it to select inside"), 3500)
+            return
+        others = len(groups) - len(picks)
+        picks = [g for g in picks if scene.entity_selectable(g)]
         scene.selection.clear()
-        scene.selection.update(groups)
+        scene.selection.update(picks)
         scene.bump_view()
-        self._window.viewport.update()
+        vp.update()
         self._window.statusBar().showMessage(
-            tr("{n} entities selected", n=len(groups)), 2500)
+            tr("{n} entities selected", n=len(picks)) if not others
+            else tr("{n} copies selected; {m} more are inside other groups",
+                    n=len(picks), m=others), 4000)
 
 
 class PartsPanel(QWidget):
@@ -1658,6 +1705,8 @@ class PartsPanel(QWidget):
         parts = [p for p in parts if p is not None and not p.hidden] or [part]
         if scene.edit_group is not cont:
             vp.begin_group_edit(cont)
+            if scene.edit_group is not cont:
+                return                      # locked: it did not open
         scene.selection.clear()
         scene.selection.update(parts)
         # Clicked here, so already in view: the refresh this triggers must
@@ -3366,6 +3415,9 @@ class EntityInfoPanel(QWidget):
             tr("{n} entities moved to '{layer}'", n=len(targets), layer=name),
             2500)
 
+    #: Past this many selected entities the totals are left out (#274).
+    TOTALS_UP_TO = 20000
+
     def _describe(self, sel: list) -> str:
         if not sel:
             return tr("Nothing selected")
@@ -3416,7 +3468,19 @@ class EntityInfoPanel(QWidget):
             elif isinstance(e, Group):
                 counts["groups"] += 1
         parts = [f"{n} {tr(k)}" for k, n in counts.items() if n]
-        return f"<b>{tr('Selection')}</b><br>" + ", ".join(parts)
+        text = f"<b>{tr('Selection')}</b><br>" + ", ".join(parts)
+        # The usual totals of a multiple selection: the faces' area and the
+        # edges' length (#274) -- skipped past a size where summing them on
+        # every selection change would slow the panel down.
+        if len(sel) <= self.TOTALS_UP_TO:
+            if counts["faces"]:
+                area = sum(e.area() for e in sel if isinstance(e, Face))
+                text += f"<br>{tr('Area')}: {fmt_area(area)}"
+            if counts["edges"]:
+                length = sum((e.b - e.a).length() for e in sel
+                             if isinstance(e, Edge))
+                text += f"<br>{tr('Length')}: {fmt_len(length)}"
+        return text
 
     def _solid_volume(self, group):
         """Cached per scene version: the panel refreshes on every change and
@@ -3776,8 +3840,17 @@ class ScenesPanel(QWidget):
         hint.setStyleSheet("color: gray;")
         lay.addWidget(hint)
         self.list = QListWidget()
+        # Ctrl/Shift+click picks several scenes; − or Delete removes them
+        # all in one undo step (#280).
+        self.list.setSelectionMode(QListWidget.ExtendedSelection)
         self.list.itemDoubleClicked.connect(self._on_activate)
         self.list.itemChanged.connect(self._on_item_changed)
+        from PySide6.QtGui import QAction, QKeySequence
+        delete = QAction(self.list)
+        delete.setShortcut(QKeySequence.Delete)
+        delete.setShortcutContext(Qt.WidgetShortcut)
+        delete.triggered.connect(self._on_delete)
+        self.list.addAction(delete)
         lay.addWidget(self.list)
         row = QHBoxLayout()
         add_btn = QPushButton(tr("+ Scene"))
@@ -3787,7 +3860,7 @@ class ScenesPanel(QWidget):
         upd_btn.setToolTip(tr("Update the selected scene from the current view"))
         upd_btn.clicked.connect(self._on_update)
         del_btn = QPushButton(tr("−"))
-        del_btn.setToolTip(tr("Delete the selected scene"))
+        del_btn.setToolTip(tr("Delete the selected scenes"))
         del_btn.clicked.connect(self._on_delete)
         row = FlowLayout(spacing=4)          # wraps in a narrow tray (see Layers)
         row.addWidget(add_btn)
@@ -3882,13 +3955,15 @@ class ScenesPanel(QWidget):
             tr("Scene '{name}' updated", name=view.name), 2000)
 
     def _on_delete(self) -> None:
-        item = self.list.currentItem()
-        view = item.data(Qt.UserRole) if item is not None else None
-        if view is None:
+        views = [it.data(Qt.UserRole) for it in self.list.selectedItems()]
+        if not views:
+            item = self.list.currentItem()
+            views = [item.data(Qt.UserRole)] if item is not None else []
+        views = [v for v in views if v is not None]
+        if not views:
             return
-        scene = self._scene()
-        if view in scene.saved_views:
-            scene.saved_views.remove(view)
+        from core.history import DeleteScenesCommand
+        self._window.viewport.history.execute(DeleteScenesCommand(views))
         self.refresh()
         self._touch()
 

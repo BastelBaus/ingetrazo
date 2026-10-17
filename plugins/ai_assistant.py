@@ -225,7 +225,7 @@ class AsistentePanel(QWidget):
         self._foto_chip = QLabel("")
         chip_row.addWidget(self._foto_chip, 1)
         narrow(self._foto_chip)
-        self._foto_quitar = QPushButton("✕")
+        self._foto_quitar = QPushButton("×")   # Latin-1: every font has it (#658)
         self._foto_quitar.setFixedWidth(28)
         self._foto_quitar.setToolTip(tr("Remove the photo"))
         self._foto_quitar.clicked.connect(self._clear_foto)

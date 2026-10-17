@@ -520,11 +520,15 @@ def main() -> int:
             doc = Path(arg)
             if doc.exists():
                 _open_document_in(window, doc)
+        # Which units to work in, once the window is up and the document in
+        # (off for good with «Don't show this at startup»; Preferences ▸
+        # Units turns it back on). Offered after the opening, not beside
+        # it: the load lets events through to move its bar, the question
+        # came up in the middle of it, and the document stayed frozen at
+        # 5 % behind it, the view blank, until it was answered.
+        QTimer.singleShot(0, window.offer_units_at_start)
 
     QTimer.singleShot(0, _after_first_frame)
-    # Which units to work in, once the window is up (off for good with
-    # «Don't show this at startup»; Preferences ▸ Units turns it back on).
-    QTimer.singleShot(0, window.offer_units_at_start)
     _offer_appimage_integration(window)
     return app.exec()
 

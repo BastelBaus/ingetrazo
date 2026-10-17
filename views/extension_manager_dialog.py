@@ -63,6 +63,13 @@ log = logging.getLogger("ingetrazo.extensions")
 _SCREENSHOT_BASE = (
     "https://raw.githubusercontent.com/ingelibre/"
     "ingetrazo-extensions/main/screenshots/")
+#: The same files through the website (Cloudflare-cached), as its own
+#: extensions page shows them: the second try when GitHub fails.
+_SCREENSHOT_MIRROR = "https://ingetrazo.com/extensiones-img/"
+#: A screenshot that failed is asked for again on its own — before, it
+#: stayed «Preview unavailable» until the list was scrolled (caza 2).
+_SCREENSHOT_RETRIES = 3
+_SCREENSHOT_RETRY_MS = 2000
 _MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024
 _IMAGE_SIZE = (256, 160)  # 16:10
 _ROW_MAX_HEIGHT = 300
@@ -182,6 +189,7 @@ class ExtensionManagerDialog(QDialog):
         self._startup_state = (startup_state if startup_state is not None
                                else extension_startup_state())
         self._requested_images: set[str] = set()
+        self._image_failures: dict[str, int] = {}
         # Screenshots already decoded and scaled, by extension id: a card
         # built again (a filter, an install) is born with its image instead
         # of «Preview unavailable» and then the picture (#555).
@@ -948,9 +956,12 @@ class ExtensionManagerDialog(QDialog):
                 continue
             if extension.id in self._requested_images:
                 continue
+            failures = self._image_failures.get(extension.id, 0)
+            if failures > _SCREENSHOT_RETRIES:
+                continue
             self._requested_images.add(extension.id)
-            request = QNetworkRequest(QUrl(_SCREENSHOT_BASE
-                                           + extension.screenshot))
+            base = _SCREENSHOT_MIRROR if failures % 2 else _SCREENSHOT_BASE
+            request = QNetworkRequest(QUrl(base + extension.screenshot))
             request.setAttribute(
                 QNetworkRequest.RedirectPolicyAttribute,
                 QNetworkRequest.NoLessSafeRedirectPolicy)
@@ -967,12 +978,14 @@ class ExtensionManagerDialog(QDialog):
             if (reply.error() != QNetworkReply.NetworkError.NoError
                     or status is None or not 200 <= int(status) < 300
                     or len(data) > _MAX_SCREENSHOT_BYTES):
-                log.debug("could not fetch extension screenshot %s: %s",
-                          ident, reply.errorString())
+                log.info("could not fetch extension screenshot %s: %s",
+                         ident, reply.errorString())
+                self._retry_screenshot(ident)
                 return
             image = QPixmap()
             if not image.loadFromData(data):
                 log.warning("invalid screenshot image for extension %s", ident)
+                self._retry_screenshot(ident)
                 return
             cache.parent.mkdir(parents=True, exist_ok=True)
             temporary = cache.with_suffix(cache.suffix + ".part")
@@ -984,6 +997,15 @@ class ExtensionManagerDialog(QDialog):
                         ident, exc_info=True)
         finally:
             reply.deleteLater()
+
+    def _retry_screenshot(self, ident: str) -> None:
+        """Ask again, a little later and from the other source, while the
+        tries last; the visible cards are looked at again then."""
+        failures = self._image_failures.get(ident, 0) + 1
+        self._image_failures[ident] = failures
+        if failures <= _SCREENSHOT_RETRIES:
+            QTimer.singleShot(_SCREENSHOT_RETRY_MS * failures, self,
+                              self._images_timer.start)
 
     def _set_screenshot(self, ident: str, data: bytes) -> None:
         pixmap = QPixmap()
@@ -1011,7 +1033,26 @@ class ExtensionManagerDialog(QDialog):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
         return answer == QMessageBox.Yes
 
+    def _confirm_unreviewed(self, extension: Extension) -> bool:
+        """An extension nobody reviewed is its author's Python code, run with
+        the user's own permissions: say so once more before installing it,
+        with No as the default. Reviewed and bundled ones go straight on."""
+        if extension.bundled or is_reviewed(extension, self._reviewed):
+            return True
+        answer = QMessageBox.warning(
+            self, tr("Install an unreviewed extension?"),
+            tr("«{name}» has not been reviewed by an IngeTrazo maintainer.\n\n"
+               "Extensions are Python code: once installed it runs with your "
+               "permissions and can read or change your files. Install it "
+               "only if you trust its author ({author}).",
+               name=display_name(extension, current_language()),
+               author=extension.author),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return answer == QMessageBox.Yes
+
     def _install(self, extension: Extension) -> None:
+        if not self._confirm_unreviewed(extension):
+            return
         try:
             install_extension(
                 extension, confirm_manual_copies=lambda paths:
@@ -1128,6 +1169,8 @@ class ExtensionManagerDialog(QDialog):
             self._render_page(key)
 
     def _replace(self, extension: Extension) -> None:
+        if not self._confirm_unreviewed(extension):
+            return
         name = display_name(extension, current_language())
         answer = QMessageBox.question(
             self, tr("Extension manager"),

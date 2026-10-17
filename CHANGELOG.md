@@ -15,6 +15,23 @@ follow [SemVer](https://semver.org).
   selección en el visor 3D sigue en naranja.
 
 ### Corregido
+- **Abrir otro documento ya no arrastra los planos de sección del
+  anterior** (#602, ArchXQ IT): un archivo sin planos se abría con los del
+  documento que estaba abierto antes, y al guardarlo se quedaban grabados
+  en él. Lo mismo pasaba con los interruptores de planos y cortes, Objetos
+  y Geometría ocultos, las escalas propias, el color del dorso de las caras
+  y las capas que el archivo no tenía. Ahora cada documento se abre solo
+  con lo suyo. Y Archivo ▸ Nuevo borra también un documento que solo
+  tenía planos de sección.
+- **Borrar la diagonal de un rectángulo ya no le da la vuelta a la cara**
+  (#529, @GWydouw): al unir dos caras de un mismo plano, el contorno salía
+  en cualquiera de los dos sentidos, y casi la mitad de las veces la cara
+  unida quedaba del revés. Ahora conserva el lado de la cara original y su
+  pintura por delante y por detrás.
+- **Intersecar caras ya no falla con caras casi paralelas**: dos planos
+  separados por un ángulo minúsculo hacían una división por cero y la orden
+  no hacía nada. Además, la búsqueda de qué caras pueden cruzarse va mucho
+  más rápida en modelos grandes.
 - **«x5» tras copiar hace la matriz, igual que «5x»** (#542): después de
   copiar con Mover o Rotar + Ctrl, teclear «x5» abría la herramienta Texto,
   porque la X sola es su atajo. Justo después de una copia, mientras «3x» o

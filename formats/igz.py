@@ -887,6 +887,62 @@ def _without_nonfinite(payload: dict) -> dict:
     return dict(payload, edges=edges, faces=faces)
 
 
+def _normalize_text_curve_ids(payload: dict, geom: dict) -> None:
+    """Map stored text curve identities to the engine's integer identities.
+
+    JSON documents can carry named curves. Their segments must stay grouped,
+    but the engine's counter and binary geometry writer require integer ids.
+    Reserve the document's existing integers first, including binary meshes
+    loaded later, so a name cannot collide with an existing numeric curve.
+    """
+    import core.mesh as _mesh_mod
+
+    def group_meshes(groups, depth=0):
+        for raw in groups:
+            if not isinstance(raw, dict):
+                continue
+            # A placement uses its prototype, not any local geometry block.
+            if raw.get("xform") is None or "proto" not in raw:
+                yield raw
+            if depth < 32:             # the same limit as _group_from
+                yield from group_meshes(raw.get("children", []) or [],
+                                        depth + 1)
+
+    def meshes():
+        yield payload
+        yield from payload.get("protos", [])
+        yield from group_meshes(payload.get("groups", []) or [])
+        yield from group_meshes(payload.get("kept_components", []) or [])
+
+    text_edges = []
+    binary_meshes = []
+    top = _mesh_mod._CURVE_COUNTER - 1
+    for block in meshes():
+        if "geom" in block:
+            binary_meshes.append(block["geom"])
+            continue
+        for raw in block.get("edges", []):
+            cid = raw.get("curve")
+            if isinstance(cid, str):
+                text_edges.append(raw)
+            elif isinstance(cid, int):
+                top = max(top, cid)
+    if not text_edges:
+        return                         # no extra scan of ordinary binary meshes
+
+    for meta in binary_meshes:
+        curves = _document_geometry_arrays(meta, geom).get("edge_curve")
+        if curves is not None and curves.size:
+            top = max(top, int(curves.max()))
+    _mesh_mod._CURVE_COUNTER = top + 1
+    ids: dict[str, int] = {}
+    for raw in text_edges:
+        name = raw["curve"]
+        if name not in ids:
+            ids[name] = Mesh.next_curve_id()
+        raw["curve"] = ids[name]
+
+
 def _load_into_inner(scene, path: Path, progress=None) -> None:
     def tick(frac, text):
         if progress is not None:
@@ -922,6 +978,7 @@ def _load_into_inner(scene, path: Path, progress=None) -> None:
         )
 
     payload = data.get("scene", {})
+    _normalize_text_curve_ids(payload, geom)
 
     scene.mesh.clear()
     scene.selection.clear()
@@ -932,6 +989,21 @@ def _load_into_inner(scene, path: Path, progress=None) -> None:
     scene.georef = None
     scene.photo_mesh = survey
     scene.tile_layer = None
+    # The writer leaves a block out when it holds the default (no planes,
+    # nothing hidden, no own scales…), so what the file does not bring is
+    # reset here — or it leaked from the document open before (#602).
+    from core.layers import DEFAULT_LAYER, Layer
+    scene.layers = [Layer(DEFAULT_LAYER)]
+    scene.section_planes = []
+    scene.show_section_planes = True
+    scene.show_section_cuts = True
+    scene.show_hidden_objects = False
+    scene.show_hidden_geometry = False
+    scene.custom_scales = []
+    scene.back_face_color = None
+    from core.scene import Scene
+    scene.dimension_style = \
+        Scene.__dataclass_fields__["dimension_style"].default_factory()
 
     tick(0.35, "Building geometry…")
     _load_mesh(scene.mesh, payload, geom)
@@ -1383,17 +1455,22 @@ def _geometry_arrays(meta, blob: bytes) -> dict:
     return out
 
 
+def _document_geometry_arrays(meta, geom: dict) -> dict:
+    """Read and validate a mesh's referenced format-3 geometry block."""
+    member = meta.get("member") if isinstance(meta, dict) else None
+    blob = geom.get(member)
+    if blob is None:
+        raise ValueError(f"the document lost its geometry block {member!r}")
+    return _geometry_arrays(meta, blob)
+
+
 def _load_geometry(mesh, meta, geom: dict) -> None:
     """Rebuild a mesh from its format-3 block — the same weld and the same
     bulk edge/face creation as the JSON path, fed from arrays."""
     import numpy as np
     import core.mesh as _mesh_mod
 
-    member = meta.get("member") if isinstance(meta, dict) else None
-    blob = geom.get(member)
-    if blob is None:
-        raise ValueError(f"the document lost its geometry block {member!r}")
-    a = _geometry_arrays(meta, blob)
+    a = _document_geometry_arrays(meta, geom)
     pos = a["pos"]
     edges, rings = a["edges"], a["rings"]
     sizes, counts = a["ring_sizes"], a["ring_counts"]

@@ -610,7 +610,12 @@ class Scene:
                 or self.guides or self.geo_points or self.text_labels
                 or self.saved_views or self.compositions
                 or self.image_planes or self.plugin_data
-                or self.kept_components):
+                or self.kept_components or self.section_planes
+                or not self.show_section_planes
+                or not self.show_section_cuts
+                or self.show_hidden_objects or self.show_hidden_geometry
+                or self.custom_scales or self.back_face_color is not None
+                or len(self.layers) > 1):
             self.mesh.clear()
             self.groups.clear()
             self.dimensions.clear()
