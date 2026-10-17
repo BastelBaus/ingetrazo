@@ -43,6 +43,10 @@ class DimensionTool(AxisMagnet, Tool):
         self.start_point: QVector3D | None = None
         self.work_plane: tuple[QVector3D, QVector3D] | None = None
 
+        # 17.10.26 BastelBaus: when snapped to a dimension, this is the 
+        #                      vector which should be used for the dimension
+        self.ref_axis: QVector3D | None = None
+
     # ---- Lifecycle ----------------------------------------------------------
     def on_activate(self, viewport) -> None:
         self._reset()
@@ -69,7 +73,8 @@ class DimensionTool(AxisMagnet, Tool):
     def on_click(self, ctx: ToolContext) -> None:
         p = ctx.world
 
-
+        print(f"selected point {p=} with snap {ctx.snap.kind =}")
+        print(f"  {ctx.snap=}")
 
         if self.a is None:
 
@@ -79,19 +84,31 @@ class DimensionTool(AxisMagnet, Tool):
                ctx.snap.edge.a is not None and ctx.snap.edge.b is not None:
                 self.a = QVector3D( ctx.snap.edge.a )
                 self.b = QVector3D( ctx.snap.edge.b )
-                self.start_point = self.a
-                return
             else:
                 self.a = QVector3D(p)
-                self.start_point = self.a
-                return
+
+            self.start_point = self.a
+            return
             
         if self.b is None:
+
+            # 17.10.26 BastelBaus: clicking on an point not directly on the
+            #                      dimension line, the snap piont should be 
+            #                      kept as anchor and the direction must 
+            #                      be stored
+            if ctx.snap.kind == "from_point" and ctx.snap.guide is not None:
+                print(ctx.snap.axis)
+                self.ref_axis = p-ctx.snap.guide[0]
+                self.ref_axis = ctx.snap.axis
+                p = ctx.snap.guide[0]
+
             p = self._frontal(ctx, p)
             if (p - self.a).length() < 1e-6:
                 return  # need two distinct endpoints
             self.b = QVector3D(p)
             return
+
+        
         # Third click: place the dimension where the cursor asks — aligned,
         # or linear along an axis when pulled past the ends (issue #50).
         ctx.viewport.history.execute(AddDimensionCommand(self._proposed(p)))
@@ -126,6 +143,7 @@ class DimensionTool(AxisMagnet, Tool):
         """The dimension the current cursor would place (preview and
         commit share it, so what you see is what you get)."""
         offset, axis = Dimension.placement_for_cursor(self.a, self.b, cursor)
+        axis = self.ref_axis or axis
         return Dimension(QVector3D(self.a), QVector3D(self.b), offset, axis=axis)
 
     def _reset(self) -> None:
