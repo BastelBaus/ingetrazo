@@ -73,9 +73,6 @@ class DimensionTool(AxisMagnet, Tool):
     def on_click(self, ctx: ToolContext) -> None:
         p = ctx.world
 
-        print(f"selected point {p=} with snap {ctx.snap.kind =}")
-        print(f"  {ctx.snap=}")
-
         if self.a is None:
 
             # 17.10.26 BastelBaus: clicking on an edge directly creates
@@ -97,8 +94,6 @@ class DimensionTool(AxisMagnet, Tool):
             #                      kept as anchor and the direction must 
             #                      be stored
             if ctx.snap.kind == "from_point" and ctx.snap.guide is not None:
-                print(ctx.snap.axis)
-                self.ref_axis = p-ctx.snap.guide[0]
                 self.ref_axis = ctx.snap.axis
                 p = ctx.snap.guide[0]
 
@@ -111,7 +106,9 @@ class DimensionTool(AxisMagnet, Tool):
         
         # Third click: place the dimension where the cursor asks — aligned,
         # or linear along an axis when pulled past the ends (issue #50).
-        ctx.viewport.history.execute(AddDimensionCommand(self._proposed(p)))
+        proposed_dim = self._proposed(p)
+        print("ProposedDIM:\n",str(proposed_dim))
+        ctx.viewport.history.execute(AddDimensionCommand(proposed_dim))
         self._reset()
         ctx.viewport.update()
 
@@ -126,8 +123,16 @@ class DimensionTool(AxisMagnet, Tool):
         if self.a is not None and self.b is None:
             return [(self.a, self.hover_point)]          # measuring span
         if self.a is not None and self.b is not None:
-            ap, bp = self._proposed(self.hover_point).line_points()
-            return [(self.a, ap), (self.b, bp), (ap, bp)]  # extension + dim line
+            #ap, bp = new_dim.line_points()
+            #return [(self.a, ap), (self.b, bp), (ap, bp)]  # extension + dim line
+
+            # 17.10.26 BastelBaus: draw line from anchors over extension points 
+            #                      and line points
+            ndim = self._proposed(self.hover_point)
+            return [ (ndim.a, ndim.extension_a), (ndim.extension_a, ndim.line_point_a),
+                     (ndim.line_point_a,ndim.line_point_b),(ndim.line_point_b,ndim.extension_b),
+                     (ndim.extension_b,ndim.b)
+                   ]                                     
         return []
 
     def value_label(self):
@@ -142,12 +147,26 @@ class DimensionTool(AxisMagnet, Tool):
     def _proposed(self, cursor: QVector3D) -> Dimension:
         """The dimension the current cursor would place (preview and
         commit share it, so what you see is what you get)."""
-        offset, axis = Dimension.placement_for_cursor(self.a, self.b, cursor)
-        axis = self.ref_axis or axis
-        return Dimension(QVector3D(self.a), QVector3D(self.b), offset, axis=axis)
+        
+        print(f"_proposed:\n {self.a=}\n {self.b=}\n {cursor=}\n {self.ref_axis=}")
+
+        if self.ref_axis is not None:
+            # 17.10.26 BastelBaus: if snapped to an exis, use this axis! 
+            offset = cursor - self.a
+            print(f" {offset=}")
+            return Dimension(QVector3D(self.a), QVector3D(self.b), offset, axis=self.ref_axis, axis_on_extension=True)
+
+        else:
+            offset, axis = Dimension.placement_for_cursor(self.a, self.b, cursor)
+            print(f" {offset=}")
+            print(f" {axis=}")
+            return Dimension(QVector3D(self.a), QVector3D(self.b), offset, axis=axis)
+
+        
 
     def _reset(self) -> None:
         self.a = None
         self.b = None
         self.start_point = None
         self.work_plane = None
+        self.ref_axis = None

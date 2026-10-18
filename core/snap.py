@@ -1111,16 +1111,22 @@ def _from_point_snap(
     # The guide runs perpendicular to the draw, from the corner to the foot —
     # colour it by the axis it most aligns with (red/green/blue).
     guide_color = None
-    gaxis = None
+    dim_axis = None
     if kind == "from_point":
         gdn = (foot - ref).normalized()
         gaxis = max(_AXIS_VECTORS,
                     key=lambda k: abs(QVector3D.dotProduct(gdn, _AXIS_VECTORS[k])))
         guide_color = AXIS_COLORS[gaxis]
-    #print(kind,gaxis,guide_color, draw_dir)
+
+        # 17.10.26 BastelBaus: dimension of snap to be forwarded when creating
+        #                      Dimension along one axis
+        dim_axis = max(_AXIS_VECTORS,
+                    key=lambda k: abs(QVector3D.dotProduct(line_dir, _AXIS_VECTORS[k]))) if line_dir is not None else None
+        # todo: is it line_dir or draw_dir ??
+
     return SnapResult(foot, kind, color, guide=(ref, foot),
                       guide_color=guide_color, 
-                      axis=draw_dir)
+                      axis=dim_axis)
 
 
 def _through_point_snap(

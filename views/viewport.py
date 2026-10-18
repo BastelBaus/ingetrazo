@@ -7425,11 +7425,22 @@ class Viewport(QOpenGLWidget):
             # Lines are hidden where solid geometry sits in front of them, so a
             # dimension reads as part of the model instead of floating over it.
             # Each 3D segment is sampled and only its visible runs are drawn.
+
+            # 17.10.26 BastelBaus: added a helping (dottet) line from the anchor 
+            #                      point to the start of the extension line
+            #                      ToDo: draw lines only if not equal!
+            print("\n ",ap, "\n ",bp)
+            painter.setPen(QPen(ink, 0.5))
+            self._draw_occluded_segment(painter, dim.extension_a, dim.a)   # the dotted line
+            self._draw_occluded_segment(painter, dim.extension_b, dim.b)
             painter.setPen(QPen(ink, 1.0))
-            self._draw_occluded_segment(painter, dim.a, ap)      # extension
-            self._draw_occluded_segment(painter, dim.b, bp)
+            if (dim.extension_a-ap).length()>1e-9:
+                self._draw_occluded_segment(painter, dim.extension_a, ap)      # extension
+            if (dim.extension_b-bp).length()>1e-9:
+                self._draw_occluded_segment(painter, dim.extension_b, bp)
             painter.setPen(QPen(ink, 1.5))
-            self._draw_occluded_segment(painter, ap, bp)         # dimension line
+            if (ap-bp).length()>1e-9:
+                self._draw_occluded_segment(painter, ap, bp)                   # dimension line
             # The ends, in screen space, drawn only where the end point
             # itself is visible: filled arrows pointing outward (the
             # document's default), oblique ticks, or nothing.
@@ -10619,8 +10630,12 @@ class Viewport(QOpenGLWidget):
         for dim in (self.scene.dimensions if hasattr(self.scene, 'dimensions') else []):
             if not self.scene.entity_selectable(dim):
                 continue
-            #near.append(_SnapEdge(dim.a, dim.a))
+            # 17.10.26 BastelBaus: added snapping to all edges
             near.append(_SnapEdge(dim.line_point_a, dim.line_point_b))
+            near.append(_SnapEdge(dim.line_point_a, dim.extension_a))
+            near.append(_SnapEdge(dim.line_point_b, dim.extension_b))
+            near.append(_SnapEdge(dim.a, dim.extension_a))
+            near.append(_SnapEdge(dim.b, dim.extension_b))
             
 
         from types import SimpleNamespace
