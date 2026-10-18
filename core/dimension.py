@@ -362,12 +362,13 @@ class Dimension:
         #if self.extension_b is self.b: # no extension !!
         #return QVector3D(0,0,0)
 
-        if self.axis_on_extension: # no extension !!
+        if self.axis_on_extension: # helping lines to extension !!
             ortho_vec = QVector3D.crossProduct( self.extension_b-self.b,self.extension_a-self.extension_b)
             ortho_vec = ortho_vec / ortho_vec.length()
             length = QVector3D.dotProduct(self.offset,ortho_vec)
             return ortho_vec * length
-        else:
+        else: # extensions direct on anchor points
+            
             ortho_vec = QVector3D.crossProduct( self.a-self.b,self.offset-self.a)
             ortho_vec = QVector3D.crossProduct( self.a-self.b,ortho_vec)
             ortho_vec = ortho_vec / ortho_vec.length()
