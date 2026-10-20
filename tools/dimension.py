@@ -39,6 +39,7 @@ class DimensionTool(AxisMagnet, Tool):
         self.a: QVector3D | None = None
         self.b: QVector3D | None = None
         self.hover_point: QVector3D | None = None
+        self.hover_axis: QVector3D | None = None
         # Read by the viewport for the work plane / snap engine (mirrors ``a``).
         self.start_point: QVector3D | None = None
         self.work_plane: tuple[QVector3D, QVector3D] | None = None
@@ -69,9 +70,15 @@ class DimensionTool(AxisMagnet, Tool):
 
     def on_hover(self, ctx: ToolContext) -> None:
         self.hover_point = self._frontal(ctx, ctx.world)
+        #self.hover_point = QVector3D(ctx.world)
+        self.hover_point = QVector3D(ctx.snap.point)
+        # 19.10.26 BastelBaus store the snap information
+        print("SNAP-HOOVER:",ctx.snap)
+        self.hover_axis = ctx.snap.axis if ctx.snap.kind == "axis" else None
 
     def on_click(self, ctx: ToolContext) -> None:
         p = ctx.world
+        print("SNAP:",ctx.snap)
 
         if self.a is None:
 
@@ -103,10 +110,12 @@ class DimensionTool(AxisMagnet, Tool):
             self.b = QVector3D(p)
             return
 
-        
         # Third click: place the dimension where the cursor asks — aligned,
         # or linear along an axis when pulled past the ends (issue #50).
-        proposed_dim = self._proposed(p)
+
+        # 19.10.26 BastelBaus store the snap information
+        axis = ctx.snap.axis if ctx.snap.kind == "axis" else None
+        proposed_dim = self._proposed(p,axis = axis)
         print("ProposedDIM:\n",str(proposed_dim))
         ctx.viewport.history.execute(AddDimensionCommand(proposed_dim))
         self._reset()
@@ -128,7 +137,7 @@ class DimensionTool(AxisMagnet, Tool):
 
             # 17.10.26 BastelBaus: draw line from anchors over extension points 
             #                      and line points
-            ndim = self._proposed(self.hover_point)
+            ndim = self._proposed(self.hover_point, self.hover_axis)
             return [ (ndim.a, ndim.extension_a), (ndim.extension_a, ndim.line_point_a),
                      (ndim.line_point_a,ndim.line_point_b),(ndim.line_point_b,ndim.extension_b),
                      (ndim.extension_b,ndim.b)
@@ -144,11 +153,11 @@ class DimensionTool(AxisMagnet, Tool):
         proposed = self._proposed(self.hover_point)
         return (fmt_len(proposed.value()), proposed.midpoint())
 
-    def _proposed(self, cursor: QVector3D) -> Dimension:
+    def _proposed(self, cursor: QVector3D, axis:str|None = None) -> Dimension:
         """The dimension the current cursor would place (preview and
         commit share it, so what you see is what you get)."""
         
-        print(f"_proposed:\n {self.a=}\n {self.b=}\n {cursor=}\n {self.ref_axis=}")
+        print(f"_proposed:\n {self.a=}\n {self.b=}\n {cursor=}\n {self.hover_point=}\n {self.ref_axis=}, {axis=}\n {self.hover_axis=}\n")
 
         if self.ref_axis is not None:
             # 17.10.26 BastelBaus: if snapped to an exis, use this axis! 
@@ -157,7 +166,21 @@ class DimensionTool(AxisMagnet, Tool):
             return Dimension(QVector3D(self.a), QVector3D(self.b), offset, axis=self.ref_axis, axis_on_extension=True)
 
         else:
-            offset, axis = Dimension.placement_for_cursor(self.a, self.b, cursor)
+            #offset, axis = Dimension.placement_for_cursor(self.a, self.b, cursor)
+            offset, ax = Dimension.placement_for_cursor(self.a, self.b, cursor)
+            offset = cursor - (self.a + self.b) * 0.5
+
+                        
+            _AXIS_VECTORS = {
+                "x": QVector3D(1.0, 0.0, 0.0),
+                "y": QVector3D(0.0, 1.0, 0.0),
+                "z": QVector3D(0.0, 0.0, 1.0),
+            }
+
+
+            ax = _AXIS_VECTORS.get(self.hover_axis,None)
+            if ax:
+                offset = ax * QVector3D.dotProduct(offset,ax)
             print(f" {offset=}")
             print(f" {axis=}")
             return Dimension(QVector3D(self.a), QVector3D(self.b), offset, axis=axis)
