@@ -463,7 +463,7 @@ class Dimension:
                 elif self.axis == 'x':
                     extension_dir = _AXIS_VECTORS.get('x',None)
                 elif self.axis == 'z':
-                    extension_dir = _AXIS_VECTORS.get('y',None)
+                    extension_dir = _AXIS_VECTORS.get('z',None)
 
                 off1 = extension_dir * QVector3D.dotProduct(extension_dir,self.offset)
                 off2 = extension_dir * QVector3D.dotProduct(extension_dir,self.a-self.b)
