@@ -161,6 +161,15 @@ def _touching(lo_a, hi_a, lo_b, hi_b, same: bool, eps: float = 1e-6):
     """Index pairs ``(i, j)`` whose boxes touch — ``_boxes_touch`` for every
     pair at once, in blocks of rows (``same``: j > i only)."""
     import numpy as np
+    # The Rust engine (core._native) answers the same pairs in the same
+    # order: the same test, with a grid that skips the far boxes.
+    from core._native import native
+    if native is not None:
+        ii, jj = native.touching_boxes(
+            *(np.ascontiguousarray(x, dtype=np.float64)
+              for x in (lo_a, hi_a, lo_b, hi_b)), bool(same), float(eps))
+        yield from zip(ii.tolist(), jj.tolist())
+        return
     rows = max(1, _PAIR_BLOCK // max(1, len(lo_b)))
     for r0 in range(0, len(lo_a), rows):
         r1 = min(len(lo_a), r0 + rows)

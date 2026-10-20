@@ -57,6 +57,8 @@ class RectangleTool(PlaneLock, Tool):
     name = "Rectangle"
     shortcut = "R"
     description = "Draw a rectangle from two opposite corners."
+    axis_source = True
+    axis_source_empty_only = True
     vcb_label = "Dimensions"
     # Only a width AND a height mean something here, so "200,100" is two
     # values (the list comma, #152), not the decimal 200.1.
@@ -301,7 +303,7 @@ class RectangleTool(PlaneLock, Tool):
             return []
         point, normal = self.preview_plane(vp, self.hover_point)
         u, v = _plane_axes(normal)
-        scale = self.world_per_pixel(vp, self.hover_point, u)
+        scale = self.plane_preview_scale(vp, self.hover_point, u, v)
         if scale is None:
             return []
         h = 0.5 * self.PREVIEW_PX * scale

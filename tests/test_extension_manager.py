@@ -845,7 +845,9 @@ def test_a_hand_installed_copy_under_another_name_is_set_aside(
 
 def test_an_identical_loose_file_counts_as_a_copy(tmp_path, monkeypatch):
     monkeypatch.setattr(manager, "user_plugins_dir", lambda: tmp_path)
-    (tmp_path / "my_old_name.py").write_text(TOOL_SOURCE)
+    # newline="\n": byte for byte what the catalog serves (on Windows
+    # write_text puts \r\n and the copy is no longer identical).
+    (tmp_path / "my_old_name.py").write_text(TOOL_SOURCE, newline="\n")
     payload = TOOL_SOURCE.encode()
     monkeypatch.setattr(manager, "_get", lambda *_a: payload)
     with pytest.raises(manager.ExtensionManagerError, match="my_old_name.py"):
@@ -1101,3 +1103,140 @@ def test_a_screenshot_that_failed_is_asked_again_from_the_website(
         dialog.close()
         dialog.deleteLater()
         app.processEvents()
+
+
+def _shots_setup(tmp_path, monkeypatch, count):
+    extensions = [
+        manager.Extension(**{
+            **_extension(f"source {index}".encode(),
+                         f"extension_{index}").__dict__,
+            "screenshot": f"extension_{index}.png"})
+        for index in range(count)
+    ]
+    from views import extension_manager_dialog as dialog_module
+    _stub_catalog(monkeypatch, dialog_module, extensions)
+    monkeypatch.setattr(manager, "user_plugins_dir", lambda: tmp_path)
+    monkeypatch.setattr(dialog_module.QStandardPaths, "writableLocation",
+                        lambda _location: str(tmp_path / "data"))
+    pixmap = QPixmap(640, 400)
+    pixmap.fill(QColor("red"))
+    shots = tmp_path / "data" / "extension-screenshots"
+    shots.mkdir(parents=True)
+    for extension in extensions:
+        pixmap.save(str(shots / extension.screenshot), "PNG")
+    return dialog_module, extensions, shots
+
+
+def _wait_ms(ms):
+    loop = QEventLoop()
+    QTimer.singleShot(ms, loop.quit)
+    loop.exec()
+
+
+def _open(dialog_module, app):
+    dialog = dialog_module.ExtensionManagerDialog()
+    _wait_for_catalog(dialog, app)
+    dialog.resize(1180, 800)
+    dialog.show()
+    app.processEvents()
+    return dialog
+
+
+def _close(dialog, app):
+    dialog.close()
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_opening_the_manager_again_shows_every_card_with_its_screenshot(
+        tmp_path, monkeypatch):
+    """Marco, 18-10: each opening decoded the full screenshots again and
+    the cards came up «Preview unavailable» before their picture. The
+    first opening scales the rest in the background; the next one builds
+    every card already wearing it, with no screenshot decoded."""
+    app = QApplication.instance() or QApplication([])
+    dialog_module, extensions, _shots = _shots_setup(tmp_path, monkeypatch, 20)
+    dialog = _open(dialog_module, app)
+    try:
+        assert 0 < len(dialog._screenshots) < len(extensions)
+        _wait_ms(1500)                       # the background rounds
+        assert set(dialog._screenshots) == {e.id for e in extensions}
+    finally:
+        _close(dialog, app)
+
+    decoded = []
+    monkeypatch.setattr(
+        dialog_module.QImage, "loadFromData",
+        lambda self, *a: decoded.append(1) or False)
+    dialog = dialog_module.ExtensionManagerDialog()
+    try:
+        _wait_for_catalog(dialog, app)
+        labels = dialog._pages["browse"]["image_labels"]
+        assert len(labels) == len(extensions)
+        for label in labels.values():         # before it is even shown
+            assert not label.pixmap().isNull() and label.text() == ""
+        assert decoded == []
+    finally:
+        _close(dialog, app)
+
+
+def test_the_scaled_screenshot_is_kept_on_disk_until_the_screenshot_changes(
+        tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    dialog_module, extensions, shots = _shots_setup(tmp_path, monkeypatch, 1)
+    dialog = _open(dialog_module, app)
+    _close(dialog, app)
+    source = shots / extensions[0].screenshot
+    thumb = dialog_module.ExtensionManagerDialog._thumb_path(source)
+    assert thumb.is_file()
+    small = QPixmap(str(thumb))
+    assert small.width() == 256 and small.height() == 160
+    assert thumb.stat().st_size < source.stat().st_size
+
+    def colour_after_restart():
+        dialog_module._SCALED_SHOTS.clear()   # a new run of IngeTrazo
+        dialog = _open(dialog_module, app)
+        try:
+            label = dialog._pages["browse"]["image_labels"][extensions[0].id]
+            return label.pixmap().toImage().pixelColor(5, 5).name()
+        finally:
+            _close(dialog, app)
+
+    # The next run reads the small copy, not the screenshot.
+    blue = QPixmap(256, 160)
+    blue.fill(QColor("blue"))
+    blue.save(str(thumb), "PNG")
+    assert colour_after_restart() == "#0000ff"
+
+    # A new screenshot (an update downloaded) is scaled again.
+    green = QPixmap(640, 400)
+    green.fill(QColor("green"))
+    green.save(str(source), "PNG")
+    import os
+    later = thumb.stat().st_mtime_ns + 10_000_000_000
+    os.utime(source, ns=(later, later))
+    assert colour_after_restart() == "#008000"
+
+
+def test_the_background_rounds_download_nothing(tmp_path, monkeypatch):
+    """Only the screenshots already on disk are scaled ahead; a missing one
+    is still asked for when its card is seen."""
+    app = QApplication.instance() or QApplication([])
+    dialog_module, extensions, shots = _shots_setup(tmp_path, monkeypatch, 20)
+    missing = extensions[-1]
+    (shots / missing.screenshot).unlink()
+    requests = []
+    dialog = dialog_module.ExtensionManagerDialog()
+    monkeypatch.setattr(dialog._network, "get",
+                        lambda request: requests.append(request) or None)
+    try:
+        _wait_for_catalog(dialog, app)
+        dialog.resize(1180, 800)
+        dialog.show()
+        app.processEvents()
+        _wait_ms(1500)
+        assert set(dialog._screenshots) == {
+            e.id for e in extensions if e is not missing}
+        assert requests == []
+    finally:
+        _close(dialog, app)

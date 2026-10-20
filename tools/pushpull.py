@@ -1549,6 +1549,16 @@ class PushPullTool(Tool):
                 if id(mesh) in seen:      # shared prototypes: project once
                     continue
                 seen.add(id(mesh))
+                from core.lazy_mesh import plan_of, PlannedVertices
+                plan = plan_of(mesh)
+                if plan is not None:
+                    # A lazy mesh (experimental engine): its planned
+                    # positions, the same vertices in the same order —
+                    # pushing beside a plant no longer builds all of it.
+                    if len(plan.pos):
+                        cache.append((PlannedVertices(plan.pos),
+                                      plan.pos.copy()))
+                    continue
                 # A COPY: a staged preview edits the live list in place, and
                 # the rows of ``arr`` must keep naming the same vertices.
                 verts = list(mesh.vertices)

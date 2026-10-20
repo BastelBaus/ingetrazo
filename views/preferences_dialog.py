@@ -19,8 +19,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSettings
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtCore import QSettings, Qt
+from PySide6.QtGui import QFontDatabase, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core import _native
 from core import general_settings as _gs
 from core.i18n import LANGUAGE_NAMES as _LANGUAGE_NAMES
 from core.i18n import available_languages, current_language, tr
@@ -198,6 +199,21 @@ class PreferencesDialog(QDialog):
             "sheet composer's. Applies at once."))
         form.addRow(tr("Toolbar icons:"), self._icon_px)
 
+        # How the extensions' entries show (18-10: with the whole catalog
+        # the Extensions menu and the right-click menu outgrew the screen).
+        self._ext_menus = QComboBox()
+        for code, label in (
+                ("auto", "Group them when there are many"),
+                ("always", "Always in submenus"),
+                ("flat", "Each entry on its own")):
+            self._ext_menus.addItem(tr(label), code)
+        self._ext_menus.setCurrentIndex(max(0, self._ext_menus.findData(
+            str(_gs.value("ext_menus", "auto", st) or "auto"))))
+        self._ext_menus.setToolTip(tr(
+            "How the extensions' entries show in the right-click menu "
+            "(at once) and in the Extensions menu (at the next start)."))
+        form.addRow(tr("Extension menus:"), self._ext_menus)
+
         from core.platform_choice import AUTO, WAYLAND, XCB
         self._platform = QComboBox()
         for key, label in ((AUTO, tr("Automatic (X11 on KDE Plasma or with a fractional display scale)")),
@@ -211,6 +227,23 @@ class PreferencesDialog(QDialog):
             "(XWayland) draws smoothly and stays crisp. Takes effect at the "
             "next start."))
         form.addRow(tr("Graphics server:"), self._platform)
+
+        # The experimental Rust engine (core._native): off by default, read
+        # once at start. Greyed out in a build that does not carry it.
+        self._rust = QCheckBox(tr("Rust engine (experimental)"))
+        self._rust.setChecked(str(_gs.value(_native.SETTING, "0", st)) == "1")
+        if _native.available() is None:
+            self._rust.setEnabled(False)
+            self._rust.setToolTip(tr("This build of IngeTrazo does not carry "
+                                     "the Rust engine."))
+        else:
+            self._rust.setToolTip(tr(
+                "Computes the heavy parts (hidden lines of the sheets and "
+                "more) with the new native engine, much faster on big "
+                "models. It is a test: keep a copy of your files and "
+                "report anything odd with the label rust-engine. Takes "
+                "effect at the next start."))
+        form.addRow("", self._rust)
         tabs.addTab(general, tr("General"))
 
         # ---- 3D mouse (issue #108) -------------------------------------------
@@ -257,6 +290,25 @@ class PreferencesDialog(QDialog):
                 "macOS is not supported yet."))
         status.setWordWrap(True)
         form.addRow("", status)
+        # Live reading: nobody on the team has a device, so an owner can say
+        # which number each move of the cap changes and which way IngeTrazo
+        # takes it — one look settles a sign (#108, the 12-10 video).
+        if name:
+            hint = QLabel(tr("Live reading — move the cap one way at a time:"))
+            hint.setWordWrap(True)
+            form.addRow("", hint)
+            self._ndof_raw = QLabel("—")
+            self._ndof_read = QLabel("—")
+            mono = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+            for lab in (self._ndof_raw, self._ndof_read):
+                lab.setFont(mono)
+                lab.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                form.addRow("", lab)
+            dev = shared_input()
+            dev.raw.connect(self._show_ndof_raw)
+            dev.motion.connect(self._show_ndof_read)
+            # The device outlives the dialog: let go when it closes.
+            self.finished.connect(self._drop_ndof_monitor)
         tabs.addTab(mouse3d, tr("3D Mouse"))
 
         # ---- Import ---------------------------------------------------------
@@ -370,6 +422,27 @@ class PreferencesDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _drop_ndof_monitor(self, _result=0) -> None:
+        from views.ndof_input import shared_input
+        dev = shared_input()
+        for sig, slot in ((dev.raw, self._show_ndof_raw),
+                          (dev.motion, self._show_ndof_read)):
+            try:
+                sig.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+
+    def _show_ndof_raw(self, values) -> None:
+        names = ("X", "Y", "Z", "RX", "RY", "RZ")
+        self._ndof_raw.setText(tr("Device:") + "  " + "  ".join(
+            f"{n} {v:+5d}" for n, v in zip(names, values)))
+
+    def _show_ndof_read(self, sample, _dt) -> None:
+        self._ndof_read.setText(tr(
+            "IngeTrazo: right {r:+.2f}  up {u:+.2f}  forward {f:+.2f}  "
+            "tilt {t:+.2f}  twist {s:+.2f}", r=sample.right, u=sample.up,
+            f=sample.forward, t=sample.tilt, s=sample.spin))
 
     def show_units_page(self) -> None:
         """Open on the Units page (Window ▸ Units…, Ctrl+U)."""
@@ -576,6 +649,13 @@ class PreferencesDialog(QDialog):
         if history is not None:
             history.max_steps = int(self._undo_steps.value())
         _gs.set_value("platform", self._platform.currentData(), st)
+        rust = "1" if self._rust.isChecked() else "0"
+        if self._rust.isEnabled() and rust != str(
+                _gs.value(_native.SETTING, "0", st)):
+            _gs.set_value(_native.SETTING, rust, st)
+            QMessageBox.information(
+                self, tr("Rust engine (experimental)"),
+                tr("Restart IngeTrazo to switch the engine."))
         setup = getattr(self._window, "_setup_autosave", None)
         if callable(setup):
             setup()                     # re-arm the timer with the new pace
@@ -628,6 +708,8 @@ class PreferencesDialog(QDialog):
             else:
                 from views.icons import save_toolbar_icon_px
                 save_toolbar_icon_px(px)
+
+        _gs.set_value("ext_menus", self._ext_menus.currentData(), st)
 
         st.setValue("import/obj_unit", self._obj_unit.currentData())
         st.setValue("import/dxf_unit", self._dxf_unit.currentData())

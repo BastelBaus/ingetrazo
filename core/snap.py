@@ -1323,6 +1323,33 @@ def _lock_line_snaps(
 _TIE_PX = 0.5
 
 
+def _first_visible(points, is_occluded, are_occluded=None):
+    """Index of the first of ``points`` that is not occluded, or ``None``.
+
+    The first is asked alone (it is usually the answer); past it the rest go
+    in batches of 8, 16, 32… through ``are_occluded`` when there is one, as
+    ``compute_snap``'s ``_resolve`` asks its candidates: a dense model hides
+    dozens behind the first wall, and one ray each was the hover's cost."""
+    if not points:
+        return None
+    if is_occluded is None:
+        return 0
+    if are_occluded is None:
+        return next((i for i, p in enumerate(points) if not is_occluded(p)),
+                    None)
+    if not is_occluded(points[0]):
+        return 0
+    k, size = 1, 8
+    while k < len(points):
+        batch = points[k:k + size]
+        for j, h in enumerate(are_occluded(batch)):
+            if not h:
+                return k + j
+        k += size
+        size *= 2
+    return None
+
+
 def compute_snap(
     candidate_world: QVector3D,
     candidate_pixel: tuple[float, float],
@@ -1808,6 +1835,7 @@ def compute_snap(
     #    target, so it gets a more generous radius than the point snaps —
     #    landing a corner on it (a door on the floor line) should be forgiving.
     best_edge: Optional[tuple[float, QVector3D]] = None
+    on_edges = []
     for edge in scene.edges:
         pa = world_to_pixel(edge.a)
         pb = world_to_pixel(edge.b)
@@ -1827,10 +1855,15 @@ def compute_snap(
             on_pt = edge.a + ab * max(0.0, min(1.0, tt))
         else:
             on_pt = edge.a + ab * t
-        if is_occluded is not None and is_occluded(on_pt):
-            continue
-        if best_edge is None or d < best_edge[0]:
-            best_edge = (d, on_pt, edge)
+        on_edges.append((d, on_pt, edge))
+    # The nearest VISIBLE one, asked nearest first: a ray per edge in reach
+    # was most of a hover over a dense model (14 000 rays in 60 moves over
+    # the SPR of #158, when only the first visible one is kept). The sort is
+    # stable, so a tie goes to the edge listed first, as it always did.
+    on_edges.sort(key=lambda c: c[0])
+    k = _first_visible([c[1] for c in on_edges], is_occluded, are_occluded)
+    if k is not None:
+        best_edge = on_edges[k]
     # 7a. With an axis engaged the on-edge point is silenced (it would pull
     #     the point off the line), but the edge under the cursor may CROSS
     #     the axis line: that crossing is on the line AND on the edge, the

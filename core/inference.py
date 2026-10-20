@@ -233,9 +233,13 @@ class InferenceEngine:
         ``_snap_scene`` / ``pick_face_any``."""
         vp = self.viewport
         tool = vp.active_tool
+        empty_space_only = bool(
+            getattr(tool, "axis_source_empty_only", False))
+        allowed_kinds = (("none",) if empty_space_only
+                         else ("none", "on_face"))
         if (snap is None or not getattr(tool, "axis_source", False)
                 or getattr(tool, "start_point", None) is not None
-                or snap.kind not in ("none", "on_face")):
+                or snap.kind not in allowed_kinds):
             return snap
         name = vp.pick_axis(px_x, px_y)
         if name is None:
@@ -244,7 +248,13 @@ class InferenceEngine:
         from core import axes as _axes
         axis = _axes.axis(name)
         o = _axes.origin()
-        foot = o + axis * QVector3D.dotProduct(snap.point - o, axis)
+        if empty_space_only:
+            foot = vp._project_to_lock_line(o, axis, px_x, px_y)
+            if (not vp._axis_source_visible(name, foot)
+                    or vp._is_occluded(foot)):
+                return snap
+        else:
+            foot = o + axis * QVector3D.dotProduct(snap.point - o, axis)
         return SnapResult(foot, "on_axis", AXIS_COLORS[name], axis=name)
 
     def _extension_snap(self, snap, px_x: float, px_y: float):

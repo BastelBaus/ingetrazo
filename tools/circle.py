@@ -193,7 +193,7 @@ class _RadialTool(AxisMagnet, PlaneLock, Tool):
             return []
         point, normal = self.preview_plane(vp, self.hover_point)
         u, v = plane_axes(normal)
-        scale = self.world_per_pixel(vp, self.hover_point, u)
+        scale = self.plane_preview_scale(vp, self.hover_point, u, v)
         if scale is None:
             return []
         r = self.PREVIEW_PX * scale
@@ -280,6 +280,8 @@ class CircleTool(_RadialTool):
     name = "Circle"
     shortcut = "C"
     description = "Draw a circle from its centre and radius."
+    axis_source = True
+    axis_source_empty_only = True
     sides = 24
 
 

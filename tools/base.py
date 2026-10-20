@@ -275,12 +275,6 @@ class PlaneLock:
             return locked
         plane = getattr(viewport, "_last_work_plane", None)
         from core import axes
-        if plane is not None and abs(QVector3D.dotProduct(
-                plane[1].normalized(), axes.AXES["z"])) > 0.99:
-            near = getattr(viewport, "_near_horizon_vertical", None)
-            vertical = near(point) if near is not None else None
-            if vertical is not None:
-                return vertical
         if plane is not None:
             return QVector3D(point), plane[1]
         return QVector3D(point), axes.axis("z")
@@ -301,15 +295,16 @@ class PlaneLock:
         return None
 
     def lock_color(self):
-        """The rubber band's colour while an arrow-key lock is on: the axis
-        colour, or the magenta for the Down-arrow reference."""
+        """The rubber band colour for a locked or camera-selected plane."""
         if self.plane_ref is not None:
             from core.snap import COLOR_REFERENCE
             return (*COLOR_REFERENCE, 1.0)
-        if self.plane_lock is None:
-            return None
-        from tools.base import PLANE_LOCK_AXES
-        return self.plane_color(PLANE_LOCK_AXES[self.plane_lock])
+        if self.plane_lock is not None:
+            from tools.base import PLANE_LOCK_AXES
+            return self.plane_color(PLANE_LOCK_AXES[self.plane_lock])
+        if self.hover_plane is not None:
+            return self.plane_color(self.hover_plane[1])
+        return None
 
     @staticmethod
     def world_per_pixel(viewport, point: QVector3D, along: QVector3D):
@@ -327,6 +322,16 @@ class PlaneLock:
             return None
         d = math.hypot(b[0] - a[0], b[1] - a[1])
         return 0.25 / d if d > 1e-6 else None
+
+    @classmethod
+    def plane_preview_scale(cls, viewport, point: QVector3D,
+                            u: QVector3D, v: QVector3D):
+        """World scale for a preview glyph, based on its most visible axis."""
+        scales = [
+            scale for axis in (u, v)
+            if (scale := cls.world_per_pixel(viewport, point, axis)) is not None
+        ]
+        return min(scales) if scales else None
 
     def plane_lock_key(self, viewport, key: int) -> bool:
         if (getattr(self, "start_point", None) is not None
