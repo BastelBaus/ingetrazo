@@ -1467,6 +1467,11 @@ def compute_snap(
             project_onto_line,
         )
         if hit is not None:
+            # 20.10.26 BastelBaus, overwrite the snap
+            #          since it is still a fix axis snap, for 
+            #          example when creating the dimensions!
+            hit.axis = axis_lock      
+            hit.kind = "axis"      
             return hit
         return SnapResult(locked, "axis", AXIS_COLORS[axis_lock], axis=axis_lock)
 

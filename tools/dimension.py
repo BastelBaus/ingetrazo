@@ -21,6 +21,9 @@ from core.history import AddDimensionCommand
 from tools.base import AxisMagnet, Tool, ToolContext
 from core.units import fmt_len
 
+import logging
+logger = logging.getLogger()
+#logger.setLevel(logging.DEBUG)
 
 class DimensionTool(AxisMagnet, Tool):
     name = "Dimension"
@@ -69,16 +72,15 @@ class DimensionTool(AxisMagnet, Tool):
         return project_to_view_plane(p, self.a, cam.target - cam.eye())
 
     def on_hover(self, ctx: ToolContext) -> None:
-        self.hover_point = self._frontal(ctx, ctx.world)
-        #self.hover_point = QVector3D(ctx.world)
-        self.hover_point = QVector3D(ctx.snap.point)
+        #self.hover_point = self._frontal(ctx, ctx.world)
+
         # 19.10.26 BastelBaus store the snap information
-        print("SNAP-HOOVER:",ctx.snap)
+        self.hover_point = self._frontal(ctx, QVector3D(ctx.snap.point))
         self.hover_axis = ctx.snap.axis if ctx.snap.kind == "axis" else None
 
     def on_click(self, ctx: ToolContext) -> None:
         p = ctx.world
-        print("SNAP:",ctx.snap)
+        logger.debug(f"on_click  {ctx.snap=}")
 
         if self.a is None:
 
@@ -132,8 +134,6 @@ class DimensionTool(AxisMagnet, Tool):
         if self.a is not None and self.b is None:
             return [(self.a, self.hover_point)]          # measuring span
         if self.a is not None and self.b is not None:
-            #ap, bp = new_dim.line_points()
-            #return [(self.a, ap), (self.b, bp), (ap, bp)]  # extension + dim line
 
             # 17.10.26 BastelBaus: draw line from anchors over extension points 
             #                      and line points
@@ -156,36 +156,22 @@ class DimensionTool(AxisMagnet, Tool):
     def _proposed(self, cursor: QVector3D, axis:str|None = None) -> Dimension:
         """The dimension the current cursor would place (preview and
         commit share it, so what you see is what you get)."""
+
+        # 17.10.26 BastelBaus: reworked 
+        #  hover_axis has precedence, then axis
+        use_axis = self.hover_axis or axis
+        offset = cursor - self.a
+
+        logger.debug(f"_proposed:")
+        logger.debug(f" {self.a=}")
+        logger.debug(f" {self.b=}")
+        logger.debug(f"           {cursor=}")
+        logger.debug(f" {self.hover_point=}")
+        logger.debug(f"           {offset=}")
+        logger.debug(f" {self.ref_axis=}, {axis=}, {self.hover_axis=} ==> {use_axis=}")
         
-        print(f"_proposed:\n {self.a=}\n {self.b=}\n {cursor=}\n {self.hover_point=}\n {self.ref_axis=}, {axis=}\n {self.hover_axis=}\n")
+        return Dimension(QVector3D(self.a), QVector3D(self.b), offset, axis=use_axis, axis_on_extension=self.ref_axis is not None)
 
-        if self.ref_axis is not None:
-            # 17.10.26 BastelBaus: if snapped to an exis, use this axis! 
-            offset = cursor - self.a
-            print(f" {offset=}")
-            return Dimension(QVector3D(self.a), QVector3D(self.b), offset, axis=self.ref_axis, axis_on_extension=True)
-
-        else:
-            #offset, axis = Dimension.placement_for_cursor(self.a, self.b, cursor)
-            offset, ax = Dimension.placement_for_cursor(self.a, self.b, cursor)
-            offset = cursor - (self.a + self.b) * 0.5
-
-                        
-            _AXIS_VECTORS = {
-                "x": QVector3D(1.0, 0.0, 0.0),
-                "y": QVector3D(0.0, 1.0, 0.0),
-                "z": QVector3D(0.0, 0.0, 1.0),
-            }
-
-
-            ax = _AXIS_VECTORS.get(self.hover_axis,None)
-            if ax:
-                offset = ax * QVector3D.dotProduct(offset,ax)
-            print(f" {offset=}")
-            print(f" {axis=}")
-            return Dimension(QVector3D(self.a), QVector3D(self.b), offset, axis=axis)
-
-        
 
     def _reset(self) -> None:
         self.a = None

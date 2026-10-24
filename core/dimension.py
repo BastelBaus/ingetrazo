@@ -196,7 +196,7 @@ class Dimension:
                  axis: str | None = None, axis_on_extension:bool=False) -> None:
         self._a = QVector3D(a)
         self._b = QVector3D(b)
-        #: displacement from the a–b segment to the dimension line
+        #: displacement from the point a of the a–b segment to the dimension line
         self.offset = QVector3D(offset)
         #: The axis in which the dimension measures
         #: ``None`` = aligned; ``"x"``/``"y"``/``"z"`` = linear along that
@@ -416,33 +416,39 @@ class Dimension:
             print("on extention")
             return self.extension_a + self._dimension_offset
         else:
-            print("not on extention")
-            ax = _AXIS_VECTORS.get(self.axis,None)
-            if ax is None:
-                print("ax is none")
+            extension_dir = _AXIS_VECTORS.get(self.axis,None)
+            if extension_dir is None:
                 off = self.perpendicular_offset()
+
+
+                if False:
+                    ab = self.b-self.a
+                    #ab = ab / ab.length()
+                    pointer = self.offset - 0.5 * (self.b-self.a)
+                    #pointer = pointer / pointer.length()
+                    import math
+                    quot1 = min(QVector3D.dotProduct(ab,pointer)/(ab.length() * pointer.length()),1)
+                    angle1 = math.acos(quot1)
+
+                    ab2 = (self.b-self.a)/2
+                    aoff =  off
+
+
+                    angle2 = math.atan2(aoff.length(),ab2.length()) 
+
+                    if angle1 < angle2/2 or angle1 > math.pi/2-angle2/2:
+                        print(snap)
+
+                    def r2d(a): return math.degrees(a)
+                    print(f"{r2d(angle1)=} {r2d(angle2)=} {r2d(math.pi/2-angle2)=}")
+                    print(f"{aoff.length()=} {ab2.length()=}")
+
+
             else:
-                print("ax is ", self.axis)
-
-                if self.axis == 'y':
-                    extension_dir = _AXIS_VECTORS.get('y',None)
-                elif self.axis == 'x':
-                    extension_dir = _AXIS_VECTORS.get('x',None)
-                elif self.axis == 'z':
-                    extension_dir = _AXIS_VECTORS.get('z',None)
-
+                # offset in the direction of the extension
                 off = extension_dir * QVector3D.dotProduct(extension_dir,self.offset)
 
-                #off = self.b - (self.line_point_a + ax* QVector3D.dotProduct(ax,self.a-self.b))
-                
-                #off = ax * self.offset.length()
-                #ax2 = QVector3D.crossProduct(ax,self.b-self.a)
-                #off = QVector3D.crossProduct(ax2,ax) / (self.b-self.a).length() * self.offset.length()               
-                #l2 = QVector3D.dotProduct(off,self.a-self.b)
-                #l2 = abs(l2)
 
-                #off = off* (self.offset.length() + l2)               
-                #print("bb:",ax,ax2,off,l2)
 
             return self.extension_a + off 
 
@@ -453,17 +459,10 @@ class Dimension:
         if self.axis_on_extension: 
             return self.extension_b + self._dimension_offset 
         else:
-            ax = _AXIS_VECTORS.get(self.axis,None)
-            if ax is None: # not locked on axis, line from edge(a&b)
+            extension_dir = _AXIS_VECTORS.get(self.axis,None)
+            if extension_dir is None: # not locked on axis, line from edge(a&b)
                 off = self.perpendicular_offset()
             else: # locked on axis, line from edge(a&b)
-
-                if self.axis == 'y':
-                    extension_dir = _AXIS_VECTORS.get('y',None)
-                elif self.axis == 'x':
-                    extension_dir = _AXIS_VECTORS.get('x',None)
-                elif self.axis == 'z':
-                    extension_dir = _AXIS_VECTORS.get('z',None)
 
                 off1 = extension_dir * QVector3D.dotProduct(extension_dir,self.offset)
                 off2 = extension_dir * QVector3D.dotProduct(extension_dir,self.a-self.b)
