@@ -171,7 +171,7 @@ def _menu_pick(panel, item, text=None):
 def test_the_right_click_menu_offers_delete():
     building, _level1, _wall, tree = _building()
     win, scene, panel = _window_with(building, tree)
-    assert tr("Delete (Del)") in _menu_pick(panel, panel._items[id(tree)])
+    assert tr("Delete") in _menu_pick(panel, panel._items[id(tree)])
     _close(win)
 
 
@@ -179,7 +179,7 @@ def test_delete_from_the_menu_takes_the_picked_rows():
     building, _level1, _wall, tree = _building()
     win, scene, panel = _window_with(building, tree)
     _pick(panel, building, tree)
-    _menu_pick(panel, panel._items[id(tree)], tr("Delete (Del)"))
+    _menu_pick(panel, panel._items[id(tree)], tr("Delete"))
     QTest.qWait(50)                 # the action runs on the next turn
     assert scene.groups == []
     win.viewport.history.undo()     # both back in one step

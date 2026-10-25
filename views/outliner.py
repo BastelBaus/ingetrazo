@@ -3337,7 +3337,7 @@ class OutlinerPanel(QWidget):
                            lambda: self.toggle_locked(targets))
             menu.addAction(tr("Open for editing"),
                            lambda: self.open_item(item))
-            menu.addAction(tr("Delete (Del)"), lambda: QTimer.singleShot(
+            menu.addAction(tr("Delete"), lambda: QTimer.singleShot(
                 0, lambda: self.delete_groups(targets)))
             # Make Group / Make Component from here, as from the view's
             # right-click (#561, @BastelBaus); inside an open group what

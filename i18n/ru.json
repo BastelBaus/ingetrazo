@@ -3011,6 +3011,5 @@
  "Field of view in degrees (10–120):": "Поле зрения в градусах (10–120):",
  "Field of view applies to perspective; switch to Perspective first.": "Поле зрения относится к перспективе; сначала переключитесь на перспективу.",
  "{name}: every face has its own material, so nothing changed — open it and paint the faces": "{name}: у каждой грани свой материал, поэтому ничего не изменилось — откройте объект и окрасьте грани",
- "Delete (Del)": "Удалить (Del)",
  "A locked group cannot be deleted: unlock it first": "Заблокированную группу нельзя удалить: сначала разблокируйте её"
 }
