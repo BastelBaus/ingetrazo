@@ -675,10 +675,12 @@ def _prim_segments(prim_el, count: int) -> list:
 
 
 def _collect_lines(dae: _Dae, node_el, xform: QMatrix4x4, out: list,
-                   depth: int = 0) -> None:
+                   depth: int = 0, nodes: bool = True) -> None:
     """The loose lines (``lines`` / ``linestrips``) of a node tree, as
     world ``(a, b)`` segments — a drawing's 2D lines, which the polygon
-    walk never read, so they were dropped on import (#633)."""
+    walk never read, so they were dropped on import (#633). With
+    ``nodes=False`` child ``<node>`` elements are left to the caller (they
+    import as groups of their own)."""
     if depth > 32:
         return
     m = xform * _node_matrix(node_el)
@@ -697,7 +699,7 @@ def _collect_lines(dae: _Dae, node_el, xform: QMatrix4x4, out: list,
             for pr in prims:
                 for a, b in _prim_segments(pr, len(world)):
                     out.append((world[a], world[b]))
-        elif t == "node":
+        elif t == "node" and nodes:
             _collect_lines(dae, el, m, out, depth)
         elif t == "instance_node":
             target = dae.ref(el.get("url"))
@@ -773,13 +775,16 @@ def _looks_faceme(dae: _Dae, loops) -> bool:
 
 def _collect(dae: _Dae, node_el, xform: QMatrix4x4, out: list,
              depth: int = 0, faceme: list | None = None,
-             instances: list | None = None) -> None:
+             instances: list | None = None, nodes: bool = True) -> None:
     """Walk a node tree, baking transforms; instances recurse into
     ``library_nodes`` (components). With ``faceme`` given, a child
     component whose geometry is a face-me silhouette is pulled out into it
     as ``(name, loops)`` instead of flattening into the parent. With
     ``instances`` given, a reused component worth sharing is pulled out as
-    ``(name, target_node, pre_xform, depth)`` instead of baking a copy."""
+    ``(name, target_node, pre_xform, depth)`` instead of baking a copy.
+    With ``nodes=False`` child ``<node>`` elements are skipped — the caller
+    imports them as groups (:func:`_node_group`); what an instance pulls in
+    from ``library_nodes`` is still baked whole."""
     if depth > 32:
         return                                     # cyclic instance guard
     m = xform * _node_matrix(node_el)
@@ -789,6 +794,8 @@ def _collect(dae: _Dae, node_el, xform: QMatrix4x4, out: list,
         target = None
         d2 = depth
         if t == "node":
+            if not nodes:
+                continue
             target = el
         elif t == "instance_node":
             target = dae.ref(el.get("url"))
@@ -1298,6 +1305,82 @@ def _add_lines(mesh, dae: _Dae, lines: list) -> None:
             continue
 
 
+def _add_editable(mesh, dae: _Dae, loops: list, lines: list) -> None:
+    """Add ``loops`` and ``lines`` to ``mesh`` through the full editable
+    pipeline: fuse the exported triangles back into clean polygons and give a
+    closed result a consistent outward orientation — same pipeline as OBJ
+    import. Loose lines go in after the faces: one lying on a face edge is
+    that edge (add_edge finds it), the rest stay as the drawing's own lines."""
+    from core.history import run_stitch
+    from core.orient import orient_outward
+    from core.topology import _key
+    seed: set = set()
+    new_faces = set()
+    for loop, color, tex in loops:
+        pts = [dae.to_zup(p) for p in loop]
+        try:
+            face = mesh.add_face(pts)
+        except Exception:  # noqa: BLE001 — skip a degenerate polygon
+            continue
+        new_faces.add(face)
+        attrs = _face_attrs(pts, color, tex)
+        if attrs:
+            face.attrs.update(attrs)
+        for p in pts:
+            seed.add(_key(p))
+    if loops:
+        run_stitch(mesh, seed, new_faces, coplanar_merge=True)
+        orient_outward(mesh)
+    _add_lines(mesh, dae, lines)
+
+
+def _node_group(dae: _Dae, node_el, xform: QMatrix4x4, faceme: list,
+                depth: int = 0):
+    """The Group a nested ``<node>`` (a modeller's group) imports as, or
+    ``None`` when its subtree holds nothing to draw (a camera, a light).
+
+    The file's tree is kept: the node's own geometry — and whatever its
+    ``instance_node`` elements pull in — is the group's mesh, and every
+    child ``<node>`` becomes a nested child group, so a model exported as
+    groups of groups comes back as groups of groups with the same names
+    instead of melting into the loose mesh. Meshes are baked to world
+    coordinates, as the OBJ importer's parts are; the node's transform is
+    kept as the group's own axes (issue #44), so a turned group still faces
+    its way. ``xform`` is the composed matrix of the node's parent."""
+    from core.group import Group
+    from core.mesh import Mesh
+    if depth > 32:
+        return None                                # malformed-file guard
+    m = xform * _node_matrix(node_el)
+    name = _node_label(node_el)
+    loops: list = []
+    lines: list = []
+    _collect(dae, node_el, xform, loops, faceme=faceme, nodes=False)
+    _collect_lines(dae, node_el, xform, lines, nodes=False)
+    if loops and _looks_faceme(dae, loops):
+        faceme.append((name, loops))               # the group IS a sprite
+        loops = []
+    kids = [g for g in (_node_group(dae, el, m, faceme, depth + 1)
+                        for el in node_el if _tag(el) == "node")
+            if g is not None]
+    mesh = Mesh()
+    _add_editable(mesh, dae, loops, lines)
+    if not mesh.faces and not mesh.edges and not kids:
+        return None
+    g = Group(mesh, name=name)
+    frame = dae.zup_matrix() * m * dae.zup_matrix().inverted()[0]
+    if not frame.isIdentity():
+        g.axes = frame
+    for kid in kids:
+        # World-baked, so the placement is identity; a group inside the
+        # group, not a component of its own (issue #90).
+        kid.xform = QMatrix4x4()
+        kid.component = False
+    g.adopt(kids)
+    g.component = False
+    return g
+
+
 def load_dae(scene, path, progress=None):
     """See :func:`_load_dae_inner`. Wrapped to run with the generational GC off —
     mass vertex/edge/face construction ahead (see formats.skp.apply_payload);
@@ -1326,9 +1409,6 @@ def _load_dae_inner(scene, path, progress=None):
 
     ``progress``, when given, is called as ``progress(fraction, text)`` at
     milestones so the UI can show an import progress bar."""
-    from core.history import run_stitch
-    from core.orient import orient_outward
-    from core.topology import _key
 
     def tick(frac, text):
         if progress is not None:
@@ -1433,17 +1513,29 @@ def _load_dae_inner(scene, path, progress=None):
         tick(1.0, "Done")
         return offset
 
+    # A top-level node is the model itself (SketchUp's "SketchUp" root, a
+    # bare exporter's only node): its own geometry is the loose mesh. The
+    # nodes nested in it are the model's groups and import as Groups,
+    # nested as the file nests them (_node_group).
     pending: list = []
     faceme: list = []
     lines: list = []
+    groups: list = []
     for node in top_nodes:
-        _collect_lines(dae, node, QMatrix4x4(), lines)
+        _collect_lines(dae, node, QMatrix4x4(), lines, nodes=False)
         sub: list = []
-        _collect(dae, node, QMatrix4x4(), sub, faceme=faceme)
+        _collect(dae, node, QMatrix4x4(), sub, faceme=faceme, nodes=False)
         if sub and _looks_faceme(dae, sub):
             faceme.append((_node_label(node), sub))   # top node IS a sprite
         else:
             pending.extend(sub)
+        m = _node_matrix(node)
+        for el in node:
+            if _tag(el) == "node":
+                g = _node_group(dae, el, m, faceme)
+                if g is not None:
+                    groups.append(g)
+    scene.groups.extend(groups)
     if faceme:
         # Face-me sprites become billboard groups even in a small import.
         from core.group import Group
@@ -1462,7 +1554,7 @@ def _load_dae_inner(scene, path, progress=None):
                 g = Group(target, name=name)
                 g.billboard = "mesh"
                 scene.groups.append(g)
-    if not pending and not faceme:
+    if not pending and not faceme and not groups:
         # No visual scene (bare geometry library): import it un-instanced.
         for geom in root.iter(f"{_NS}geometry"):
             mesh_el = geom.find(f"{_NS}mesh")
@@ -1475,7 +1567,7 @@ def _load_dae_inner(scene, path, progress=None):
                         pending.append(([positions[i] for i in lp],
                                         None, None))
     if not pending:
-        if faceme or lines:
+        if faceme or lines or groups:
             _add_lines(scene.mesh, dae, lines)
             scene.version += 1
             tick(1.0, "Done")
@@ -1508,29 +1600,8 @@ def _load_dae_inner(scene, path, progress=None):
         tick(1.0, "Done")
         return offset
 
-    target = scene.mesh
-    seed: set = set()
-    new_faces = set()
-    for loop, color, tex in pending:
-        pts = [dae.to_zup(p) for p in loop]
-        try:
-            face = target.add_face(pts)
-        except Exception:  # noqa: BLE001 — skip a degenerate polygon
-            continue
-        new_faces.add(face)
-        attrs = _face_attrs(pts, color, tex)
-        if attrs:
-            face.attrs.update(attrs)
-        for p in pts:
-            seed.add(_key(p))
-
-    # Fuse the exported triangles back into clean polygons and give a closed
-    # result a consistent outward orientation — same pipeline as OBJ import.
-    # (Big models took the reference-group path above with the fast fusion.)
-    run_stitch(scene.mesh, seed, new_faces, coplanar_merge=True)
-    orient_outward(scene.mesh)
-    # Loose lines after the faces: one lying on a face edge is that edge
-    # (add_edge finds it), the rest stay as the drawing's own lines.
-    _add_lines(scene.mesh, dae, lines)
+    # The full editable pipeline (big models took the reference-group path
+    # above with the fast fusion).
+    _add_editable(scene.mesh, dae, pending, lines)
     scene.version += 1
     return offset
