@@ -1,23 +1,26 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Marco Sumari Tellez and IngeTrazo contributors.
-"""The Sheets tab: the Scenes panel above, the sheet explorer below.
+"""The sheet composer's Sheets page: the scenes above, the sheet explorer
+below.
 
-The same two panels, built the same way, sit in the main window (a tab
-beside the Browser) and in the sheet composer (its «Sheets» page), so both
-windows look and work alike. The sheet explorer shows the sheets in the
-nested folders of :mod:`core.sheet_folders`, each with the scenes placed on
-it and its Print flag — what Print all and Export all take.
+The sheet explorer shows the sheets in the nested folders of
+:mod:`core.sheet_folders`, each with the scenes placed on it and its Print
+flag — what Print all and Export all take. Sheets and folders are dragged
+to reorder or re-file them; a scene dragged from the list above onto a
+sheet is placed on it. The scenes list is just that — a list to pick scenes
+up from; they are made and changed in the main window's Scenes panel.
 
-Each panel needs only the main window, never the tab or dock it sits in,
-and the panels speak to each other only through the document: a layout
-rework can later move them anywhere (docs/sheet-browser-plan.md).
+Each panel needs only the main window, never the page or dock it sits in,
+and the panels speak to each other only through the document and the drag
+data: a layout rework can later move them anywhere
+(docs/sheet-browser-plan.md).
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QItemSelectionModel, Qt, QTimer
+from PySide6.QtCore import QItemSelectionModel, QMimeData, Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDockWidget, QHBoxLayout, QHeaderView, QLabel,
+    QAbstractItemView, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -29,25 +32,88 @@ COL_NAME, COL_PRINT = 0, 1
 
 _FOLDER, _SHEET, _FRAME = "folder", "sheet", "frame"
 
+#: Drag data of sheets and folders moved inside the explorer (the rows
+#: themselves travel in the panel: the drag never leaves it).
+TREE_MIME = "application/x-ingetrazo-sheet-tree"
+
+#: How many scenes the list above the sheets shows before it scrolls.
+SCENE_ROWS = 7
+
 
 class _SheetTree(QTreeWidget):
-    """The explorer's tree. Delete removes what is picked, F2 renames,
-    Space flips Print."""
+    """The explorer's tree: sheets and folders drag within it, scenes drop
+    on it. Delete removes what is picked, F2 renames, Space flips Print,
+    Alt+↑/↓ moves."""
 
     def __init__(self, panel) -> None:
         super().__init__()
         self._panel = panel
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
+        self.setDefaultDropAction(Qt.MoveAction)
+
+    def mimeTypes(self):
+        from views.composer import SCENE_MIME
+        return [TREE_MIME, SCENE_MIME]
+
+    def mimeData(self, items):
+        sheets, folders = self._panel._items_of(items)
+        self._panel._dragging = (sheets, folders)
+        data = QMimeData()
+        data.setData(TREE_MIME, b"1")
+        return data
+
+    def supportedDropActions(self):
+        return Qt.MoveAction | Qt.CopyAction
+
+    def dragEnterEvent(self, ev) -> None:
+        if any(ev.mimeData().hasFormat(m) for m in self.mimeTypes()):
+            ev.acceptProposedAction()
+            super().dragEnterEvent(ev)
+        else:
+            ev.ignore()
+
+    def dragMoveEvent(self, ev) -> None:
+        super().dragMoveEvent(ev)
+        if any(ev.mimeData().hasFormat(m) for m in self.mimeTypes()):
+            ev.acceptProposedAction()
+
+    def dropEvent(self, ev) -> None:
+        item = self.itemAt(ev.position().toPoint())
+        where = self.dropIndicatorPosition()
+        mime = ev.mimeData()
+        ev.setDropAction(Qt.IgnoreAction)          # the model moves, not Qt
+        ev.accept()
+        self._panel.drop(item, where, mime)
+
+    def event(self, ev) -> bool:
+        from PySide6.QtCore import QEvent
+        if (ev.type() == QEvent.ShortcutOverride
+                and self.state() != QAbstractItemView.EditingState
+                and (ev.key() in (Qt.Key_Delete, Qt.Key_F2, Qt.Key_Space)
+                     or (ev.key() in (Qt.Key_Up, Qt.Key_Down)
+                         and ev.modifiers() & Qt.AltModifier))):
+            ev.accept()                 # the composer's own keys wait
+            return True
+        return super().event(ev)
 
     def keyPressEvent(self, ev) -> None:
         if self.state() != QAbstractItemView.EditingState and \
                 not ev.isAutoRepeat():
-            if ev.key() == Qt.Key_Delete:
+            key = ev.key()
+            if key in (Qt.Key_Up, Qt.Key_Down) and \
+                    ev.modifiers() & Qt.AltModifier:
+                self._panel.move_current(-1 if key == Qt.Key_Up else 1)
+                return
+            if key == Qt.Key_Delete:
                 self._panel.delete_selected()
                 return
-            if ev.key() == Qt.Key_F2:
+            if key == Qt.Key_F2:
                 self._panel.rename_current()
                 return
-            if ev.key() == Qt.Key_Space:
+            if key == Qt.Key_Space:
                 self._panel.toggle_print_selected()
                 return
         super().keyPressEvent(ev)
@@ -71,11 +137,11 @@ def _print_icon(state: str):
 class SheetExplorer(QWidget):
     """The document's sheets in their folders, each with the scenes placed
     on it: filter them, open one with a double-click, add sheets and
-    folders, rename, delete, choose which ones Print all and Export all
-    take, print or export them.
+    folders, rename, delete, drag them around, choose which ones Print all
+    and Export all take, print or export them.
 
-    ``composer`` is the sheet composer this copy lives in (``None`` in the
-    main window): there, the sheet open beside it is marked."""
+    ``composer`` is the sheet composer it lives in: the sheet open there is
+    marked, and scenes dropped on a sheet go through its undo."""
 
     def __init__(self, window, composer=None) -> None:
         super().__init__()
@@ -84,6 +150,8 @@ class SheetExplorer(QWidget):
         self._updating = False
         self._shape = None
         self._query = ""
+        self._dragging = ([], [])
+        self._related: list = []
         #: Sheets the user folded (their scenes hidden). Sheets open by
         #: default; this is the panel's memory, not the document's.
         self._folded_sheets: set = set()
@@ -143,8 +211,10 @@ class SheetExplorer(QWidget):
         self.tree.setUniformRowHeights(True)
         self.tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.tree.setToolTip(tr(
-            "Double-click a sheet to open it. The printer marks the sheets "
-            "Print all and Export all take. Right-click for more."))
+            "Double-click a sheet to open it; drag sheets and folders to "
+            "order them, and a scene onto a sheet to place it. The printer "
+            "marks the sheets Print all and Export all take. Right-click for "
+            "more."))
         self.tree.itemDoubleClicked.connect(self._on_double_clicked)
         self.tree.itemClicked.connect(self._on_item_clicked)
         self.tree.itemChanged.connect(self._on_item_changed)
@@ -218,6 +288,7 @@ class SheetExplorer(QWidget):
         self._updating = True
         self.tree.clear()
         self.items = {}
+        self._related = []
         open_sheet = getattr(self._composer_win, "comp", None)
         bold = QFont(self.tree.font())
         bold.setBold(True)
@@ -234,7 +305,8 @@ class SheetExplorer(QWidget):
                 item.setIcon(COL_NAME, _icon("folder"))
                 item.setIcon(COL_PRINT, _print_icon(
                     self._folder_print_state(scene, f)))
-                item.setFlags(item.flags() | Qt.ItemIsEditable)
+                item.setFlags(item.flags() | Qt.ItemIsEditable
+                              | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
                 parent_item.addChild(item)
                 self.items[id(f)] = item
                 add(item, f.id, seen | {f.id})
@@ -245,7 +317,8 @@ class SheetExplorer(QWidget):
                 item.setIcon(COL_NAME, _icon("sheet"))
                 item.setIcon(COL_PRINT, _print_icon(
                     "on" if c.print_in_all else "off"))
-                item.setFlags(item.flags() | Qt.ItemIsEditable)
+                item.setFlags(item.flags() | Qt.ItemIsEditable
+                              | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
                 item.setToolTip(COL_NAME, tr(
                     "{name} — double-click to open it", name=c.name))
                 if c is open_sheet:
@@ -259,6 +332,10 @@ class SheetExplorer(QWidget):
                     row = QTreeWidgetItem(
                         [f"{name} · {format_scale(frame.scale_n)}", ""])
                     row.setData(COL_NAME, Qt.UserRole, (_FRAME, c, frame))
+                    # A scene row is part of its sheet: dropped on, it
+                    # means the sheet; it is not dragged by itself.
+                    row.setFlags((row.flags() | Qt.ItemIsDropEnabled)
+                                 & ~Qt.ItemIsDragEnabled)
                     if outliner.is_orphan(scene, frame):
                         row.setIcon(COL_NAME, _icon("warning"))
                         row.setToolTip(COL_NAME, tr(
@@ -320,12 +397,39 @@ class SheetExplorer(QWidget):
             walk(root.child(i), False)
         self._updating = False
 
+    # ---- A scene and the views that show it ------------------------------------
+    def mark_scene(self, name) -> list:
+        """Mark the views showing the scene called ``name`` (``None``:
+        none). Returns the marked rows."""
+        from core import outliner
+        from views.tray import mark_row
+        # A mark is an item change to Qt, not an edit of the row.
+        self._updating = True
+        try:
+            for row in self._related:
+                mark_row(row, False)
+            self._related = []
+            if name is not None:
+                for item in self.items.values():
+                    d = item.data(COL_NAME, Qt.UserRole)
+                    if d and d[0] == _FRAME and \
+                            outliner.frame_scene(d[2]) == name:
+                        mark_row(item, True)
+                        self._related.append(item)
+        finally:
+            self._updating = False
+        return list(self._related)
+
+    def related(self) -> list:
+        return list(self._related)
+
     # ---- Reading the selection ---------------------------------------------------
-    def _picked(self) -> tuple[list, list]:
-        """``(sheets, folders)`` among the selected rows (a scene row
-        stands for its sheet)."""
+    @staticmethod
+    def _items_of(rows) -> tuple[list, list]:
+        """``(sheets, folders)`` among ``rows`` (a scene row stands for its
+        sheet)."""
         sheets, folders = [], []
-        for item in self.tree.selectedItems():
+        for item in rows:
             d = item.data(COL_NAME, Qt.UserRole)
             if not d:
                 continue
@@ -335,6 +439,9 @@ class SheetExplorer(QWidget):
                 sheets.append(d[1])
         return sheets, folders
 
+    def _picked(self) -> tuple[list, list]:
+        return self._items_of(self.tree.selectedItems())
+
     def _target_folder_id(self):
         """Where a new sheet or folder goes: into the selected folder, or
         beside the selected sheet; the top when nothing is selected."""
@@ -343,6 +450,11 @@ class SheetExplorer(QWidget):
         if not d or not item.isSelected():
             return None
         return d[1].id if d[0] == _FOLDER else d[1].folder_id
+
+    def current_sheet(self):
+        item = self.tree.currentItem()
+        d = item.data(COL_NAME, Qt.UserRole) if item is not None else None
+        return d[1] if d and d[0] in (_SHEET, _FRAME) else None
 
     # ---- View → model --------------------------------------------------------------
     def _history(self):
@@ -362,9 +474,9 @@ class SheetExplorer(QWidget):
 
     def _after_edit_in_tree(self) -> None:
         """The same, on the next turn: an edit made IN the tree (a click on
-        a printer, a name typed) arrives while Qt still holds the row it
-        changed, and rebuilding the tree right then deletes that row under
-        it."""
+        a printer, a name typed, a drop) arrives while Qt still holds the
+        row it changed, and rebuilding the tree right then deletes that row
+        under it."""
         QTimer.singleShot(0, self, self._after_tree_change)
 
     def open_sheet(self, sheet) -> None:
@@ -542,9 +654,176 @@ class SheetExplorer(QWidget):
             (self._folded_sheets.discard if on
              else self._folded_sheets.add)(id(d[1]))
 
+    # ---- Moving: drag & drop, Alt+↑/↓ ----------------------------------------
+    def move(self, sheets, folders, target_id, before=None) -> None:
+        """Sheets and folders into folder ``target_id`` in front of
+        ``before`` (a sheet or folder; ``None``: at the end) — one undo
+        step. A folder never goes into itself; the sheet tabs follow the
+        new order."""
+        scene = self._scene()
+        folders = [f for f in folders
+                   if sf.can_move_folder(scene, f, target_id)]
+        # A folder's own sheets travel with it: only the loose ones move.
+        moving_ids = set()
+        for f in folders:
+            moving_ids |= {f.id} | sf.descendant_ids(scene, f.id)
+        sheets = [c for c in sheets if c.folder_id not in moving_ids]
+        if not sheets and not folders:
+            return
+        if isinstance(before, sf.SheetFolder) and sheets and not folders:
+            # Sheets sit after the subfolders: «above a folder» is the
+            # folder's first sheet place.
+            before = next((c for c in sf.sheets_in(scene, target_id)
+                           if c not in sheets), None)
+        from core.history import MoveSheetItemsCommand
+        self._history().execute(MoveSheetItemsCommand(
+            sheets, folders, target_id, before))
+
+    def drop(self, item, where, mime) -> None:
+        """What a drop on ``item`` at ``where`` (Qt's indicator) does:
+        scenes are placed on the sheet dropped on — a new one when dropped
+        on no sheet; sheets and folders move there."""
+        from views.composer import SCENE_MIME
+        d = item.data(COL_NAME, Qt.UserRole) if item is not None else None
+        if mime.hasFormat(SCENE_MIME):
+            names = [n for n in bytes(mime.data(SCENE_MIME)).decode(
+                "utf-8").split("\n") if n]
+            views = {v.name: v for v in self._scene().saved_views}
+            sheet = d[1] if d and d[0] in (_SHEET, _FRAME) else None
+            folder_id = (d[1].id if d and d[0] == _FOLDER
+                         else sheet.folder_id if sheet is not None else None)
+            for name in names:
+                if name in views:
+                    self.place_scene(views[name], sheet, folder_id=folder_id)
+            self._after_edit_in_tree()
+            return
+        if not mime.hasFormat(TREE_MIME):
+            return
+        sheets, folders = self._dragging
+        self._dragging = ([], [])
+        if d and d[0] == _FRAME:            # a scene row means its sheet
+            item, d = self.items.get(id(d[1])), (_SHEET, d[1])
+            where = QAbstractItemView.OnItem
+        scene = self._scene()
+        if d is None:                       # empty space: the top, at the end
+            target, before = None, None
+        elif where == QAbstractItemView.OnItem and d[0] == _FOLDER:
+            target, before = d[1].id, None  # into the folder
+        else:
+            obj = d[1]
+            target = obj.parent_id if d[0] == _FOLDER else obj.folder_id
+            if where == QAbstractItemView.AboveItem:
+                before = obj
+            else:                           # below, or on a sheet: after it
+                before = self._next_sibling(scene, obj, sheets, folders)
+        self.move(sheets, folders, target, before)
+        self._after_edit_in_tree()
+
+    @staticmethod
+    def _next_sibling(scene, obj, sheets, folders):
+        """The item after ``obj`` in its folder that is not moving — what
+        «after ``obj``» goes in front of (``None``: the end)."""
+        if isinstance(obj, sf.SheetFolder):
+            sibs = [f for f in sf.subfolders(scene, obj.parent_id)
+                    if f not in folders]
+            rest = sibs[sibs.index(obj) + 1:] if obj in sibs else []
+            if rest:
+                return rest[0]
+            if sheets and not folders:
+                return next((c for c in sf.sheets_in(scene, obj.parent_id)
+                             if c not in sheets), None)
+            return None
+        sibs = [c for c in sf.sheets_in(scene, obj.folder_id)
+                if c not in sheets]
+        rest = sibs[sibs.index(obj) + 1:] if obj in sibs else []
+        return rest[0] if rest else None
+
+    def move_current(self, step: int) -> None:
+        """Alt+↑/↓: the current sheet (or folder) one place up or down
+        among its neighbours in the same folder."""
+        item = self.tree.currentItem()
+        d = item.data(COL_NAME, Qt.UserRole) if item is not None else None
+        if not d or d[0] == _FRAME:
+            return
+        scene = self._scene()
+        obj = d[1]
+        if d[0] == _FOLDER:
+            sibs = sf.subfolders(scene, obj.parent_id)
+            target = obj.parent_id
+        else:
+            sibs = sf.sheets_in(scene, obj.folder_id)
+            target = obj.folder_id
+        i = sibs.index(obj)
+        j = i + step
+        if not 0 <= j < len(sibs):
+            return
+        others = [x for x in sibs if x is not obj]
+        before = others[j] if j < len(others) else None
+        sheets, folders = ([], [obj]) if d[0] == _FOLDER else ([obj], [])
+        self.move(sheets, folders, target, before)
+        self._after_tree_change()
+        moved = self.items.get(id(obj))
+        if moved is not None:
+            self.tree.setCurrentItem(moved)
+
+    # ---- Scenes on sheets ---------------------------------------------------------
+    def place_scene(self, view, sheet=None, scale: float = 100.0,
+                    folder_id=None):
+        """Place scene ``view`` on ``sheet`` — on a new sheet named after
+        it, in ``folder_id``, when ``None`` — in a free spot of the page, at
+        1:``scale``. One undo step; returns the new frame."""
+        from core import outliner
+        from core.composition import Composicion, MarcoVista
+        from core.history import (AddSheetCommand, CompoundCommand,
+                                  PlaceViewCommand)
+        scene = self._scene()
+        comp_win = self._composer_win
+        if comp_win is not None and sheet is not None:
+            # Beside the page: open that sheet and put the view in a free
+            # place of it, as one step of the composer's own undo.
+            comps = scene.compositions
+            if comp_win.comp is not sheet and sheet in comps:
+                comp_win.show_sheet(comps.index(sheet))
+            return comp_win.place_scene_at(view.name)
+        cmds = []
+        if sheet is None:
+            sheet = Composicion(name=outliner.unique_name(
+                view.name, [c.name for c in scene.compositions]),
+                paper="A3", folder_id=folder_id)
+            cmds.append(AddSheetCommand(sheet))
+        pw, ph = sheet.page_size_mm()
+        m = float(getattr(sheet, "margin_mm", 10.0) or 0.0)
+        w_mm = max(60.0, (pw - 2 * m) / 2 - 15)
+        h_mm = max(45.0, (ph - 2 * m) / 2 - 15)
+        # A quarter of the page where there is room; smaller where there is
+        # less; over the others, a step aside, only on a full page.
+        spot = None
+        for k in (1.0, 0.75, 0.5, 0.35):
+            spot = outliner.free_slot(sheet, w_mm * k, h_mm * k,
+                                      fallback=False)
+            if spot is not None:
+                w_mm, h_mm = w_mm * k, h_mm * k
+                break
+        x, y = spot if spot is not None else outliner.free_slot(
+            sheet, w_mm, h_mm)
+        frame = MarcoVista(x_mm=x, y_mm=y, w_mm=w_mm, h_mm=h_mm,
+                           view_key=f"scene:{view.name}",
+                           scale_n=float(scale), show_title=True)
+        cmds.append(PlaceViewCommand(sheet, frame))
+        self._history().execute(
+            CompoundCommand(cmds) if len(cmds) > 1 else cmds[0])
+        sf.sync_order(scene)
+        refresh_tabs = getattr(self._window, "_refresh_sheet_tabs", None)
+        if refresh_tabs is not None:
+            refresh_tabs()
+        self._window.viewport.flash_status(tr(
+            "«{scene}» placed on «{sheet}»", scene=view.name,
+            sheet=sheet.name), 4000)
+        self.refresh(force=True)
+        return frame
+
     # ---- Right-click ---------------------------------------------------------
     def _on_context_menu(self, pos) -> None:
-        from PySide6.QtWidgets import QMenu
         item = self.tree.itemAt(pos)
         d = item.data(COL_NAME, Qt.UserRole) if item is not None else None
         if item is not None and not item.isSelected():
@@ -555,6 +834,7 @@ class SheetExplorer(QWidget):
     def build_menu(self, d):
         """The right-click menu for a row's data ``d`` (``None``: empty
         space) — the bar's actions, for what was clicked."""
+        from core import outliner
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
         scene = self._scene()
@@ -573,6 +853,13 @@ class SheetExplorer(QWidget):
                            lambda: self.duplicate_sheet(sheet))
             menu.addAction(_icon("delete"), tr("Delete"),
                            lambda: self.delete(sheets, folders))
+            views = list(getattr(scene, "saved_views", None) or ())
+            if views:
+                sub = menu.addMenu(_icon("scene"), tr("Place a scene here"))
+                free = outliner.unplaced_scenes(scene)
+                for v in free + [v for v in views if v not in free]:
+                    sub.addAction(v.name, lambda vv=v, s=sheet:
+                                  self.place_scene(vv, s))
             menu.addSeparator()
             on = not all(c.print_in_all for c in sheets)
             menu.addAction(_print_icon("on" if on else "off"),
@@ -583,6 +870,13 @@ class SheetExplorer(QWidget):
                            lambda: self.print_sheets(sheets))
             menu.addAction(_icon("pdf"), tr("Export PDF…"),
                            lambda: self.export_sheets(sheets))
+            menu.addSeparator()
+            menu.addAction(tr("Move up (Alt+↑)"),
+                           lambda: (self.tree.setCurrentItem(
+                               self.items[id(sheet)]), self.move_current(-1)))
+            menu.addAction(tr("Move down (Alt+↓)"),
+                           lambda: (self.tree.setCurrentItem(
+                               self.items[id(sheet)]), self.move_current(1)))
             menu.addSeparator()
             here = sheet.folder_id
         elif d and d[0] == _FOLDER:
@@ -678,8 +972,8 @@ class SheetExplorer(QWidget):
 
 class SheetsTab(QWidget):
     """Scenes above, sheets below, with a divider between them to drag —
-    the contents of the main window's Sheets tab and of the composer's
-    Sheets page alike."""
+    the composer's Sheets page. The scenes list shows :data:`SCENE_ROWS`
+    scenes and scrolls past them; the sheets take the rest."""
 
     def __init__(self, window, composer=None) -> None:
         super().__init__()
@@ -688,16 +982,46 @@ class SheetsTab(QWidget):
         self._composer_win = composer
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        self.scenes = ScenesPanel(window)
+        # Just the list, to drag scenes onto sheets — they are made and
+        # changed in the main window's Scenes panel. In the composer a
+        # double-click places the scene on the open sheet, and each scene
+        # shows its picture.
+        self.scenes = ScenesPanel(
+            window, compact=True,
+            on_activate=(lambda view: composer.place_scene_at(view.name))
+            if composer is not None else None,
+            icon_for=composer.scene_thumbnail if composer is not None
+            else None)
         self.sheets = SheetExplorer(window, composer=composer)
         split = QSplitter(Qt.Vertical)
         split.setChildrenCollapsible(False)
         split.addWidget(_titled(tr("Scenes"), self.scenes))
         split.addWidget(_titled(tr("Sheets"), self.sheets))
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 2)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
         self.splitter = split
         lay.addWidget(split)
+        self._fit_scenes()
+        # A scene and the views that show it mark each other.
+        self.scenes.list.currentItemChanged.connect(
+            lambda item, _prev: self.sheets.mark_scene(
+                item.text() if item is not None else None))
+        self.sheets.tree.currentItemChanged.connect(
+            lambda item, _prev: self._mark_from_sheets(item))
+
+    def _fit_scenes(self) -> None:
+        """Room for :data:`SCENE_ROWS` scenes; more scroll."""
+        lst = self.scenes.list
+        row = max(lst.fontMetrics().height(), lst.iconSize().height()) + 6
+        frame = 2 * lst.frameWidth()
+        lst.setMaximumHeight(SCENE_ROWS * row + frame)
+        lst.setMinimumHeight(2 * row + frame)
+
+    def _mark_from_sheets(self, item) -> None:
+        from core import outliner
+        d = item.data(COL_NAME, Qt.UserRole) if item is not None else None
+        name = outliner.frame_scene(d[2]) if d and d[0] == _FRAME else None
+        self.scenes.mark(name)
 
     def on_scene_changed(self) -> None:
         if self._composer_win is not None:
@@ -769,20 +1093,3 @@ def _titled(title: str, panel) -> QWidget:
     lay.addWidget(head)
     lay.addWidget(panel, 1)
     return box
-
-
-class SheetsTray(QDockWidget):
-    """Sidebar tab **Sheets**, beside the Browser: :class:`SheetsTab`."""
-
-    def __init__(self, window) -> None:
-        super().__init__(tr("Sheets"), window)
-        self.setObjectName("tray_sheets")
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        self.setFeatures(QDockWidget.DockWidgetMovable
-                         | QDockWidget.DockWidgetClosable)
-        self.tab = SheetsTab(window)
-        self.setWidget(self.tab)
-        self.setMinimumWidth(240)
-
-    def on_scene_changed(self) -> None:
-        self.tab.on_scene_changed()
