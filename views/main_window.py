@@ -761,13 +761,17 @@ class MainWindow(QMainWindow):
         self.georef_tray = GeorefTray(self)
         from views.outliner import ProjectBrowser
         self.project_browser = ProjectBrowser(self)
+        # Scenes above, the sheet explorer below — the same page as the
+        # composer's «Sheets» (views/sheet_browser.py).
+        from views.sheet_browser import SheetsTray
+        self.sheets_tray = SheetsTray(self)
         self._lay_out_trays()
         # The trays are tabbed: the tab bar already names the active panel,
         # so each dock's own title bar would say the same thing right above
         # it. An empty title-bar widget removes the duplicate (a clean tray
         # look); panels are toggled from the View menu, not dragged around.
         for dock in (self.tray, self.bim_tray, self.georef_tray,
-                     self.project_browser):
+                     self.project_browser, self.sheets_tray):
             dock.setTitleBarWidget(QWidget(dock))
         self.tray.raise_()
         self._build_sidebar_handle()
@@ -780,6 +784,8 @@ class MainWindow(QMainWindow):
             lambda _v: self.georef_tray.on_scene_changed())
         self.viewport.sceneVersionChanged.connect(
             lambda _v: self.project_browser.on_scene_changed())
+        self.viewport.sceneVersionChanged.connect(
+            lambda _v: self.sheets_tray.on_scene_changed())
 
         # Styles, Shadows and Dimension style hang OFF THE TOOLBAR as
         # dropdown panels (user: the lateral bar was drowning, and floating
@@ -1794,6 +1800,7 @@ class MainWindow(QMainWindow):
         choice, the ones most work needs open and the rest wait there
         (``DEFAULT_HIDDEN_TRAYS``)."""
         hidden = self._hidden_tray_names(st)
+        self._place_new_trays(st)
         docks = self._sidebar_docks()
         for d in docks:
             self._keep_docked(d)
@@ -1812,6 +1819,39 @@ class MainWindow(QMainWindow):
         menu = getattr(self, "_panels_menu", None)
         if menu is not None:
             self._fill_panels_menu(menu)
+
+    def _place_new_trays(self, st) -> None:
+        """A tray of the window younger than the layout just restored —
+        the Sheets tab, beside the Browser — is not in that layout (the
+        user's saved one, or the factory blob), and Qt leaves it outside
+        the tabs. Put it among them, right after the tray before it in the
+        factory order, the first time this profile sees it; from then on
+        the layout the user keeps rules it."""
+        from PySide6.QtWidgets import QTabBar
+        known = st.value("ui/known_trays", []) or []
+        if isinstance(known, str):
+            known = [known]
+        known = {str(k) for k in known}
+        order = self._default_tray_order()
+        for prev, dock in zip(order, order[1:]):
+            if dock.objectName() in known or \
+                    dock in self.tabifiedDockWidgets(prev):
+                continue
+            # The docks behind ``prev`` in its row of tabs go behind the new
+            # one: tabify appends, and tabifying again moves to the end.
+            behind: list = []
+            by_title = {d.windowTitle(): d for d in self._sidebar_docks()}
+            for bar in self.findChildren(QTabBar):
+                texts = [bar.tabText(i) for i in range(bar.count())]
+                if prev.windowTitle() in texts:
+                    after = texts[texts.index(prev.windowTitle()) + 1:]
+                    behind = [by_title[t] for t in after
+                              if t in by_title and by_title[t] is not dock]
+                    break
+            self.tabifyDockWidget(prev, dock)
+            for d in behind:
+                self.tabifyDockWidget(dock, d)
+                dock = d
 
     def _keep_docked(self, dock) -> None:
         """The trays stay in the sidebar, as Blender's side panel does
@@ -1866,10 +1906,11 @@ class MainWindow(QMainWindow):
                     sorted({str(k) for k in known} | set(names)))
 
     #: The factory order of the side tray's tabs, all on the right:
-    #: Properties first, the model's tree next, then the workspaces.
+    #: Properties first, the model's tree next and the sheets beside it,
+    #: then the workspaces.
     def _default_tray_order(self) -> list:
-        return [self.tray, self.project_browser, self.bim_tray,
-                self.georef_tray]
+        return [self.tray, self.project_browser, self.sheets_tray,
+                self.bim_tray, self.georef_tray]
 
     def _lay_out_trays(self) -> None:
         """The trays in their factory place: every one on the right, tabbed
@@ -2002,6 +2043,7 @@ class MainWindow(QMainWindow):
                             getattr(self, "bim_tray", None),
                             getattr(self, "georef_tray", None),
                             getattr(self, "project_browser", None),
+                            getattr(self, "sheets_tray", None),
                             *getattr(self, "_extension_docks", ()))
                 if d is not None]
 
