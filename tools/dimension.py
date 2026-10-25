@@ -97,20 +97,21 @@ class DimensionTool(AxisMagnet, Tool):
         p = ctx.world
         self._vp = ctx.viewport
         if self.a is None:
-
             # 17.10.26 BastelBaus: clicking on an edge directly creates
             #                      the dimension from both corners of the edge
-            if ctx.snap.kind == "on_edge" and ctx.snap.edge is not None and \
-               ctx.snap.edge.a is not None and ctx.snap.edge.b is not None:
-                self.a = QVector3D( ctx.snap.edge.a )
-                self.b = QVector3D( ctx.snap.edge.b )
+            edge = getattr(ctx.snap, "edge", None)
+            if (getattr(ctx.snap, "kind", None) == "on_edge"
+                    and edge is not None
+                    and edge.a is not None and edge.b is not None
+                    and (edge.b - edge.a).length() >= 1e-6):
+                self.a = QVector3D(edge.a)
+                self.b = QVector3D(edge.b)
                 self.start_point = self.a
+                self._free = self._hold = None
                 return
-            else:
-                self.a = QVector3D(p)
-                self.start_point = self.a
-                return
-            
+            self.a = QVector3D(p)
+            self.start_point = self.a
+            return
         if self.b is None:
             p = self._frontal(ctx, p)
             if (p - self.a).length() < 1e-6:
