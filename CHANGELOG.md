@@ -4,6 +4,177 @@ All notable changes to IngeTrazo are documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com); versions
 follow [SemVer](https://semver.org).
 
+## [0.5.10] — 2026-10-26
+
+**Motor Rust encendido por defecto y modelos enormes sin tirones.** El motor
+nativo de la 0.5.9 deja de ser experimental: viene activado (el motor de
+Python sigue de reserva y se elige en Preferencias), también en el Flatpak.
+Sobre la planta de 14 millones de caras de #158, pasar el cursor con Línea o
+Rectángulo baja de varios segundos por movimiento a unos 40 ms, y un clic de
+selección de 1,2 s a 0,2 s. Mover, deshacer, borrar, pegar y entrar o salir
+de un grupo tocan solo lo que cambió, no el modelo entero. Llegan el
+enganche donde se cruzan dos caras, Cámara ▸ Ejes y Cámara ▸ Campo de
+visión, y unos sesenta arreglos.
+
+### Añadido
+- **Cámara ▸ Ejes (Alt+A)** (#398, #557, Gabriel Rodríguez,
+  @canalsecuario-blip): muestra u oculta los ejes rojo, verde y azul del
+  mundo. Solo se deja de dibujarlos: las inferencias sobre ellos y los
+  bloqueos con flechas siguen, y un grupo abierto muestra sus propios ejes.
+  Se guarda en el documento.
+- **Cámara ▸ Campo de visión…** (#826): el ángulo de la lente de la vista
+  3D, de 10° a 120° (antes fijo en 45°). Se guarda con la cámara y con las
+  escenas; en vista paralela no aplica y la barra de estado lo dice.
+- **Enganche «Intersección» donde se cruzan dos caras** sin arista entre
+  ellas (#819, @xcd-droid): se puede empezar o terminar una línea justo en
+  esa recta. Las aristas reales y los puntos con nombre siguen ganando.
+- **Mover, copiar y Rotar guías** como el resto del modelo; Seleccionar
+  todo las incluye (#627, @canalsecuario-blip).
+- **Ctrl+Intro acepta el diálogo de texto con directriz** (Alexis).
+
+### Cambiado
+- **Motor Rust activado por defecto** con Python de reserva: quien no lo
+  eligió nunca recibe Rust; quien lo apagó lo sigue teniendo apagado; si el
+  módulo no carga, o un arranque no llega a dibujar, IngeTrazo vuelve al
+  motor de Python. Los textos dejan de decir «experimental» en los diez
+  idiomas.
+- **El Flatpak lleva el motor Rust** (#767).
+- **Windows: el motor Rust acelera también ahí el cursor sobre modelos
+  enormes.** Los rayos de oclusión y los cálculos de caras en Rust solo se
+  usan si reproducen bit a bit la longitud de vector de Qt, y solo conocían
+  la fórmula de Linux (libstdc++); el Qt de Windows está compilado con MSVC,
+  que redondea distinto, y todo iba por el camino lento (los saltos de
+  hasta 1,2 s con Línea sobre el SPR en la ronda de Windows). Ahora también
+  conocen la de MSVC, comprobada contra su código fuente en 3,3 millones de
+  vectores; `--check` dice cuál se usa.
+- **Modelos enormes (#158)**, con el motor Rust:
+  - pasar el cursor con las herramientas de dibujo sobre la planta de 14 M
+    caras: de segundos por movimiento a ~40 ms. Las copias ligeras ya no se
+    convierten en malla para responder al cursor: esquinas, aristas, caras
+    y oclusión se calculan en Rust sobre las copias tal como están; lo que
+    tapa el modelo se descarta con la profundidad del cuadro; mientras solo
+    se mueve el cursor, se redibuja el cursor sobre la imagen guardada del
+    modelo (GPU 40 → 3 ms por cuadro). El resultado es el mismo punto por
+    punto que antes, comprobado con A/B de inferencias en cuatro modelos;
+  - un clic de selección: 1,2 s → 0,2 s;
+  - mover, soltar y deshacer: actualizan solo las copias que se movieron
+    (antes ~3 s cada uno);
+  - borrar, pegar, entrar y salir de un grupo: se conserva todo lo que no
+    cambió (entrar a un grupo en la planta: 821 → 331 ms de sincronización);
+  - orbitar: no se dibujan las copias de menos de un píxel (70 % de las
+    caras vistas de lejos) y se reutilizan los lotes mientras la vista no
+    sale de ellos.
+- **Las guías ya no ralentizan cada cuadro** (#816): 40 guías en la plaza
+  subían el cuadro de 18 a 112 ms; ahora 29 ms.
+- **La toma de medidas BIM no vuelve a medir al seleccionar**; una edición
+  mide solo lo que tocó (#857, modelo de @buildsmart888).
+- **Linux: la memoria ya no crece al reabrir** documentos grandes (límite de
+  dos zonas de malloc; la plaza reabierta 15 veces se queda en ~795 MB).
+- **Zoom: acercarse hasta 5 mm** de una pieza pequeña, en vez de 2 cm (#653,
+  #692, @canalsecuario-blip).
+- **Paint explica** por qué no cambia un componente con todas sus caras ya
+  pintadas (#807).
+- **El asistente de IA responde en el idioma del usuario** (#790).
+
+### Corregido
+- **Selección**: sin marcado de la cara bajo el cursor con la herramienta
+  Seleccionar (#832, @GitHuhl); Paint no marca caras sobre un grupo o
+  componente cerrado (@canalsecuario-blip); el botón derecho sobre
+  geometría suelta seleccionada pegada a un grupo la conserva (#744).
+- **Inferencias**: una arista bajo el cursor gana al bloqueo perpendicular
+  desde una esquina (#544, @pkoska); Línea empieza de cero cuando un tramo
+  corta una cara (#496, @pkoska); sin «En arista» justo pasado el extremo de
+  una arista suelta (#587); un bloqueo de eje ignora la posición lateral del
+  cursor (#769); un punto en una línea de bloqueo conserva su color (#711);
+  ningún NaN llega a una herramienta o a la malla (#466, #754).
+- **Empujar/Tirar**: una línea entre dos pinturas sobrevive a un aterrizaje
+  a ras (#649, Francis Rebouças); una esquina empujada a través de un
+  tablero delgado lo corta (#710, Francis Rebouças); una lámina que la
+  reconstrucción devuelve igual sigue siendo del usuario (#552); las
+  propias paredes de la cara empujada no son un nivel al que llegar (#839,
+  mediciones de @hamzah1985).
+- **Geometría**: un lazo que rodea o cruza un hueco no queda dentro de la
+  cara (#519); un pliegue que muere dentro de un plano no delimita nada
+  (#570); Intersecar con el modelo corta la selección también contra sí
+  misma (#541); un rectángulo contra el borde de un vano agranda el vano
+  (#489); un bloque levantado de una lámina junto a otra queda hacia fuera
+  (#550); borrar la línea bajo una ventana conserva el frente del muro
+  (#356); dibujar sobre un plano DWG explotado sin congelarse ni perder la
+  línea (#491); un círculo plano inclinado lejos del origen vuelve a ser
+  plano (#571, @canalsecuario-blip).
+- **Cotas**: ya no se duplican en cada reapertura (#765, @tony1233200) y al
+  abrir se reparan las ya duplicadas; se quedan en su sitio al entrar a un
+  componente, siguen al objeto en que se dibujaron y acompañan la vista
+  previa de Mover/Rotar (#621, Francis Rebouças); Mayús y flechas bloquean
+  también el paso de colocación (#770, #810, @pacaeiro); una cota sobre una
+  arista colapsada vuelve con ella al deshacer (#254); una cota anclada del
+  compositor sigue a su vértice (#854).
+- **Deshacer/Rehacer**: rehacer Crear grupo devuelve el mismo grupo, así no
+  se pierde el rehacer de Explotar (#737, @canalsecuario-blip); deshacer
+  Cambiar ejes devuelve las copias exactas, y un componente que conservaba
+  los ejes de grupo toma el nuevo marco (#484).
+- **Herramientas**: la Cinta deja el tramo discontinuo del punto guía
+  (#693, Francis Rebouças); el Rectángulo en reposo muestra su vista previa
+  desde la esquina del lápiz (#848, @hamzah1985); los tiradores delanteros
+  de Escalar se dibujan y eligen antes que los traseros (#833); el cuadro
+  de medidas muestra el valor al reescribir en caliente (#859); Ampliar
+  selección cuenta una guía por su punto, no por su segmento de 10 km
+  (#627).
+- **Áreas y capas**: Info. de entidad y la toma de acabados restan los
+  huecos de la cara; Piezas y la etiqueta de Texto leen el área neta (#742,
+  @tony1233200); el contenido sin capa de un grupo abierto sigue la capa
+  del grupo (#366).
+- **Dibujo en pantalla**: una copia rotada de un componente se ilumina como
+  está colocada (#482); una guía lejana conserva sus trazos (#481);
+  alejarse tras un zoom profundo devuelve la precisión de profundidad
+  (#579); una imagen de referencia delante de una cara recibe el clic
+  (#426); una imagen de .skp pegada a una cara se queda en ella (#429);
+  rotar un grupo conserva la textura de las caras sin mapa UV (#847,
+  @tony1233200); Render ▸ «Cambiar fecha y hora…» vuelve a abrir el panel
+  de Sombras (Victor Crespo).
+- **Nuevo y Abrir** vacían los materiales y la lectura UTM del documento
+  anterior (#759, @tony1233200).
+- **Importar y exportar**: cada material conserva su nombre y la pintura de
+  un grupo llega a GLB, DAE y OBJ (#794); las superficies curvas salen
+  suaves (#131); los archivos en coordenadas topográficas llegan cerca del
+  origen y sin deformarse en OBJ, STL, glTF y DAE (#798) (los tres de
+  @canalsecuario-blip); las líneas sueltas de un COLLADA entran como
+  aristas (#633); importar un .skp grande mantiene viva la ventana (#787).
+- **Extensiones**: se listan las gestionadas que salieron del catálogo y se
+  apartan al reemplazarlas (#611, @pkoska); se reconocen las copias
+  instaladas a mano con finales de línea CRLF (#764, @tony1233200); una
+  extensión del botón derecho que falla o tarda se omite en la sesión
+  (#588); las barras de las extensiones vuelven a su sitio tras el
+  arranque asíncrono (#845, @hamzah1985).
+- **Seguridad**: un archivo comprimido de fuera (.igz, KMZ, portapapeles,
+  biblioteca) no puede desempaquetarse hasta llenar la memoria («bomba
+  zip»), y un documento real de más de 4 GB sigue abriendo (Victor Crespo).
+- **Plataformas**: Windows: el registro de errores descarta al arrancar los
+  errores COM manejados de la sesión anterior (#763), y reacomodar las barras no deja pequeña una ventana
+  maximizada (#800); algunos controladores gráficos de Windows con
+  respuestas falsas ya no hacen saltar el repintado grabado; AppImage: las
+  carpetas y enlaces se abren con el entorno del sistema (#456); motor
+  Rust: los colores con transparencia (RGBA) ya no impiden dibujar el
+  modelo.
+
+### Créditos
+- Código: Gabriel Rodríguez (@canalsecuario-blip), Pedro Caeiro
+  (@pacaeiro), Francis Rebouças, @pkoska, @tony1233200, @hamzah1985,
+  Victor Crespo y Alexis. Reportes y modelos: @xcd-droid, @GitHuhl,
+  @buildsmart888 y todos los que abrieron issues.
+- Difusión: gracias a los canales de YouTube que mostraron IngeTrazo —
+  Blender 3D Architect, IngeTrazo Tutorials, JRobredo3D, Rafael 3D, Allan
+  Brito, Savoirpourtous, BuildSmart Learning y todos los que le dedicaron un
+  vídeo.
+
+### Para desarrolladores
+- **Una prueba falla si `INGETRAZO_RUST=1` corre sin el módulo o con uno
+  desactualizado** (huella de las fuentes Rust).
+- `scripts/profile_window_open.py`: abrir un documento en la ventana fase
+  por fase (segundos, memoria residente y pico), en Linux y Windows (#760).
+- Las pruebas que muestran una ventana para GL la cierran antes de
+  saltarse.
+
 ## [0.5.9] — 2026-10-19
 
 **Motor Rust experimental, modelos enormes mucho más fluidos y una semana

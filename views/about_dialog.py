@@ -44,7 +44,8 @@ CONTRIBUTORS = [
      "https://github.com/pacaeiro"),
     ("Gabriel Rodríguez Arregin",
      "Architect. The units system, the Browser, the Solid Inspector, "
-     "Fillet 3D bevels, Join Segments and many everyday editing tools.",
+     "Fillet 3D bevels, Join Segments, Camera ▸ Axes, cleaner exports "
+     "and many everyday editing tools.",
      "https://github.com/canalsecuario-blip"),
     ("Félix Riestra",
      "The macOS package: IngeTrazo for Mac. Components that come apart "
@@ -131,12 +132,12 @@ CONTRIBUTORS = [
      "Russian translation of the interface.",
      "https://github.com/RomanErshow"),
     ("Francis Rebouças",
-     "Sheet dimensions and level marks in the document's units, and "
-     "sheets made from the AI bridge undone in one step.",
+     "Sheet dimensions and level marks in the document's units, "
+     "dimensions that follow their object, and Push/Pull fixes.",
      "https://github.com/francisreboucas"),
     ("pkoska",
-     "Fixes for the location map, Move's rotation grips and typed "
-     "values.",
+     "Fixes for the location map, Move's rotation grips, typed values, "
+     "the Line tool, snapping and the extension manager.",
      "https://github.com/pkoska"),
     ("Matt Van Horn",
      "A fix for the AI Assistant crash in the Flatpak.",
@@ -146,7 +147,8 @@ CONTRIBUTORS = [
      "retype.",
      "https://github.com/luisfergromo"),
     ("Victor Crespo",
-     "A confirmation before installing an extension nobody has reviewed.",
+     "A confirmation before installing an extension nobody has reviewed, "
+     "and safer archives from outside.",
      "https://github.com/vicc3d"),
     ("APBureauEtude",
      "OBJ and MTL files read and written as UTF-8 on every system.",
@@ -183,6 +185,23 @@ CONTRIBUTORS = [
      "Feature requests from modelling practice: 3D text, copies along "
      "Follow Me, points and Push/Pull on lines.",
      "https://github.com/arthurarquitetoamb"),
+    ("tony1233200",
+     "Fixes for reopened dimensions, New's materials, the extension "
+     "manager, face areas and textures on rotated groups.",
+     "https://github.com/tony1233200"),
+    ("Bogdan Demchenko",
+     "Extension toolbars back in place at start-up, and the Rectangle's "
+     "preview.",
+     "https://github.com/hamzah1985"),
+    ("Alexis",
+     "Ctrl+Enter in the leader-text dialog.",
+     "https://github.com/bernalalexis-try"),
+    ("SPMech",
+     "Reports and requests from mechanical modelling.",
+     "https://github.com/SPMech"),
+    ("xcd-droid",
+     "Reports on snapping, the Rectangle and pasting.",
+     "https://github.com/xcd-droid"),
 ]
 
 #: Roll speed: pixels per tick, and the tick.

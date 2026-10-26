@@ -75,6 +75,21 @@
   <url type="vcs-browser">https://github.com/ingelibre/ingetrazo</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.5.10" date="2026-10-26">
+      <description>
+        <p>The Rust engine is now on by default, in this Flatpak too, with
+        the Python engine as a fallback; huge models no longer lag while
+        drawing, selecting, moving and undoing; a snap where two faces
+        cross; Camera, Axes to hide the world axes and Camera, Field of
+        View to set the lens; and about sixty fixes.</p>
+        <p xml:lang="es">El motor Rust viene activado por defecto, también
+        en este Flatpak, con el motor de Python de reserva; los modelos
+        enormes ya no dan tirones al dibujar, seleccionar, mover y
+        deshacer; enganche donde se cruzan dos caras; Cámara, Ejes para
+        ocultar los ejes del mundo y Cámara, Campo de visión para elegir la
+        lente; y unos sesenta arreglos.</p>
+      </description>
+    </release>
     <release version="0.5.9" date="2026-10-19">
       <description>
         <p>An experimental Rust engine (off by default) that makes hidden

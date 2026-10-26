@@ -37,6 +37,8 @@ def _viewport():
     _app.processEvents()
     vp = win.viewport
     if getattr(vp, "_gl", None) is None or not vp.isValid():
+        win._saved_version = vp.scene.version   # not left shown (see
+        win.close()                             # test_guides_behind_geometry)
         pytest.skip("no OpenGL context on this platform")
     vp.scene.mesh.add_face([V(0, 0, 0), V(4, 0, 0), V(4, 4, 0), V(0, 4, 0)])
     vp.scene.mesh.add_face([V(1, 1, 2), V(3, 1, 2), V(3, 3, 2), V(1, 3, 2)])
