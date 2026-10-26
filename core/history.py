@@ -96,6 +96,14 @@ class CommandRejected(Exception):
 class Command(ABC):
     """Abstract reversible operation against a :class:`Scene`."""
 
+    #: Whether doing or undoing it leaves every material where it was —
+    #: which ones the model wears (see ``History.paint_cv``).
+    keeps_paint = False
+    #: Whether doing or undoing it only puts groups in the model or takes
+    #: them out, whole, and leaves every group that stays as it was — its
+    #: Browser row, the paint of its faces (see ``History.groups_cv``).
+    keeps_groups = False
+
     @abstractmethod
     def do(self, scene) -> None:
         """Apply the operation."""
@@ -172,6 +180,54 @@ class History:
         self.last_error: Optional[str] = None
         #: Why the last command declined to happen (:class:`CommandRejected`).
         self.last_rejected: Optional[str] = None
+        #: The content version up to which nothing but commands that keep
+        #: paint changed the model since the materials panel last scanned
+        #: it (it sets this): a Move needs no new scan — 0.4 s on the plant
+        #: of #158. Anything else, history or not, leaves it behind.
+        self.paint_cv = None
+        #: The same, for the Browser's rows (views/outliner.py): a command
+        #: that keeps paint moves things, and no row shows where a thing is.
+        self.rows_cv = None
+        #: Per reader («paint» the materials panel, «rows» the Browser), the
+        #: content version up to which nothing but commands that keep paint
+        #: or keep groups changed the model since that reader last went
+        #: through it all: a Delete or a Paste only adds or takes away an
+        #: object or two, and the reader need not go through the 21 406
+        #: others again (#158). The reader sets its own entry.
+        self.groups_cv: dict = {}
+
+    def _keep_paint_cv(self, cmd, before) -> None:
+        if before is None:
+            return
+        keeps = getattr(cmd, "keeps_paint", False)
+        if not (keeps or getattr(cmd, "keeps_groups", False)):
+            return
+        cv = getattr(self.scene, "content_version", None)
+        if keeps:
+            if self.paint_cv == before:
+                self.paint_cv = cv
+            if self.rows_cv == before:
+                self.rows_cv = cv
+        for k, v in self.groups_cv.items():
+            if v == before:
+                self.groups_cv[k] = cv
+
+    def context_changed(self, before) -> None:
+        """A group opened or closed (content version ``before`` → now):
+        what the model wears is the same — the meshes that changed (an
+        instance's world copy, a container's matrix pushed down, a copy
+        shared back) are read again by their serial — so the Materials
+        panel keeps its scan: on the plant of #158 it read 2 722 meshes
+        again, ~0.35 s each way."""
+        cv = getattr(self.scene, "content_version", None)
+        if before is None:
+            return
+        # The Browser's rows too: only the open path's and the copies of a
+        # component whose count moved read differently (see
+        # OutlinerPanel.refresh).
+        for k in ("paint", "rows"):
+            if self.groups_cv.get(k) == before:
+                self.groups_cv[k] = cv
 
     def execute(self, cmd: Command) -> None:
         _t0 = _time_mod.perf_counter() if _PERF else 0.0
@@ -181,6 +237,7 @@ class History:
                   (_time_mod.perf_counter() - _t0) * 1000.0,
                   extra=type(cmd).__name__)
         self.last_rejected = None
+        before = getattr(self.scene, "content_version", None)
         try:
             cmd.do(self.scene)
         except CommandRejected as exc:
@@ -204,6 +261,7 @@ class History:
         # edited): undo/redo re-enter that context so a snapshot restore never
         # lands on the wrong mesh after the user exits the group.
         cmd._history_mesh = self.scene.mesh
+        self._keep_paint_cv(cmd, before)
         self.undo_stack.append(cmd)
         cap = int(getattr(self, "max_steps", 0) or 0)
         if cap > 0 and len(self.undo_stack) > cap:
@@ -249,7 +307,9 @@ class History:
         if not self.undo_stack:
             return False
         cmd = self.undo_stack.pop()
+        before = getattr(self.scene, "content_version", None)
         self._in_command_mesh(cmd, lambda: cmd.undo(self.scene))
+        self._keep_paint_cv(cmd, before)
         self.redo_stack.append(cmd)
         self._rebind_dimensions()
         return True
@@ -258,7 +318,9 @@ class History:
         if not self.redo_stack:
             return False
         cmd = self.redo_stack.pop()
+        before = getattr(self.scene, "content_version", None)
         self._in_command_mesh(cmd, lambda: cmd.do(self.scene))
+        self._keep_paint_cv(cmd, before)
         self.undo_stack.append(cmd)
         self._rebind_dimensions()
         return True
@@ -1318,6 +1380,8 @@ class MoveTextLabelsCommand(Command):
     the anchor stays pinned and the leader stretches (the classic Move-on-
     text behaviour)."""
 
+    keeps_paint = True
+
     def __init__(self, labels, delta) -> None:
         self._labels = list(labels)
         self._delta = QVector3D(delta)
@@ -1337,6 +1401,8 @@ class MoveGuidesCommand(Command):
     """Translate construction guides (Tape Measure) with the Move tool
     (#627). A guide line slides parallel to itself; a guide point carries
     its ``origin`` along, so the dashed segment it draws keeps its shape."""
+
+    keeps_paint = True
 
     def __init__(self, guides, delta) -> None:
         self._guides = list(guides)
@@ -1415,6 +1481,8 @@ class MoveDimensionsCommand(Command):
     (Marco, 2026-09-20). A dimension with a free endpoint moves that
     endpoint rigidly instead. ``modes`` maps each dimension to ``"line"``
     or ``"rigid"``, decided by the tool at grab time."""
+
+    keeps_paint = True
 
     def __init__(self, modes: dict, delta) -> None:
         self._modes = dict(modes)
@@ -1827,6 +1895,8 @@ class DeleteScenesCommand(Command):
 class MoveSectionPlanesCommand(Command):
     """Translate section planes (the Move tool)."""
 
+    keeps_paint = True
+
     def __init__(self, planes, delta: QVector3D) -> None:
         self._planes = list(planes)
         self.delta = QVector3D(delta)
@@ -2033,6 +2103,8 @@ class MoveImagePlanesCommand(Command):
     """Translate reference images (the Move tool). Only the origin corner
     moves — the edge vectors carry size and orientation, so a move can never
     resize or turn the picture by accident."""
+
+    keeps_paint = True
 
     def __init__(self, images, delta: QVector3D) -> None:
         self._images = list(images)
@@ -2531,6 +2603,8 @@ class FlipGroupsCommand(Command):
     keeps its faces pointing OUT. A reflection is an involution: undo flips
     again."""
 
+    keeps_paint = True
+
     def __init__(self, groups, centre: QVector3D, axis: QVector3D) -> None:
         self._groups = list(groups)
         self.centre = QVector3D(centre)
@@ -2632,6 +2706,8 @@ class RotateVerticesCommand(Command):
 class RotateGroupCommand(Command):
     """Rotate a whole group's isolated mesh (rigid — nothing folds). Snapshot
     undo/redo on the group's own mesh."""
+
+    keeps_paint = True
 
     def __init__(self, group, center: QVector3D, axis: QVector3D,
                  degrees: float) -> None:
@@ -2755,6 +2831,8 @@ class ScaleVerticesCommand(Command):
 class ScaleGroupCommand(Command):
     """Uniformly scale a whole group's isolated mesh about ``center``.
     Snapshot undo/redo on the group's own mesh."""
+
+    keeps_paint = True
 
     def __init__(self, group, center: QVector3D, factor: float,
                  axes=None) -> None:
@@ -3740,6 +3818,8 @@ class InsertGroupCommand(Command):
     is expressed in the container's own space when that one carries a
     matrix (entering usually pushes it down into the children already)."""
 
+    keeps_groups = True
+
     def __init__(self, group) -> None:
         self.group = group
         self._owner: Optional[list] = None
@@ -4321,6 +4401,8 @@ class MoveGroupCommand(Command):
     """Translate a whole group by ``delta`` (every vertex of its mesh). Because
     the group is isolated, this never drags the rest of the model."""
 
+    keeps_paint = True
+
     def __init__(self, group: Group, delta: QVector3D) -> None:
         self.group = group
         self.delta = QVector3D(delta)
@@ -4539,6 +4621,8 @@ class DeleteGroupCommand(Command):
     on one of its parts used to look for it in ``scene.groups`` and fail —
     rolled back, nothing on screen, «quiero eliminar, tampoco puedo»
     (Marco, 2026-09-11, a fountain inside an imported component)."""
+
+    keeps_groups = True
 
     def __init__(self, group: Group) -> None:
         self.group = group
@@ -4926,6 +5010,16 @@ class CompoundCommand(Command):
 
     def __init__(self, commands: Iterable[Command]) -> None:
         self.commands: list[Command] = list(commands)
+
+    @property
+    def keeps_paint(self) -> bool:
+        return all(getattr(c, "keeps_paint", False) for c in self.commands)
+
+    @property
+    def keeps_groups(self) -> bool:
+        return all(getattr(c, "keeps_paint", False)
+                   or getattr(c, "keeps_groups", False)
+                   for c in self.commands)
 
     def do(self, scene) -> None:
         done = []

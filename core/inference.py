@@ -180,7 +180,9 @@ class InferenceEngine:
             candidate_world=world_raw,
             candidate_pixel=(px_x, px_y),
             scene=vp._snap_scene(px_x, px_y),
-            world_to_pixel=vp._world_to_pixel,
+            world_to_pixel=(vp._pixel_projector()
+                            if hasattr(vp, "_pixel_projector")
+                            else vp._world_to_pixel),
             threshold_px=vp.snap_threshold_px,
             project_onto_line=lambda s, d: vp._project_to_lock_line(
                 s, d, px_x, px_y),
