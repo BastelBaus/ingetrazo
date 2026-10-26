@@ -56,6 +56,7 @@ from core.i18n import tr
 from views.theme import style as theme_style
 from views.filedialogs import file_dialogs
 from core.mesh import Edge, Face
+from core.bim import face_net_area
 from core.group import Group
 from core.dimension import Dimension
 from core.textlabel import TextLabel
@@ -207,6 +208,16 @@ def _default_pixmap(size=_SWATCH) -> QPixmap:
 _texture_swatches: dict = {}
 
 
+def _file_stamp(path):
+    """What tells a picture file changed on disk (``None``: unreadable)."""
+    import os
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
 def _texture_pixmap(path, size=_SWATCH) -> QPixmap | None:
     """A swatch of the image at *path*. Read with the allocation limit off:
     ``QImage(path)`` refuses anything over Qt's 256 MB default, so a big
@@ -274,6 +285,7 @@ class FlowLayout(QLayout):
     # ---- QLayout interface ---------------------------------------------------
     def addItem(self, item) -> None:            # noqa: N802 — Qt override
         self._items.append(item)
+        self._hfw = None
 
     def addWidget(self, w, *_grid_pos) -> None:  # noqa: N802 — Qt override
         super().addWidget(w)
@@ -288,7 +300,12 @@ class FlowLayout(QLayout):
         return self._items[index] if 0 <= index < len(self._items) else None
 
     def takeAt(self, index: int):               # noqa: N802
+        self._hfw = None
         return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def invalidate(self) -> None:               # noqa: N802 — Qt override
+        self._hfw = None
+        super().invalidate()
 
     def expandingDirections(self):              # noqa: N802
         return Qt.Orientations(Qt.Orientation(0))
@@ -297,7 +314,15 @@ class FlowLayout(QLayout):
         return True
 
     def heightForWidth(self, width: int) -> int:  # noqa: N802
-        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+        # Asked again and again for the same width while the tray lays
+        # itself out (4 000 times after one edit on the plant of #158,
+        # ~0.2 s): kept until an item comes, goes or changes size.
+        hit = getattr(self, "_hfw", None)
+        if hit is not None and hit[0] == width:
+            return hit[1]
+        h = self._do_layout(QRect(0, 0, width, 0), test_only=True)
+        self._hfw = (width, h)
+        return h
 
     def setGeometry(self, rect) -> None:        # noqa: N802
         super().setGeometry(rect)
@@ -1224,7 +1249,17 @@ class ComponentsPanel(QWidget):
         thumbnail changed: on the Plaza that was +20 ms on every edit, its
         section folded or its tab hidden (release_check, 09-10). Refreshed
         now when on screen, on showing otherwise — like the Browser. A
-        window not shown yet (scripts, tests) refreshes at once, as before."""
+        window not shown yet (scripts, tests) refreshes at once, as before.
+
+        A change of the view alone (a selection, a group opened) leaves the
+        list as it is and only marks the selected row: on the plant of #158
+        every click rebuilt it — 0.1 s of ~1 s per click."""
+        cv = self._window.viewport.scene.content_version
+        if (cv == getattr(self, "_in_model_cv", None)
+                and not getattr(self, "_in_model_stale", False)
+                and self._in_model.count()):
+            self._mark_selected_row()
+            return
         if not self._window.isVisible():
             self.refresh_in_model()
             return
@@ -1254,13 +1289,47 @@ class ComponentsPanel(QWidget):
 
     def refresh_in_model(self) -> None:
         from views.component_thumbs import thumbnail
-        self._in_model.clear()
-        for name, faces, gs, kept in self._components_in_model():
-            copies = len(gs)
-            label = f"{name}  ({copies}×, {faces} " + tr("Faces").lower() + ")"
+        self._in_model_cv = self._window.viewport.scene.content_version
+        rows = self._components_in_model()
+
+        def label_of(name, faces, gs, kept):
+            label = (f"{name}  ({len(gs)}×, {faces} " + tr("Faces").lower()
+                     + ")")
             if kept is not None:
                 label += "  · " + tr("kept")
-            item = QListWidgetItem(label)
+            return label
+
+        def ident(gs, kept):
+            d = gs[0] if gs else kept
+            return id(d.mesh) if d is not None else None
+        # The same definitions in the same order (a copy deleted or pasted:
+        # one count changes): the rows are brought up to date where they
+        # are. Emptied and filled again, the list of 1 815 laid the whole
+        # tray out again, ~0.3 s after each edit on the plant of #158.
+        lst = self._in_model
+        if (rows and lst.count() == len(rows)
+                and all(ident(lst.item(i).data(Qt.UserRole) or [],
+                              lst.item(i).data(Qt.UserRole + 1))
+                        == ident(r[2], r[3]) for i, r in enumerate(rows))):
+            # Only what differs is set: each change of a row makes the
+            # list lay all of them out again.
+            for i, (name, faces, gs, kept) in enumerate(rows):
+                item = lst.item(i)
+                label = label_of(name, faces, gs, kept)
+                if item.text() != label:
+                    item.setText(label)
+                old = item.data(Qt.UserRole) or []
+                if len(old) != len(gs) or any(a is not b
+                                              for a, b in zip(old, gs)):
+                    item.setData(Qt.UserRole, gs)
+                if item.data(Qt.UserRole + 1) is not kept:
+                    item.setData(Qt.UserRole + 1, kept)
+            self._mark_selected_row()
+            self._apply_in_model_filter()
+            return
+        self._in_model.clear()
+        for name, faces, gs, kept in rows:
+            item = QListWidgetItem(label_of(name, faces, gs, kept))
             item.setIcon(self._blank_thumb())
             item.setData(Qt.UserRole, gs)
             item.setData(Qt.UserRole + 1, kept)
@@ -1298,18 +1367,28 @@ class ComponentsPanel(QWidget):
         from views.component_thumbs import thumbnail
         lst = self._in_model
         area = lst.viewport().rect()
-        for i in range(lst.count()):
+        # From the first row on screen down to the last: asking every row
+        # of 1 815 for its place took ~0.15 s after each edit (#158).
+        first = lst.indexAt(area.topLeft()).row()
+        for i in range(max(first, 0), lst.count()):
             item = lst.item(i)
-            if item.isHidden() or item.data(Qt.UserRole + 2):
+            if item.isHidden():
                 continue
-            if not lst.visualItemRect(item).intersects(area):
+            rect = lst.visualItemRect(item)
+            if rect.top() > area.bottom():
+                break
+            if not rect.intersects(area):
                 continue
             groups = item.data(Qt.UserRole) or []
             definition = groups[0] if groups else item.data(Qt.UserRole + 1)
             if definition is None:
                 continue
-            item.setIcon(QIcon(thumbnail(definition)))
-            item.setData(Qt.UserRole + 2, True)
+            # The picture (from the cache while the definition is as it
+            # was) is set when it is not the one the row shows already.
+            pm = thumbnail(definition)
+            if item.data(Qt.UserRole + 2) != pm.cacheKey():
+                item.setIcon(QIcon(pm))
+                item.setData(Qt.UserRole + 2, pm.cacheKey())
 
     def _mark_selected_row(self) -> None:
         """Light the row whose instances are what the model has selected.
@@ -2221,6 +2300,20 @@ class MaterialsPanel(QWidget):
 
     def refresh_in_model(self) -> None:
         """Rebuild the 'En el modelo' swatches from the materials in use."""
+        vp = self._window.viewport
+        self._in_model_cv = vp.scene.content_version
+        hist = getattr(vp, "history", None)
+        # What each mesh wears, from the last scan, holds while nothing but
+        # commands that keep groups (or paint) changed the model since: a
+        # Delete or a Paste beside 2 722 meshes reads only the new ones
+        # (~0.4 s on the plant of #158).
+        worn = getattr(self, "_worn_by_mesh", None)
+        if (worn is None or hist is None
+                or hist.groups_cv.get("paint") != self._in_model_cv):
+            worn = self._worn_by_mesh = {}
+        if hist is not None:
+            hist.paint_cv = self._in_model_cv
+            hist.groups_cv["paint"] = self._in_model_cv
         # Keep the tray where the user left it. The old swatches only went
         # away at the next event-loop turn (deleteLater), so for a moment
         # the grid held both sets, grew, and the scroll area jumped — the
@@ -2232,18 +2325,37 @@ class MaterialsPanel(QWidget):
             area = area.parent()
         bar = area.verticalScrollBar() if area is not None else None
         keep = bar.value() if bar is not None else None
-        while self._in_model_grid.count():
-            item = self._in_model_grid.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.hide()
-                w.setParent(None)
-                w.deleteLater()
         colors: dict = {}
         textures: dict = {}
         opacities: dict = {}   # texture path → translucency (glass)
         names: dict = {}     # swatch key → material name (registry identity)
         scene = self._window.viewport.scene
+
+        live: dict = {}
+
+        def mesh_wears(mesh, face_attrs):
+            # Each mesh's first face of every distinct paint, in face order:
+            # what the tally below keeps of it (a later face with the same
+            # name, picture, opacity and colour adds nothing).
+            m = mesh.__dict__.get("_mut_serial") if hasattr(
+                mesh, "__dict__") else None
+            hit = worn.get(id(mesh))
+            if hit is not None and hit[0] is mesh and hit[1] == m:
+                live[id(mesh)] = hit
+                return hit[2]
+            out, keys = [], set()
+            for attrs in face_attrs(mesh):
+                tex = attrs.get("texture")
+                path = tex.get("path") if tex else None
+                col = attrs.get("color")
+                k = (attrs.get("mat"), path,
+                     attrs.get("opacity") if path else None,
+                     None if path or col is None else tuple(col))
+                if k not in keys:
+                    keys.add(k)
+                    out.append(attrs)
+            live[id(mesh)] = (mesh, m, out)
+            return out
 
         def in_use():
             # The first wear of each paint is all the tally keeps, so each
@@ -2257,7 +2369,7 @@ class MaterialsPanel(QWidget):
             for g, _m in scene.placements():
                 if id(g.mesh) not in seen:
                     seen.add(id(g.mesh))
-                    yield from face_attrs(g.mesh)
+                    yield from mesh_wears(g.mesh, face_attrs)
             # A group's paint lives on the group, not on its faces (#133,
             # @fafecm: it only showed up here once the group was exploded).
             from core.group import iter_placements
@@ -2267,7 +2379,9 @@ class MaterialsPanel(QWidget):
                     if paint:
                         yield paint
 
-        for attrs in in_use():
+        tally = list(in_use())
+        self._worn_by_mesh = live        # the meshes the model still has
+        for attrs in tally:
             mat = attrs.get("mat")
             tex = attrs.get("texture")
             if tex and tex.get("path"):
@@ -2282,6 +2396,24 @@ class MaterialsPanel(QWidget):
                     colors[tuple(col)] = col
                     if mat:
                         names.setdefault(("c", tuple(col)), mat)
+        # The same swatches as on screen (a Delete, a Paste that brought no
+        # new paint): they stay — laying out a hundred buttons again took
+        # ~0.2 s on the plant of #158.
+        sig = (tuple((k, tuple(c), names.get(("c", k)))
+                     for k, c in colors.items()),
+               tuple((p, repr(sorted(t.items())), names.get(("t", p)),
+                      opacities.get(p), _file_stamp(p))
+                     for p, t in textures.items()))
+        if (sig == getattr(self, "_swatch_sig", None)
+                and self._in_model_grid.count() == self._swatch_count):
+            return
+        while self._in_model_grid.count():
+            item = self._in_model_grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.hide()
+                w.setParent(None)
+                w.deleteLater()
         i = 0
         for col in colors.values():
             # A named material shows its NAME (the registry identity the
@@ -2317,6 +2449,8 @@ class MaterialsPanel(QWidget):
                     lambda _pos, n=t_name, w=b: self._swatch_menu(w, n))
             self._in_model_grid.addWidget(b, i // self.COLS, i % self.COLS)
             i += 1
+        self._swatch_sig = sig
+        self._swatch_count = self._in_model_grid.count()
         if bar is not None and keep is not None:
             from PySide6.QtCore import QTimer
             bar.setValue(keep)
@@ -3503,7 +3637,7 @@ class EntityInfoPanel(QWidget):
             e = sel[0]
             if isinstance(e, Face):
                 mat = self._material_of(e)
-                return (f"<b>{tr('Face')}</b><br>{tr('Area')}: {fmt_area(e.area())}<br>"
+                return (f"<b>{tr('Face')}</b><br>{tr('Area')}: {fmt_area(face_net_area(e))}<br>"
                         f"{tr('Vertices')}: {len(e.vertices)}<br>"
                         f"{tr('Material')}: {mat}")
             if isinstance(e, Edge):
@@ -3552,7 +3686,8 @@ class EntityInfoPanel(QWidget):
         # every selection change would slow the panel down.
         if len(sel) <= self.TOTALS_UP_TO:
             if counts["faces"]:
-                area = sum(e.area() for e in sel if isinstance(e, Face))
+                area = sum(face_net_area(e) for e in sel
+                           if isinstance(e, Face))
                 text += f"<br>{tr('Area')}: {fmt_area(area)}"
             if counts["edges"]:
                 length = sum((e.b - e.a).length() for e in sel
@@ -4213,16 +4348,29 @@ class BimPanel(QWidget):
             self.active_check.blockSignals(True)
             self.active_check.setChecked(False)
             self.active_check.blockSignals(False)
-        self._objects = collect_objects(self._scene())
+        # The takeoff reads geometry and tags, never the selection: a
+        # view-only change (a click, a box selection) keeps the last one.
+        # Re-measuring 238 rebar bars on every selection took 25 s (#857).
+        scene = self._scene()
+        key = (id(scene), scene.content_version)
+        if key == getattr(self, "_takeoff_key", None):
+            return
+        self._takeoff_key = key
+        # A memo per panel: an edit re-measures only the objects it touched.
+        memo = self.__dict__.setdefault("_takeoff_memo", {})
+        self._objects = collect_objects(scene, memo)
         self.tree.clear()
         for obj in self._objects:
-            faces = obj.get("faces")
-            if faces is None:
-                faces = list(obj["group"].mesh.faces)
-            # The takeoff column shows the class's budget measure (wall face
-            # m², column m³, pile m, door und) — the number the IFC/CSV
-            # export carries to IngePresupuestos, not the shell area.
-            _, _, (metrado, unit) = class_quantities(obj["class"], faces)
+            if "metrado" not in obj:
+                faces = obj.get("faces")
+                if faces is None:
+                    faces = list(obj["group"].mesh.faces)
+                # The takeoff column shows the class's budget measure (wall
+                # face m², column m³, pile m, door und) — the number the
+                # IFC/CSV export carries to IngePresupuestos, not the shell
+                # area. Kept on the object, so a memoised one reuses it.
+                obj["metrado"] = class_quantities(obj["class"], faces)[2]
+            metrado, unit = obj["metrado"]
             pretty = {"m2": "m²", "m3": "m³"}.get(unit, unit)
             if metrado is None:
                 met = "—"
@@ -4279,13 +4427,24 @@ class Tray(QDockWidget):
         # The materials panel scans every render face for its swatches —
         # ~0.5 s on an exploded 28k-face mesh, paid per EDIT when run
         # inline. Debounced: one refresh 300 ms after the last edit.
-        timer = getattr(self, "_mat_refresh_timer", None)
-        if timer is None:
-            from PySide6.QtCore import QTimer
-            timer = self._mat_refresh_timer = QTimer(self)
-            timer.setSingleShot(True)
-            timer.timeout.connect(self.materials.refresh_in_model)
-        timer.start(300)
+        # Only when the document changed: a selection (a view-only bump)
+        # leaves every material where it was, and on the plant of #158 the
+        # scan of 32 million face paints after each click froze the window
+        # for over a second.
+        # Nor after a Move: a command that keeps paint (History.paint_cv)
+        # leaves the swatches as they were (~0.4 s a drop on the plant).
+        vp = self.materials._window.viewport
+        cv = vp.scene.content_version
+        if (cv != getattr(self.materials, "_in_model_cv", None)
+                and cv != getattr(getattr(vp, "history", None),
+                                  "paint_cv", None)):
+            timer = getattr(self, "_mat_refresh_timer", None)
+            if timer is None:
+                from PySide6.QtCore import QTimer
+                timer = self._mat_refresh_timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(self.materials.refresh_in_model)
+            timer.start(300)
         self.layers.refresh()
         self.scenes.refresh()
         self.components.on_scene_changed()

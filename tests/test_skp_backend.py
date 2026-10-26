@@ -545,6 +545,52 @@ def test_openskp_adapter_image_entities_become_billboards(tmp_path):
     assert bb["imagen#2"] is False
 
 
+def test_a_cutout_image_stuck_on_a_face_stays_put(tmp_path):
+    # #429 (audioinnovation.skp): logos with transparency glued to a device
+    # turned to face the camera — the file has no face-me flag for images,
+    # the cutout guess did it. Lying on a face (here a face of ANOTHER
+    # component, as in that file, 0.5 mm off it) keeps one static; a cutout
+    # standing free — the plaza's bull — still turns.
+    from PySide6.QtGui import QImage
+
+    cutout = tmp_path / "logo.png"
+    img = QImage(4, 4, QImage.Format_RGBA8888)
+    img.fill(0x00000000)
+    img.save(str(cutout), "PNG")
+
+    def image_def(id, name):
+        d = _tri_def(id, name)
+        d.faces[20].material_id = 51
+        d.is_image = True
+        return d
+
+    panel = _fake_definition(
+        id=7, name="Equipo",
+        verts={1: (-10, -10, 0), 2: (30, -10, 0), 3: (30, 30, 0),
+               4: (-10, 30, 0)},
+        edges={10: (1, 2), 11: (2, 3), 12: (3, 4), 13: (4, 1)},
+        faces={20: [[(13, 1), (10, 1), (11, 1), (12, 1)]]})
+    ident = [1, 0, 0, 0, 1, 0, 0, 0, 1]
+    root = _fake_definition(
+        id=0, name="ROOT_MODEL", verts={}, edges={}, faces={}, instances=[
+            NS(ref_idx=7, material_id=None, matrix=ident + [0, 0, -0.02, 1]),
+            NS(ref_idx=5, material_id=None, matrix=ident + [0, 0, 0, 1]),
+            NS(ref_idx=6, material_id=None, matrix=ident + [0, 0, 100, 1])])
+    mats = {51: NS(name="L", color=(1, 1, 1), transparency=1, id=51,
+                   texture=NS(filename="logo.png", width=48.0, height=48.0,
+                              data=cutout.read_bytes()))}
+    model = NS(definitions={0: root, 5: image_def(5, "logo"),
+                            6: image_def(6, "toro"), 7: panel},
+               materials_by_id=mats)
+    skp = tmp_path / "m.skp"
+    skp.write_bytes(b"")
+    payload = skp_openskp._adapt(model, "m", skp_path=skp)
+
+    by_name = {g["name"]: g for g in payload["groups"]}
+    assert by_name["logo"]["billboard"] is False        # glued -> static
+    assert by_name["toro"]["billboard"] is True         # free -> face-me
+
+
 def test_openskp_adapter_default_mapping_is_local(tmp_path):
     # The .skp format's default texture mapping runs in the component's LOCAL frame:
     # two copies of the same textured component must sample the same patch of

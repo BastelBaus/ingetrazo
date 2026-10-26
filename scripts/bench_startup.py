@@ -19,6 +19,12 @@ REOPENS = 6
 t0 = time.perf_counter()
 os.environ["QT_QPA_PLATFORM"] = "xcb"
 sys.path.insert(0, os.getcwd())
+# What main.py does first, so the memory measured is the app's.
+try:
+    from core import malloc_arenas  # noqa: E402
+    malloc_arenas.limit()
+except ImportError:                     # an older tree (the previous tag)
+    pass
 from pathlib import Path  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 

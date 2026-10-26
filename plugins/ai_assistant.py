@@ -3,7 +3,7 @@
 """Asistente IA — model with AI from INSIDE IngeTrazo, in the side tray's
 «AI» tab (Ctrl+Shift+A brings it forward, even when hidden).
 
-The user types what they want; the model answers in Spanish and acts by
+The user types what they want; the model answers in the user's language and acts by
 emitting ONE ```python recipe per turn, which runs through the shared
 transactional executor (core.ai): one undo step per action, whole-rollback
 on error, the hermeticity guard validating every solid. After each action
@@ -62,12 +62,37 @@ MAX_TOKENS = 8192
 #: fountain). Both 2.5 flash and pro accept 16384.
 TOKENS_BY_PROVIDER = {"gemini": 16384}
 
+#: The language a reply falls back to when the user's own cannot be told
+#: (a bare «ok»), by interface language.
+_LANGUAGE_NAMES = {
+    "es": "español", "en": "English", "de": "Deutsch", "fr": "français",
+    "id": "Bahasa Indonesia", "it": "italiano", "pl": "polski",
+    "pt-BR": "português do Brasil", "ru": "русский", "zh-CN": "简体中文",
+}
+
+
+def system_prompt(lang: str | None = None) -> str:
+    """The system prompt with the reply language: the one the user writes
+    in, falling back to the interface's. The prompt said «Conversas en
+    español», so it answered an English user in Spanish even after being
+    told not to (#790)."""
+    if lang is None:
+        from core.i18n import current_language
+        lang = current_language()
+    name = _LANGUAGE_NAMES.get(lang, "English")
+    return SYSTEM_PROMPT + (
+        "\n\nIDIOMA: responde SIEMPRE en el idioma en que escribe el "
+        f"usuario; si no se puede saber, en {name}. Vale también después "
+        "de recibir resultados o capturas: este prompt y los resultados "
+        "están en español, pero la conversación no.")
+
+
 #: The assistant's own voice and its one-block-per-reply contract; the
 #: modelling reference itself is shared with the MCP door (core.ai_recipes),
 #: so a new helper is taught once and both doors learn it.
 SYSTEM_PROMPT = "\n".join((
     "Eres el asistente de modelado de IngeTrazo. " + ai_recipes.UNITS
-    + " Conversas en español, breve y claro.",
+    + " Conversas breve y claro.",
     """
 Para ACTUAR sobre el modelo incluye EXACTAMENTE UN bloque ```python por \
 respuesta. Tras cada bloque recibirás su resultado (stdout/errores y, si \
@@ -567,9 +592,11 @@ class AsistentePanel(QWidget):
             self._reply.emit({"retry": True, "n": n, "total": total,
                               "wait": wait, "reason": reason})
 
+        prompt = system_prompt()
+
         def worker() -> None:
             try:
-                text = ai.chat(provider, model, key, SYSTEM_PROMPT, convo,
+                text = ai.chat(provider, model, key, prompt, convo,
                                ollama_url=ollama, max_tokens=budget,
                                on_retry=on_retry)
                 self._reply.emit({"ok": True, "text": text})

@@ -228,21 +228,22 @@ class PreferencesDialog(QDialog):
             "next start."))
         form.addRow(tr("Graphics server:"), self._platform)
 
-        # The experimental Rust engine (core._native): off by default, read
+        # The Rust engine (core._native): on by default, read
         # once at start. Greyed out in a build that does not carry it.
-        self._rust = QCheckBox(tr("Rust engine (experimental)"))
-        self._rust.setChecked(str(_gs.value(_native.SETTING, "0", st)) == "1")
+        self._rust = QCheckBox(tr("Rust engine"))
+        self._rust.setChecked(str(_gs.value(_native.SETTING, _native.DEFAULT, st)) == "1")
         if _native.available() is None:
             self._rust.setEnabled(False)
             self._rust.setToolTip(tr("This build of IngeTrazo does not carry "
                                      "the Rust engine."))
         else:
             self._rust.setToolTip(tr(
-                "Computes the heavy parts (hidden lines of the sheets and "
-                "more) with the new native engine, much faster on big "
-                "models. It is a test: keep a copy of your files and "
-                "report anything odd with the label rust-engine. Takes "
-                "effect at the next start."))
+                "Computes the heavy parts (opening big files, hidden lines "
+                "of the sheets, intersections, snapping) with the native "
+                "engine, much faster on big models, with the same results. "
+                "On by default: turn it off only if something looks "
+                "different, and report it with the label rust-engine. "
+                "Takes effect at the next start."))
         form.addRow("", self._rust)
         tabs.addTab(general, tr("General"))
 
@@ -651,10 +652,10 @@ class PreferencesDialog(QDialog):
         _gs.set_value("platform", self._platform.currentData(), st)
         rust = "1" if self._rust.isChecked() else "0"
         if self._rust.isEnabled() and rust != str(
-                _gs.value(_native.SETTING, "0", st)):
+                _gs.value(_native.SETTING, _native.DEFAULT, st)):
             _gs.set_value(_native.SETTING, rust, st)
             QMessageBox.information(
-                self, tr("Rust engine (experimental)"),
+                self, tr("Rust engine"),
                 tr("Restart IngeTrazo to switch the engine."))
         setup = getattr(self._window, "_setup_autosave", None)
         if callable(setup):

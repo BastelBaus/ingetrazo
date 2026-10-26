@@ -584,6 +584,117 @@ def _image_quad_faces(child, placed, attr_map, inherited):
     return faces
 
 
+# How close an image may lie to a face and still count as stuck on it: the
+# logos of #429 sit 0–1.5 mm off their faces, the plaza's free-standing bull
+# and statue 8 m and 19 cm from anything parallel.
+_GLUE_TOL = 0.01
+
+
+def _face_boxes(defn):
+    """Per-face local bounding boxes of ``defn`` (metres), cached: ``(lo,
+    hi)`` arrays of shape ``(F, 3)`` in the order of ``_defn_geom``'s
+    metadata. Holes lie inside their outer ring, so a face's corners — holes
+    included — are one contiguous run and one ``reduceat`` boxes them all."""
+    boxes = getattr(defn, "_face_boxes", None)
+    if boxes is not None:
+        return boxes
+    import numpy as np
+    pos_m, _raw, meta = _defn_geom(defn)
+    if not meta:
+        boxes = (np.empty((0, 3)), np.empty((0, 3)))
+    else:
+        starts = np.fromiter((m[1] for m in meta), dtype=np.intp,
+                             count=len(meta))
+        boxes = (np.minimum.reduceat(pos_m, starts, axis=0),
+                 np.maximum.reduceat(pos_m, starts, axis=0))
+    try:
+        defn._face_boxes = boxes
+    except AttributeError:
+        pass
+    return boxes
+
+
+def _rests_on_a_face(roots, by_id, quad) -> bool:
+    """Whether the image quad ``quad`` (world ``QVector3D`` corners) lies ON
+    a face of the model: parallel to it, within ``_GLUE_TOL``, with its
+    centre over the face. That is a logo or a sign stuck to a surface, which
+    must stay put (#429); a cut-out standing free — the plaza's bull and
+    statue — is the one turned to face the camera.
+
+    Walks the placement tree in NumPy: each definition's face boxes are
+    tested against the image centre in that definition's own frame, and only
+    the few faces whose box holds it get the exact plane test."""
+    import numpy as np
+    q = np.array([[p.x(), p.y(), p.z()] for p in quad], dtype=np.float64)
+    if len(q) < 3:
+        return False
+    centre = q.mean(axis=0)
+    n = np.zeros(3)
+    for i in range(len(q)):
+        n += np.cross(q[i], q[(i + 1) % len(q)])
+    if np.linalg.norm(n) < 1e-12:
+        return False
+    n /= np.linalg.norm(n)
+
+    def on_face(world):
+        fn = np.zeros(3)
+        for i in range(len(world)):
+            fn += np.cross(world[i], world[(i + 1) % len(world)])
+        ln = np.linalg.norm(fn)
+        if ln < 1e-12:
+            return False
+        fn /= ln
+        if abs(abs(fn @ n) - 1.0) > 1e-3:
+            return False
+        if abs((centre - world[0]) @ fn) > _GLUE_TOL:
+            return False
+        # The centre over the face: even-odd in the face's own plane.
+        a = np.cross(fn, [1.0, 0.0, 0.0] if abs(fn[0]) < 0.9
+                     else [0.0, 1.0, 0.0])
+        a /= np.linalg.norm(a)
+        b = np.cross(fn, a)
+        uv = np.stack([(world - centre) @ a, (world - centre) @ b], axis=1)
+        inside = False
+        for i in range(len(uv)):
+            (x0, y0), (x1, y1) = uv[i], uv[i - 1]
+            if (y0 > 0) != (y1 > 0) and 0 < x0 + (x1 - x0) * (-y0) / (y1 - y0):
+                inside = not inside
+        return inside
+
+    def walk(defn, m, depth, stack):
+        if depth > _MAX_DEPTH or id(defn) in stack:
+            return False
+        stack = stack | {id(defn)}
+        lo, hi = _face_boxes(defn)
+        if len(lo):
+            inv = np.linalg.inv(m)
+            c = inv[:3, :3] @ centre + inv[:3, 3]
+            # The tolerance in this frame: a scaled-down copy needs more.
+            s = min(np.linalg.norm(m[:3, :3], axis=0).min(), 1.0) or 1.0
+            tol = _GLUE_TOL / s
+            hit = np.nonzero(np.all((lo - tol <= c) & (c <= hi + tol),
+                                    axis=1))[0]
+            if len(hit):
+                pos_m, _raw, meta = _defn_geom(defn)
+                for k in hit:
+                    _f, s0, s1, _hs = meta[k]
+                    world = pos_m[s0:s1] @ m[:3, :3].T + m[:3, 3]
+                    if on_face(world):
+                        return True
+        for ins in getattr(defn, "instances", []):
+            child = by_id.get(getattr(ins, "ref_idx", None))
+            if child is None or getattr(child, "is_image", False) or \
+                    getattr(child, "always_faces_camera", False):
+                continue
+            cm = np.array(_matrix(ins.matrix).data(),
+                          dtype=np.float64).reshape(4, 4, order="F")
+            if walk(child, m @ cm, depth + 1, stack):
+                return True
+        return False
+
+    return any(walk(r, np.eye(4), 0, frozenset()) for r in roots)
+
+
 def _soft_edge_segments(defn, xform, out) -> None:
     """Append the transformed endpoint pairs of ``defn``'s soft/smooth/
     hidden edges to ``out`` — the file's own edge-display flags, used by
@@ -911,8 +1022,9 @@ def _is_empty_model(model, skp_path, legacy_era: bool) -> bool:
         start = data.find(b"PK\x03\x04")
         if start < 0:
             return False
+        from core import zip_limits
         with zipfile.ZipFile(io.BytesIO(data[start:])) as zf:
-            png = zf.read("meta/model_thumbnail.png")
+            png = zip_limits.read(zf, "meta/model_thumbnail.png")
     except (OSError, KeyError, zipfile.BadZipFile):
         return False
     img = QImage.fromData(png)
@@ -1149,7 +1261,12 @@ def _adapt(model, name: str, skp_path=None):
             faces = _image_quad_faces(child, placed, attr_map, inh)
             tex = next((a["texture"]["path"] for _o, _h, a in faces
                         if a and "texture" in a), None)
-            billboard = bool(tex and _image_has_cutout(tex))
+            # A cut-out turns to face the camera — unless it is stuck on a
+            # face, like a logo on a device (#429): the file has no face-me
+            # flag for images, SketchUp never turns one.
+            billboard = bool(tex and _image_has_cutout(tex)
+                             and not _rests_on_a_face(roots, by_id,
+                                                      faces[0][0]))
         else:
             faces = []
             _collect(child, placed, by_id, attr_map, faces, 0, set(),

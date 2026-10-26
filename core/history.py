@@ -66,6 +66,7 @@ from core.topology import (
     find_containing_face,
     fold_nonplanar_faces,
     heal_overlapping_faces,
+    hole_merged_with_loop,
     loop_inside_face,
     new_defects,
     orient_coplanar_faces,
@@ -94,6 +95,14 @@ class CommandRejected(Exception):
 
 class Command(ABC):
     """Abstract reversible operation against a :class:`Scene`."""
+
+    #: Whether doing or undoing it leaves every material where it was —
+    #: which ones the model wears (see ``History.paint_cv``).
+    keeps_paint = False
+    #: Whether doing or undoing it only puts groups in the model or takes
+    #: them out, whole, and leaves every group that stays as it was — its
+    #: Browser row, the paint of its faces (see ``History.groups_cv``).
+    keeps_groups = False
 
     @abstractmethod
     def do(self, scene) -> None:
@@ -171,6 +180,54 @@ class History:
         self.last_error: Optional[str] = None
         #: Why the last command declined to happen (:class:`CommandRejected`).
         self.last_rejected: Optional[str] = None
+        #: The content version up to which nothing but commands that keep
+        #: paint changed the model since the materials panel last scanned
+        #: it (it sets this): a Move needs no new scan — 0.4 s on the plant
+        #: of #158. Anything else, history or not, leaves it behind.
+        self.paint_cv = None
+        #: The same, for the Browser's rows (views/outliner.py): a command
+        #: that keeps paint moves things, and no row shows where a thing is.
+        self.rows_cv = None
+        #: Per reader («paint» the materials panel, «rows» the Browser), the
+        #: content version up to which nothing but commands that keep paint
+        #: or keep groups changed the model since that reader last went
+        #: through it all: a Delete or a Paste only adds or takes away an
+        #: object or two, and the reader need not go through the 21 406
+        #: others again (#158). The reader sets its own entry.
+        self.groups_cv: dict = {}
+
+    def _keep_paint_cv(self, cmd, before) -> None:
+        if before is None:
+            return
+        keeps = getattr(cmd, "keeps_paint", False)
+        if not (keeps or getattr(cmd, "keeps_groups", False)):
+            return
+        cv = getattr(self.scene, "content_version", None)
+        if keeps:
+            if self.paint_cv == before:
+                self.paint_cv = cv
+            if self.rows_cv == before:
+                self.rows_cv = cv
+        for k, v in self.groups_cv.items():
+            if v == before:
+                self.groups_cv[k] = cv
+
+    def context_changed(self, before) -> None:
+        """A group opened or closed (content version ``before`` → now):
+        what the model wears is the same — the meshes that changed (an
+        instance's world copy, a container's matrix pushed down, a copy
+        shared back) are read again by their serial — so the Materials
+        panel keeps its scan: on the plant of #158 it read 2 722 meshes
+        again, ~0.35 s each way."""
+        cv = getattr(self.scene, "content_version", None)
+        if before is None:
+            return
+        # The Browser's rows too: only the open path's and the copies of a
+        # component whose count moved read differently (see
+        # OutlinerPanel.refresh).
+        for k in ("paint", "rows"):
+            if self.groups_cv.get(k) == before:
+                self.groups_cv[k] = cv
 
     def execute(self, cmd: Command) -> None:
         _t0 = _time_mod.perf_counter() if _PERF else 0.0
@@ -180,6 +237,7 @@ class History:
                   (_time_mod.perf_counter() - _t0) * 1000.0,
                   extra=type(cmd).__name__)
         self.last_rejected = None
+        before = getattr(self.scene, "content_version", None)
         try:
             cmd.do(self.scene)
         except CommandRejected as exc:
@@ -203,6 +261,7 @@ class History:
         # edited): undo/redo re-enter that context so a snapshot restore never
         # lands on the wrong mesh after the user exits the group.
         cmd._history_mesh = self.scene.mesh
+        self._keep_paint_cv(cmd, before)
         self.undo_stack.append(cmd)
         cap = int(getattr(self, "max_steps", 0) or 0)
         if cap > 0 and len(self.undo_stack) > cap:
@@ -248,7 +307,9 @@ class History:
         if not self.undo_stack:
             return False
         cmd = self.undo_stack.pop()
+        before = getattr(self.scene, "content_version", None)
         self._in_command_mesh(cmd, lambda: cmd.undo(self.scene))
+        self._keep_paint_cv(cmd, before)
         self.redo_stack.append(cmd)
         self._rebind_dimensions()
         return True
@@ -257,7 +318,9 @@ class History:
         if not self.redo_stack:
             return False
         cmd = self.redo_stack.pop()
+        before = getattr(self.scene, "content_version", None)
         self._in_command_mesh(cmd, lambda: cmd.do(self.scene))
+        self._keep_paint_cv(cmd, before)
         self.undo_stack.append(cmd)
         self._rebind_dimensions()
         return True
@@ -382,6 +445,21 @@ class DeleteEdgesCommand(Command):
         scene.version += 1
 
 
+def _single_coplanar_pair(faces) -> Optional[tuple]:
+    """The one pair of ``faces`` that face the same way (they share an edge,
+    so that makes them coplanar), or ``None`` when there is no such pair,
+    more than one, or another face lies in their plane too."""
+    pairs = [(a, b) for i, a in enumerate(faces) for b in faces[i + 1:]
+             if QVector3D.dotProduct(a.normal(), b.normal()) > 0.999]
+    if len(pairs) != 1:
+        return None
+    n = pairs[0][0].normal()
+    if any(abs(QVector3D.dotProduct(n, f.normal())) > 0.999
+           for f in faces if f not in pairs[0]):
+        return None
+    return pairs[0]
+
+
 class EraseSelectionCommand(Command):
     """Erase selected edges and faces, the usual way.
 
@@ -427,6 +505,7 @@ class EraseSelectionCommand(Command):
             _index_face(f)
         dead_faces: set = set()
         slit_planes: list = []
+        across: list = []
         for a, b in self._edge_endpoints:
             v0 = m.vertex_at(a)
             v1 = m.vertex_at(b)
@@ -455,6 +534,22 @@ class EraseSelectionCommand(Command):
                 if merged is not None:
                     dead_faces.update(id(f) for f in faces)
                     _index_face(merged)
+            elif len(faces) > 2:
+                # A wall raised against a taller neighbour leaves its inner
+                # side faces on the line too, so the front's split line had
+                # four faces and the cascade took the whole front (#356).
+                # Reunite the one coplanar pair as above; the faces across
+                # the line are re-derived on their plane below, so what
+                # still closes (the jamb above the sill) stays and the
+                # inner partitions, open now, go.
+                pair = _single_coplanar_pair(faces)
+                if pair is not None:
+                    merged = m.dissolve_coplanar_region(pair)
+                if merged is not None:
+                    dead_faces.update(id(f) for f in pair)
+                    _index_face(merged)
+                    across.extend(f for f in faces if f not in pair)
+                    m.remove_edge(edge)
             if merged is None:
                 # Cascade: the edge and every face bounding it (a face can't
                 # outlive a bounding edge) go away.
@@ -479,6 +574,17 @@ class EraseSelectionCommand(Command):
                 continue
             done_planes.append((origin, nn))
             RebuildPlaneFacesCommand(origin, nn).do(scene)
+        # The faces across a reunited line, each plane from its own faces'
+        # remaining edges: the line's other faces may span past it (the
+        # jamb above the sill) and only what still closes comes back.
+        while across:
+            f = across[0]
+            o, n = QVector3D(f.vertices[0]), f.normal()
+            same = [g for g in across if abs(QVector3D.dotProduct(
+                n, g.normal())) > 0.999 and abs(QVector3D.dotProduct(
+                QVector3D(g.vertices[0]) - o, n)) < 1e-4]
+            across = [g for g in across if g not in same]
+            RebuildPlaneFacesCommand(o, n, faces=same).do(scene)
         # Deleting a curved surface takes its hidden seams with it: a soft edge
         # left bordering no face is a dangling curve segment (a cylinder side's
         # vertical seam) — prune it so no stray vertical lines remain. Hard
@@ -571,6 +677,7 @@ class AddFaceCommand(Command):
         self.face: Optional[Face] = None
         # (face_that_gained_a_hole, the vertex loop punched) for undo.
         self._punches: list[tuple[Face, list]] = []
+        self._hole_swaps: list = []
         self._subdiv_mother: Optional[Face] = None
         self._subdiv_remainder: Optional[list] = None
 
@@ -624,8 +731,16 @@ class AddFaceCommand(Command):
         # gains the new loop as a hole.
         mother = find_containing_face(m.faces, self.face.vertices, exclude=self.face)
         if mother is not None:
-            loop = m.add_hole(mother, self.face.vertices)
-            self._punches.append((mother, loop))
+            grown = hole_merged_with_loop(mother, self.face.vertices)
+            if grown is not None:
+                idx, outline = grown
+                old_loop = mother.hole_loops[idx]
+                m.remove_hole(mother, old_loop)
+                loop = m.add_hole(mother, outline)
+                self._hole_swaps.append((mother, old_loop, loop))
+            else:
+                loop = m.add_hole(mother, self.face.vertices)
+                self._punches.append((mother, loop))
             _inherit_paint(self.face, mother)
 
         # Direction B: the new face encloses existing smaller faces → it gains
@@ -639,7 +754,7 @@ class AddFaceCommand(Command):
 
         # Direction C: drawn against an existing face's boundary (corner / edge
         # rectangle) → carve a connected sub-region. Only when no hole applied.
-        if not self._punches:
+        if not self._punches and not self._hole_swaps:
             for other in list(m.faces):
                 if other is self.face:
                     continue
@@ -685,6 +800,15 @@ class AddFaceCommand(Command):
         for face, loop in self._punches:
             m.remove_hole(face, loop)
         self._punches = []
+        for face, old_loop, loop in reversed(self._hole_swaps):
+            m.remove_hole(face, loop)
+            face.hole_loops.append(old_loop)
+            n = len(old_loop)
+            for i in range(n):
+                edge = m.find_edge(old_loop[i], old_loop[(i + 1) % n])
+                if edge is not None and face not in edge.faces:
+                    edge.faces.append(face)
+        self._hole_swaps = []
         if self.face is not None:
             m.remove_face(self.face)
             # The edges and corners this face brought with it go too, when
@@ -1256,6 +1380,8 @@ class MoveTextLabelsCommand(Command):
     the anchor stays pinned and the leader stretches (the classic Move-on-
     text behaviour)."""
 
+    keeps_paint = True
+
     def __init__(self, labels, delta) -> None:
         self._labels = list(labels)
         self._delta = QVector3D(delta)
@@ -1271,6 +1397,81 @@ class MoveTextLabelsCommand(Command):
         scene.version += 1
 
 
+class MoveGuidesCommand(Command):
+    """Translate construction guides (Tape Measure) with the Move tool
+    (#627). A guide line slides parallel to itself; a guide point carries
+    its ``origin`` along, so the dashed segment it draws keeps its shape."""
+
+    keeps_paint = True
+
+    def __init__(self, guides, delta) -> None:
+        self._guides = list(guides)
+        self._delta = QVector3D(delta)
+
+    @staticmethod
+    def shift(guide, step: QVector3D) -> None:
+        """Apply one step — the tool's live preview uses it too."""
+        guide.point = guide.point + step
+        if guide.origin is not None:
+            guide.origin = guide.origin + step
+
+    def do(self, scene) -> None:
+        for g in self._guides:
+            self.shift(g, self._delta)
+        scene.version += 1
+
+    def undo(self, scene) -> None:
+        for g in self._guides:
+            self.shift(g, -self._delta)
+        scene.version += 1
+
+
+class RotateGuidesCommand(Command):
+    """Rotate construction guides about ``centre``/``axis`` (the Rotate
+    tool, #627): the point orbits, a line's direction turns, a guide
+    point's ``origin`` orbits with it. Undo puts back the exact values from
+    before, so a turn and its undo never drift."""
+
+    def __init__(self, guides, centre: QVector3D, axis: QVector3D,
+                 deg: float) -> None:
+        self._guides = list(guides)
+        self.centre = QVector3D(centre)
+        self.axis = QVector3D(axis)
+        self.deg = float(deg)
+        self._before: list = []
+
+    @staticmethod
+    def state(guide) -> tuple:
+        """What a rotation changes, copied — the tool's preview keeps it."""
+        return (guide, QVector3D(guide.point),
+                None if guide.direction is None else QVector3D(guide.direction),
+                None if guide.origin is None else QVector3D(guide.origin))
+
+    @staticmethod
+    def place(state, m) -> None:
+        """Put a guide at ``m`` applied to its ``state`` (``None``: as it was)."""
+        guide, point, direction, origin = state
+        guide.point = m.map(point) if m is not None else QVector3D(point)
+        if direction is not None:
+            d = m.mapVector(direction) if m is not None else direction
+            guide.direction = (d.normalized() if d.length() > 1e-12
+                               else QVector3D(direction))
+        if origin is not None:
+            guide.origin = m.map(origin) if m is not None else QVector3D(origin)
+
+    def do(self, scene) -> None:
+        self._before = [self.state(g) for g in self._guides]
+        m = rotation_matrix(self.centre, self.axis, self.deg)
+        for st in self._before:
+            self.place(st, m)
+        scene.version += 1
+
+    def undo(self, scene) -> None:
+        for st in self._before:
+            self.place(st, None)
+        scene.version += 1
+
+
 class MoveDimensionsCommand(Command):
     """Move dimensions with the Move tool. A dimension ANCHORED at both
     ends slides its LINE by the delta (minus any component along the
@@ -1280,6 +1481,8 @@ class MoveDimensionsCommand(Command):
     (Marco, 2026-09-20). A dimension with a free endpoint moves that
     endpoint rigidly instead. ``modes`` maps each dimension to ``"line"``
     or ``"rigid"``, decided by the tool at grab time."""
+
+    keeps_paint = True
 
     def __init__(self, modes: dict, delta) -> None:
         self._modes = dict(modes)
@@ -1692,6 +1895,8 @@ class DeleteScenesCommand(Command):
 class MoveSectionPlanesCommand(Command):
     """Translate section planes (the Move tool)."""
 
+    keeps_paint = True
+
     def __init__(self, planes, delta: QVector3D) -> None:
         self._planes = list(planes)
         self.delta = QVector3D(delta)
@@ -1898,6 +2103,8 @@ class MoveImagePlanesCommand(Command):
     """Translate reference images (the Move tool). Only the origin corner
     moves — the edge vectors carry size and orientation, so a move can never
     resize or turn the picture by accident."""
+
+    keeps_paint = True
 
     def __init__(self, images, delta: QVector3D) -> None:
         self._images = list(images)
@@ -2396,6 +2603,8 @@ class FlipGroupsCommand(Command):
     keeps its faces pointing OUT. A reflection is an involution: undo flips
     again."""
 
+    keeps_paint = True
+
     def __init__(self, groups, centre: QVector3D, axis: QVector3D) -> None:
         self._groups = list(groups)
         self.centre = QVector3D(centre)
@@ -2497,6 +2706,8 @@ class RotateVerticesCommand(Command):
 class RotateGroupCommand(Command):
     """Rotate a whole group's isolated mesh (rigid — nothing folds). Snapshot
     undo/redo on the group's own mesh."""
+
+    keeps_paint = True
 
     def __init__(self, group, center: QVector3D, axis: QVector3D,
                  degrees: float) -> None:
@@ -2620,6 +2831,8 @@ class ScaleVerticesCommand(Command):
 class ScaleGroupCommand(Command):
     """Uniformly scale a whole group's isolated mesh about ``center``.
     Snapshot undo/redo on the group's own mesh."""
+
+    keeps_paint = True
 
     def __init__(self, group, center: QVector3D, factor: float,
                  axes=None) -> None:
@@ -3263,6 +3476,19 @@ class MakeGroupCommand(Command):
     def do(self, scene) -> None:
         m = scene.mesh
         self.snapshot = m.capture_state()
+        # Built once: a redo puts back the SAME group, the one the next
+        # commands (Explode, Move, paint…) hold — a fresh one each time
+        # left them pointing at a group no longer in the model, and
+        # their redo was lost (#737).
+        if self.group is None:
+            self.group = self._build(scene)
+        self._take_off_loose(scene)
+        scene.groups.append(self.group)
+        scene.selection.clear()
+        scene.selection.add(self.group)
+        scene.version += 1
+
+    def _build(self, scene) -> Group:
         # The group is a fresh copy built from the captured positions. A
         # COMPONENT shifts them into local coordinates around the origin.
         origin = QVector3D(0.0, 0.0, 0.0)
@@ -3320,19 +3546,23 @@ class MakeGroupCommand(Command):
                  if va is not None and vb is not None else None)
             if e is not None:
                 stamp_edge_flags(e, flags)
-        self.group = Group(gmesh, name=self._name)
+        group = Group(gmesh, name=self._name)
         if self._component:
             from PySide6.QtGui import QMatrix4x4
             if rot is not None:
                 from core.axes import frame_matrix
-                self.group.xform = frame_matrix(origin, *rot)
+                group.xform = frame_matrix(origin, *rot)
             else:
                 t = QMatrix4x4()
                 t.translate(origin)
-                self.group.xform = t
+                group.xform = t
         elif rot is not None:
             from core.axes import frame_matrix
-            self.group.axes = frame_matrix(corner, *rot)
+            group.axes = frame_matrix(corner, *rot)
+        return group
+
+    def _take_off_loose(self, scene) -> None:
+        m = scene.mesh
         # Remove the grouped geometry from the loose mesh.
         face_keysets = [frozenset(_key(p) for p in loop)
                         for loop, _h, _a in self._face_loops]
@@ -3349,10 +3579,6 @@ class MakeGroupCommand(Command):
                                 (_key(e.a) in grouped and _key(e.b) in grouped)):
                 m.remove_edge(e)
                 scene.selection.discard(e)
-        scene.groups.append(self.group)
-        scene.selection.clear()
-        scene.selection.add(self.group)
-        scene.version += 1
 
     def undo(self, scene) -> None:
         if self.group in scene.groups:
@@ -3591,6 +3817,8 @@ class InsertGroupCommand(Command):
     grupo», Marco, 2026-09-14). The group arrives in WORLD coordinates and
     is expressed in the container's own space when that one carries a
     matrix (entering usually pushes it down into the children already)."""
+
+    keeps_groups = True
 
     def __init__(self, group) -> None:
         self.group = group
@@ -4173,6 +4401,8 @@ class MoveGroupCommand(Command):
     """Translate a whole group by ``delta`` (every vertex of its mesh). Because
     the group is isolated, this never drags the rest of the model."""
 
+    keeps_paint = True
+
     def __init__(self, group: Group, delta: QVector3D) -> None:
         self.group = group
         self.delta = QVector3D(delta)
@@ -4392,6 +4622,8 @@ class DeleteGroupCommand(Command):
     rolled back, nothing on screen, «quiero eliminar, tampoco puedo»
     (Marco, 2026-09-11, a fountain inside an imported component)."""
 
+    keeps_groups = True
+
     def __init__(self, group: Group) -> None:
         self.group = group
         self.index: Optional[int] = None
@@ -4467,6 +4699,65 @@ def _point_in_tri(p: QVector3D, t0: QVector3D, t1: QVector3D,
     return True
 
 
+def _segment_grid(segments):
+    """A lookup ``near(p)`` giving, in ascending order, the indices of the
+    ``segments`` (``(QVector3D, QVector3D)`` pairs) that ``p`` can lie on
+    under ``_point_on_seg_incl``.
+
+    The rebuild re-stamped curve flags by testing every new edge against
+    every flagged one: 167 M tests, 218 s, on an exploded DWG plan (#491).
+    Each segment goes in the cells of its box padded past the test's reach
+    (its ``t`` slack scales with length); the cell size grows until the boxes
+    cover at most a few cells each, so a long wall cannot flood the grid."""
+    import math
+    if not segments:
+        return lambda p: ()
+    boxes = []
+    for a, b in segments:
+        pad = 4e-4 * (1.0 + (b - a).length()) + 4e-4
+        boxes.append((min(a.x(), b.x()) - pad, min(a.y(), b.y()) - pad,
+                      min(a.z(), b.z()) - pad, max(a.x(), b.x()) + pad,
+                      max(a.y(), b.y()) + pad, max(a.z(), b.z()) + pad))
+    ext = sorted(max(bx[3] - bx[0], bx[4] - bx[1], bx[5] - bx[2])
+                 for bx in boxes)
+    size = ext[len(ext) // 2]
+
+    def span(lo, hi):
+        return math.floor(hi / size) - math.floor(lo / size) + 1
+
+    while sum(span(bx[0], bx[3]) * span(bx[1], bx[4]) * span(bx[2], bx[5])
+              for bx in boxes) > 8 * len(boxes):
+        size *= 2.0
+    cells: dict = {}
+    for i, (x0, y0, z0, x1, y1, z1) in enumerate(boxes):
+        for cx in range(math.floor(x0 / size), math.floor(x1 / size) + 1):
+            for cy in range(math.floor(y0 / size), math.floor(y1 / size) + 1):
+                for cz in range(math.floor(z0 / size),
+                                math.floor(z1 / size) + 1):
+                    cells.setdefault((cx, cy, cz), []).append(i)
+
+    def near(p):
+        return cells.get((math.floor(p.x() / size), math.floor(p.y() / size),
+                          math.floor(p.z() / size)), ())
+    return near
+
+
+def _welded_loop(mesh, loop):
+    """``loop`` with the corners the mesh welds into one merged, or ``None``
+    if fewer than three are left -- see the weld note in
+    :meth:`RebuildPlanarFacesCommand.do`."""
+    out = []
+    for p in loop:
+        v = mesh.vertex(p)
+        if not out or v is not out[-1]:
+            out.append(v)
+    if len(out) > 1 and out[0] is out[-1]:
+        out.pop()
+    if len(out) < 3:
+        return None
+    return [v.position for v in out]
+
+
 class RebuildPlanarFacesCommand(Command):
     """Rebuild the minimal faces of a flat drawing from its edge graph (a planar
     arrangement) — the deterministic, from-scratch replacement for the heuristic
@@ -4509,15 +4800,28 @@ class RebuildPlanarFacesCommand(Command):
                      for f in mesh.faces if f.attrs]
         edges, faces = planar_rebuild(segments, origin, normal)
 
+        near_flagged = _segment_grid([(fa, fb) for fa, fb, _ in flagged])
+
         scene.selection.clear()
         mesh.clear()
         for a, b in edges:
+            if mesh.vertex(a) is mesh.vertex(b):
+                # Shorter than the weld: the arrangement keys points on a
+                # 0.1 mm grid, so two ends a hair apart across a cell line
+                # stay two -- the mesh welds them into one. Raising here
+                # rolled the whole draw back on an exploded DWG plan (#491).
+                continue
             e = mesh.add_edge(a, b)
-            for (fa, fb, flags) in flagged:
+            for i in near_flagged(e.a):
+                fa, fb, flags = flagged[i]
                 if _point_on_seg_incl(e.a, fa, fb) and _point_on_seg_incl(e.b, fa, fb):
                     stamp_edge_flags(e, flags)
                     break
         for outer, holes in faces:
+            outer = _welded_loop(mesh, outer)
+            if outer is None:
+                continue
+            holes = [h for h in (_welded_loop(mesh, h) for h in holes) if h]
             f = mesh.add_face(outer, holes or None)
             if f is None or not old_attrs:
                 continue
@@ -4564,7 +4868,8 @@ class RebuildPlaneFacesCommand(Command):
 
     _TOL = 1e-4
 
-    def __init__(self, origin: QVector3D, normal: QVector3D) -> None:
+    def __init__(self, origin: QVector3D, normal: QVector3D,
+                 faces: Optional[Iterable] = None) -> None:
         self.origin = QVector3D(origin)
         # Normalised by hand: QVector3D.normalized() nulls anything shorter
         # than 1e-5, and a zero normal here means "rebuild the plane of
@@ -4572,6 +4877,9 @@ class RebuildPlaneFacesCommand(Command):
         n = QVector3D(normal)
         length = n.length()
         self.normal = n / length if length > 1e-9 else QVector3D()
+        # Given faces: rebuild only them, from their own remaining edges --
+        # the rest of the plane is not this edit's business (#356).
+        self.faces = None if faces is None else list(faces)
         self.snapshot: Optional[dict] = None
         self.rebuilt = 0
 
@@ -4589,15 +4897,31 @@ class RebuildPlaneFacesCommand(Command):
             # whole mesh — which is how a 3 mm² sliver erased 447 faces.
             return
         mesh = scene.mesh
-        plane_edges = [e for e in mesh.edges
-                       if self._on_plane(e.a) and self._on_plane(e.b)]
+        if self.faces is not None:
+            live = set(map(id, mesh.faces))
+            plane_faces = [f for f in self.faces if id(f) in live]
+            plane_edges = []
+            for f in plane_faces:
+                for loop in (f.loop, *f.hole_loops):
+                    for a, b in zip(loop, loop[1:] + loop[:1]):
+                        e = mesh.find_edge(a, b)
+                        if e is not None and e not in plane_edges:
+                            plane_edges.append(e)
+        else:
+            plane_edges = [e for e in mesh.edges
+                           if self._on_plane(e.a) and self._on_plane(e.b)]
         if not plane_edges:
+            if self.faces is not None:
+                for f in plane_faces:
+                    mesh.remove_face(f)
             return
-        plane_faces = [
-            f for f in mesh.faces
-            if all(self._on_plane(v.position) for v in f.loop)
-            and all(self._on_plane(v.position) for h in f.hole_loops for v in h)
-        ]
+        if self.faces is None:
+            plane_faces = [
+                f for f in mesh.faces
+                if all(self._on_plane(v.position) for v in f.loop)
+                and all(self._on_plane(v.position)
+                        for h in f.hole_loops for v in h)
+            ]
         old = [([tuple(t) for t in f.triangulate()], f.normal(), dict(f.attrs))
                for f in plane_faces]
         segments = [(QVector3D(e.a), QVector3D(e.b)) for e in plane_edges]
@@ -4687,6 +5011,16 @@ class CompoundCommand(Command):
     def __init__(self, commands: Iterable[Command]) -> None:
         self.commands: list[Command] = list(commands)
 
+    @property
+    def keeps_paint(self) -> bool:
+        return all(getattr(c, "keeps_paint", False) for c in self.commands)
+
+    @property
+    def keeps_groups(self) -> bool:
+        return all(getattr(c, "keeps_paint", False)
+                   or getattr(c, "keeps_groups", False)
+                   for c in self.commands)
+
     def do(self, scene) -> None:
         done = []
         try:
@@ -4725,6 +5059,8 @@ class ChangeAxesCommand(Command):
         self._old_axes = None
         self._d = None
         self._instances: list = []
+        self._inst_axes: list = []
+        self._inst_xforms: list = []
 
     def _siblings(self, scene) -> list:
         from core.group import iter_placements
@@ -4768,8 +5104,14 @@ class ChangeAxesCommand(Command):
             return
         self._instances = self._siblings(scene)
         self._reexpress(g, self._d)
+        # An instance's frame is ``xform · axes``: axes it carried from its
+        # classic-group days would turn the new frame again (#484), so the
+        # re-expressed definition's own axes are the instances' now.
+        self._inst_axes = [inst.axes for inst in self._instances]
+        self._inst_xforms = [self._copy(inst.xform) for inst in self._instances]
         for inst in self._instances:
             inst.xform = inst.xform * d_inv
+            inst.axes = None
         scene.version += 1
 
     def undo(self, scene) -> None:
@@ -4782,8 +5124,12 @@ class ChangeAxesCommand(Command):
             return
         d_inv, _ok = self._d.inverted()
         self._reexpress(g, d_inv)
-        for inst in self._instances:
-            inst.xform = inst.xform * self._d
+        # The placements as they were, not ``xform · d`` again: that product
+        # came back 6e-8 off, and undo should leave exactly what was there.
+        for inst, axes, xform in zip(self._instances, self._inst_axes,
+                                     self._inst_xforms):
+            inst.xform = self._copy(xform)
+            inst.axes = axes
         scene.version += 1
 
     @staticmethod

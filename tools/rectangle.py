@@ -308,7 +308,11 @@ class RectangleTool(PlaneLock, Tool):
             return []
         h = 0.5 * self.PREVIEW_PX * scale
         c = self.hover_point
-        pts = [c + u * h + v * h, c - u * h + v * h, c - u * h - v * h, c + u * h - v * h]
+        if self._from_center:
+            pts = [c + u * h + v * h, c - u * h + v * h,
+                   c - u * h - v * h, c + u * h - v * h]
+        else:
+            pts = [c, c + u * (2*h), c + (u+v) * (2*h), c + v * (2*h)]
         return [(pts[i], pts[(i + 1) % 4]) for i in range(4)]
 
     def plane_points(self):

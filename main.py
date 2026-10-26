@@ -13,6 +13,10 @@ import os
 import sys
 from pathlib import Path
 
+# Before any thread allocates (see core.malloc_arenas).
+from core import malloc_arenas
+malloc_arenas.limit()
+
 # Black box: a native crash (GL driver, Qt) kills the process without a
 # Python traceback — faulthandler leaves the Python stacks of every thread
 # in this file so the next "it just closed" has an autopsy. It lives in the
@@ -243,6 +247,11 @@ def _self_check() -> int:
           + (f" (Rust {mod.__version__} available)" if mod else ""))
     if mod is None and os.environ.get("INGETRAZO_REQUIRE_RUST") == "1":
         problems.append("native engine")
+    if mod is not None:
+        # Which C++ library's QVector3D length the kernels copy bit for bit
+        # (none: those kernels stay in Python, e.g. Qt built another way).
+        from core._native import qt_hypot
+        print(f"  vector length  : {qt_hypot() or 'Python (no formula matches)'}")
 
     # ``ingetrazo --mcp`` runs scripts/ingetrazo_mcp.py by path, and that
     # server reads its recipe book from core.ai_recipes. The Flatpak of
@@ -460,7 +469,7 @@ def main() -> int:
     from views.tooltips import WrappingToolTips
     tooltips = WrappingToolTips(app)
     app.installEventFilter(tooltips)
-    # The experimental Rust engine: if the last start with it on never
+    # The Rust engine: if the last start with it on never
     # drew its first frame, this one goes back to the normal engine (and
     # says so below); --python-engine does it for one run.
     from core import _native
@@ -560,10 +569,10 @@ def main() -> int:
         from PySide6.QtWidgets import QMessageBox
         from core.i18n import tr
         QTimer.singleShot(0, lambda: QMessageBox.information(
-            window, tr("Rust engine (experimental)"),
-            tr("IngeTrazo did not open the last time with the experimental "
-               "Rust engine on, so it is back on the normal engine. You can "
-               "turn it on again in Preferences ▸ General.")))
+            window, tr("Rust engine"),
+            tr("IngeTrazo did not open the last time with the Rust engine "
+               "on, so it is back on the Python engine. You can turn it on "
+               "again in Preferences ▸ General.")))
 
     def _after_first_frame():
         # The plugins' setup, now that the window is up (#440) — and only

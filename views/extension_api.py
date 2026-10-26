@@ -75,6 +75,33 @@ class ExtensionApp:
     def scene(self):
         return self._window.viewport.scene
 
+    # ---- Asynchronous toolbar setup ---------------------------------------
+    def restore_toolbar_layout(self) -> bool:
+        """Restore saved positions after this extension's toolbars exist.
+
+        Call once on the GUI thread when asynchronous startup is ready,
+        after adding all toolbars with stable object names. Repeated ready
+        notifications do not undo the user's subsequent rearrangement.
+        Returns whether a saved layout was restored by this call.
+        """
+        if getattr(self, "_toolbar_layout_restored", False):
+            return False
+        # IngeTrazo's window restores, places new bars and re-seats every
+        # bar to its length, as for bars made in setup(); a bare
+        # QMainWindow (tests) only restores.
+        late = getattr(self._window, "restore_late_toolbars", None)
+        if late is not None:
+            restored = bool(late())
+        else:
+            from PySide6.QtCore import QSettings
+            state = QSettings().value("ui/window_state")
+            if state is None:
+                return False
+            restored = bool(self._window.restoreState(state))
+        if restored:
+            self._toolbar_layout_restored = True
+        return restored
+
     # ---- Document data -----------------------------------------------------
     def document_data(self, default=None):
         """This extension's value in the open document (a copy: change it

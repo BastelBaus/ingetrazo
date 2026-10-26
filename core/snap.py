@@ -15,7 +15,9 @@ Snap kinds (priority high → low):
 10. ``"aligned"``       — level with / in line with an encouraged point across
                           the face under the cursor (the axis plane through it).
 11. ``"axis_inference"`` — soft auto-detected axis alignment (visual cue only).
-12. ``"on_face"``       — the free point on the face under the cursor.
+12. ``"on_face"``       — the free point on the face under the cursor
+                          (or, just above it, ``"intersection"`` where that
+                          face meets another with no edge between them).
 13. ``"none"``          — no snap.
 
 Some kinds name a POINT of the model and some name the FACE the cursor is
@@ -106,6 +108,12 @@ class SnapResult:
     # 17.10.26 BasteBaus: stores an point from which was snapped to be used in 
     #                     dimension tool if snapping to points not on the dimension line
     from_point: Optional[QVector3D] = None
+    #: The colour of the lock the point was found under (an arrow-key or
+    #: Shift axis, a reference): the draw line keeps it while the point
+    #: snaps to a corner on that line — locked to red, the line stays red
+    #: (#711, BastelBaus: «keep line color»).
+    lock_color: Optional[tuple[float, float, float]] = None
+
 
 # ---- Helpers ---------------------------------------------------------------
 
@@ -1109,14 +1117,15 @@ def _from_point_snap(
         return None
     _, foot, ref, kind, color = best
     # The guide runs perpendicular to the draw, from the corner to the foot —
-    # colour it by the axis it most aligns with (red/green/blue).
+    # coloured by its axis when it RUNS along one (red/green/blue), grey
+    # when it does not: a guide across the axes painted blue read as «along
+    # blue» (#711).
     guide_color = None
     dim_axis = None
     if kind == "from_point":
         gdn = (foot - ref).normalized()
         gaxis = max(_AXIS_VECTORS,
                     key=lambda k: abs(QVector3D.dotProduct(gdn, _AXIS_VECTORS[k])))
-        guide_color = AXIS_COLORS[gaxis]
 
         # 17.10.26 BastelBaus: dimension of snap to be forwarded when creating
         #                      Dimension along one axis
@@ -1124,6 +1133,8 @@ def _from_point_snap(
                     key=lambda k: abs(QVector3D.dotProduct(line_dir, _AXIS_VECTORS[k]))) if line_dir is not None else None
         # todo: is it line_dir or draw_dir ??
 
+        along = abs(QVector3D.dotProduct(gdn, _AXIS_VECTORS[gaxis]))
+        guide_color = AXIS_COLORS[gaxis] if along > 0.999 else COLOR_EXTENSION
     return SnapResult(foot, kind, color, guide=(ref, foot),
                       guide_color=guide_color, 
                       axis=dim_axis)
@@ -1173,8 +1184,33 @@ def _perpendicular_face_snap(
     return SnapResult(locked, "perp_face", COLOR_REFERENCE)
 
 
+def _pairs_that_may_meet(edges):
+    """The pairs (i < j, in order) of ``edges`` whose boxes come close
+    enough for ``segment_intersection`` to find a meeting: it accepts a
+    point up to its tolerance past either end and a gap up to
+    ``max(tol, 1e-7 * length)``, so each box grows by more than that.
+    Pairs apart are never asked — 1128 pairs under the cursor on the plant
+    of #158, most of them edges a metre away from each other."""
+    n = len(edges)
+    if n < 8:
+        return ((i, j) for i in range(n) for j in range(i + 1, n))
+    import numpy as np
+    from core.topology import _SPLIT_TOLERANCE as tol
+    ends = np.array([(e.a.x(), e.a.y(), e.a.z(), e.b.x(), e.b.y(), e.b.z())
+                     for e in edges], dtype=np.float64).reshape(n, 2, 3)
+    lo, hi = ends.min(axis=1), ends.max(axis=1)
+    length = np.linalg.norm(ends[:, 1] - ends[:, 0], axis=1)
+    grow = (2.5 * tol + 2e-7 * length
+            + 1e-6 * np.abs(ends).max(axis=(1, 2)))[:, None]
+    lo, hi = lo - grow, hi + grow
+    apart = ((lo[:, None, :] > hi[None, :, :])
+             | (lo[None, :, :] > hi[:, None, :])).any(axis=2)
+    ii, jj = np.nonzero(np.triu(~apart, 1))
+    return zip(ii.tolist(), jj.tolist())
+
+
 def _intersection_snap(
-    cx, cy, scene, world_to_pixel, et, is_occluded
+    cx, cy, scene, world_to_pixel, et, is_occluded, are_occluded=None
 ) -> Optional[SnapResult]:
     """Green intersection point where two edges / guide lines actually cross.
 
@@ -1217,26 +1253,33 @@ def _intersection_snap(
     if len(near) < 2:
         return None
 
-    best = None  # (dist_px, hit)
-    for i in range(len(near)):
-        e1 = near[i]
-        for j in range(i + 1, len(near)):
-            e2 = near[j]
-            hit = segment_intersection(e1.a, e1.b, e2.a, e2.b)
-            if hit is None:
-                continue  # parallel, collinear or skew — no real meeting
-            hp = world_to_pixel(hit)
-            if hp is None:
-                continue
-            dh = math.hypot(hp[0] - cx, hp[1] - cy)
-            if dh > et:
-                continue
-            if is_occluded is not None and is_occluded(hit):
-                continue
-            if best is None or dh < best[0]:
-                best = (dh, hit, e1, e2)
-    if best is None:
+    # The crossings under the cursor, in pair order; the nearest one in
+    # sight wins (the first of equals). Occlusion is asked once a point,
+    # nearest first, in batches (_first_visible): under the plant of #158
+    # a cursor on a hidden corner had 56 crossings, each one a ray.
+    found = []
+    for i, j in _pairs_that_may_meet(near):
+        e1, e2 = near[i], near[j]
+        hit = segment_intersection(e1.a, e1.b, e2.a, e2.b)
+        if hit is None:
+            continue  # parallel, collinear or skew — no real meeting
+        hp = world_to_pixel(hit)
+        if hp is None:
+            continue
+        dh = math.hypot(hp[0] - cx, hp[1] - cy)
+        if dh > et:
+            continue
+        found.append((dh, hit, e1, e2))
+    found.sort(key=lambda f: f[0])
+    first = {}
+    for k, f in enumerate(found):
+        first.setdefault((f[1].x(), f[1].y(), f[1].z()), k)
+    order = sorted(first.values())
+    k = _first_visible([found[i][1] for i in order], is_occluded,
+                       are_occluded)
+    if k is None:
         return None
+    best = found[order[k]]
     hit = best[1]
     corners = (best[2].a, best[2].b, best[3].a, best[3].b)
     if any((hit - c).lengthSquared() < 1e-12 for c in corners):
@@ -1380,6 +1423,7 @@ def compute_snap(
     work_plane_normal: Optional[QVector3D] = None,
     radial_arm: bool = False,
     axis_in_plane: bool = False,
+    face_crossing: Optional[Callable[[], Optional[tuple]]] = None,
 ) -> SnapResult:
     # Linear-inference toggle (Alt): "all" = every inference, "off" =
     # point snaps only, "parallel_perp" = keep only parallel/perpendicular. The
@@ -1472,6 +1516,7 @@ def compute_snap(
             #          example when creating the dimensions!
             hit.axis = axis_lock      
             hit.kind = "axis"      
+            hit.lock_color = AXIS_COLORS[axis_lock]
             return hit
         return SnapResult(locked, "axis", AXIS_COLORS[axis_lock], axis=axis_lock)
 
@@ -1503,9 +1548,10 @@ def compute_snap(
             threshold_px, is_occluded, acquired_point, chain_first_point,
             project_onto_line,
         )
-        if hit is not None:
-            return hit
         color = shift_lock_color if shift_lock_color is not None else COLOR_REFERENCE
+        if hit is not None:
+            hit.lock_color = color
+            return hit
         return SnapResult(locked, "reference", color)
 
     # 2. Reference edge lock (Down arrow + edge under cursor).
@@ -1528,6 +1574,7 @@ def compute_snap(
                 project_onto_line,
             )
             if hit is not None:
+                hit.lock_color = COLOR_REFERENCE
                 return hit
             return SnapResult(locked, "reference", COLOR_REFERENCE)
 
@@ -1553,6 +1600,7 @@ def compute_snap(
                 project_onto_line,
             )
             if hit is not None:
+                hit.lock_color = AXIS_COLORS[inferred]
                 return hit
             return SnapResult(locked, "axis", AXIS_COLORS[inferred], axis=inferred)
 
@@ -1687,6 +1735,28 @@ def compute_snap(
     if best is not None:
         return SnapResult(best[1], best[2], best[3], context=best[4])
 
+    def _edge_under_cursor(exclude_at: QVector3D) -> bool:
+        """Whether a visible edge not passing through ``exclude_at`` lies within
+        the on-edge reach of the cursor (rule 7's target)."""
+        for edge in scene.edges:
+            if (edge.b - edge.a).length() < 1e-9:
+                continue                      # a pseudo-edge: centre, origin…
+            if _point_on_segment_world(exclude_at, edge.a, edge.b):
+                continue
+            pa = world_to_pixel(edge.a)
+            pb = world_to_pixel(edge.b)
+            if pa is None or pb is None:
+                continue
+            if _closest_on_segment_2d((cx, cy), pa, pb)[0] > et:
+                continue
+            ab = edge.b - edge.a
+            tt = QVector3D.dotProduct(project_onto_line(edge.a, ab) - edge.a,
+                                      ab) / QVector3D.dotProduct(ab, ab)
+            on_pt = edge.a + ab * max(0.0, min(1.0, tt))
+            if is_occluded is None or not is_occluded(on_pt):
+                return True
+        return False
+
     # 4b. Perpendicular to a wall you started on: drawing square to it locks the
     #     exact perpendicular (magenta) and predicts the connection — where that
     #     perpendicular line crosses another edge near the cursor (the parallel
@@ -1749,6 +1819,15 @@ def compute_snap(
                     )
                     if fp is not None:
                         return fp
+                # The lock is chosen by ANGLE (an 8 degree cone), so from a
+                # corner it also catches a line meant for a point of another
+                # edge: a tapered leg ends on the far edge about 8 degrees off
+                # the perpendicular, and the lock moved it 27 px onto the wall
+                # it started on (#544). An edge under the cursor is a target
+                # the user pointed at: it wins. The edges the line starts on
+                # are not such targets - the perpendicular may be one of them.
+                if _edge_under_cursor(start_point):
+                    break
                 locked = project_onto_line(start_point, perp)
                 return SnapResult(locked, "reference", COLOR_REFERENCE)
 
@@ -1820,7 +1899,8 @@ def compute_snap(
     #     intersection, so crossing guides never offered their meeting point —
     #     the cursor slid along the nearest guide. Runs before midpoint/on-edge
     #     so the exact crossing wins, but below every endpoint and lock.
-    inter = _intersection_snap(cx, cy, scene, world_to_pixel, et, is_occluded)
+    inter = _intersection_snap(cx, cy, scene, world_to_pixel, et, is_occluded,
+                               are_occluded)
     if inter is not None and axis_engaged is None:
         return inter
 
@@ -1847,7 +1927,10 @@ def compute_snap(
         if pa is None or pb is None:
             continue
         d, t = _closest_on_segment_2d((cx, cy), pa, pb)
-        if d > et:
+        if d > et or t <= 0.0 or t >= 1.0:
+            # Past either end the nearest point is the endpoint itself: an
+            # «On edge» there named a point the endpoint snap had already
+            # turned down (#587, between its 9 px and the edge's 14 px).
             continue
         # The screen-space parameter ``t`` is NOT the world parameter under
         # perspective, so 3D-lerping it displaces the point by metres on a long,
@@ -1910,6 +1993,16 @@ def compute_snap(
                           #                      to directly create a dimension by clickling
                           #                      on an edge
 
+
+    # 7c. Where the face under the cursor meets another face with no edge
+    #     between them — a box sunk into the floor, a beam through a wall
+    #     (#819, SketchUp's «Intersection»). Asked only here, once nothing
+    #     with a name is nearer: the caller's search casts a few rays.
+    if face_crossing is not None and face_under_cursor and axis_engaged is None:
+        crossing = face_crossing()
+        if crossing is not None:
+            return SnapResult(crossing[0], "intersection", COLOR_ENDPOINT,
+                              context=crossing[1])
 
     # 8b. Acquired-edge parallel inference. An edge the cursor hovered while
     #     drawing is held as a reference; when the draw runs parallel to it the
