@@ -1238,7 +1238,8 @@ class OutlinerPanel(QWidget):
             from PySide6.QtCore import QTimer
             timer = self._refresh_timer = QTimer(self)
             timer.setSingleShot(True)
-            timer.timeout.connect(self.refresh)
+            timer.timeout.connect(
+                lambda: self.refresh(rows_if_changed=True))
         timer.start(300)
 
     def showEvent(self, ev) -> None:
@@ -1270,11 +1271,13 @@ class OutlinerPanel(QWidget):
             return path.name
         return getattr(w, "_import_name", None) or tr("Untitled")
 
-    def refresh(self) -> None:
+    def refresh(self, rows_if_changed: bool = False) -> None:
         """Bring the tree up to date: rows rebuilt only when groups came or
         went, otherwise updated in place — a refresh follows every edit and
         every click, and a rebuild would lose the scroll and the branches
-        the user unfolded."""
+        the user unfolded. ``rows_if_changed`` (the model's own change
+        notice): the rows are read again only if the content or the open
+        path changed since they last were."""
         if self.tree.state() == QAbstractItemView.EditingState:
             return                      # a rename in progress: leave it be
         self._stale = False
@@ -1283,10 +1286,62 @@ class OutlinerPanel(QWidget):
             getattr(self._window, "_outliner_kinds", None) or ())
         scene = self._scene()
         shape = outliner.structure(scene.groups)
+        # A click changes the view, not the rows: with the content and the
+        # open path as they were, every row reads as it did (21 406 rows
+        # read again after each click on the plant of #158, ~0.15 s).
+        rows_key = (getattr(scene, "content_version", None), id(scene),
+                    shape, tuple(id(g) for g in outliner.open_path(scene)),
+                    self._kind_providers, self._document_name())
+        old_key = getattr(self, "_rows_key", None)
+        hist = getattr(self._window.viewport, "history", None)
+        # Only groups put in or taken out since the rows were last read
+        # (a Delete, a Paste, their undo — History.groups_cv): their rows
+        # come and go, the others stay as they are — but for the copies
+        # count of a component that gained or lost one.
+        groups_only = (rows_if_changed and old_key is not None
+                       and rows_key[0] is not None
+                       and not self._kind_providers
+                       and old_key[1] == rows_key[1]
+                       and old_key[3:] == rows_key[3:]
+                       and hist is not None
+                       and getattr(hist, "groups_cv", {}).get("rows")
+                       == rows_key[0])
+        # Only a group opened or closed since (History.context_changed):
+        # what a row shows changes for the groups on the open path, old and
+        # new, and for the copies of a component whose count moved (its
+        # instance edits a world copy) — the other 21 406 rows of the plant
+        # of #158 read as they did (~0.15 s each way).
+        ctx_only = (rows_if_changed and old_key is not None
+                    and rows_key[0] is not None
+                    and not self._kind_providers
+                    and shape == self._shape
+                    and old_key[1:3] == rows_key[1:3]
+                    and old_key[4:] == rows_key[4:]
+                    and hist is not None
+                    and getattr(hist, "groups_cv", {}).get("rows")
+                    == rows_key[0])
+        patched = False
         if shape != self._shape:
-            self._rebuild(scene)
+            patched = groups_only and self._patch_rows(scene, shape)
+            if not patched:
+                self._rebuild(scene)
             self._shape = shape
-        self._update_rows(scene)
+        # Nor does a Move (History.rows_cv) — unless an extension's kind
+        # adds properties to the rows, which may well be sizes.
+        moved_only = (old_key is not None and not self._kind_providers
+                      and old_key[1:] == rows_key[1:]
+                      and getattr(hist, "rows_cv", None) == rows_key[0])
+        if (not rows_if_changed or rows_key[0] is None
+                or (rows_key != old_key and not moved_only)):
+            if ctx_only:
+                self._update_some_rows(scene, set(old_key[3])
+                                       | set(rows_key[3]))
+            elif not patched:
+                self._update_rows(scene)
+            if hist is not None:
+                hist.rows_cv = rows_key[0]
+                hist.groups_cv["rows"] = rows_key[0]
+        self._rows_key = rows_key
         self._sync_sections(scene)
         if self._query:
             self._apply_filter()
@@ -1316,6 +1371,7 @@ class OutlinerPanel(QWidget):
         self._items = {}
         self._groups = {}
         self._state = {}
+        self._rows_key = None
         self._root = None
         self._shape = None
 
@@ -1343,7 +1399,7 @@ class OutlinerPanel(QWidget):
                     for key, item in self._items.items() if item.isExpanded()}
         expanded |= self.__dict__.pop("_kept_expanded", set())
         scroll = self.tree.verticalScrollBar().value()
-        counts = outliner.instance_counts(scene.groups)
+        counts = self._counts = outliner.instance_counts(scene.groups)
         opened = {id(g) for g in outliner.open_path(scene)}
         self._updating = True
         self.tree.blockSignals(True)
@@ -1395,6 +1451,90 @@ class OutlinerPanel(QWidget):
         self._shown_selection = ()
         self._shown_path = ()
         self.tree.verticalScrollBar().setValue(scroll)
+
+    #: Past this many rows coming or going, all of them are made again.
+    _PATCH_MAX = 2000
+
+    def _patch_rows(self, scene, shape) -> bool:
+        """Take out the rows of the groups that left and put in rows for
+        the ones that came, in their places — when every other group kept
+        its parent and its order (``False`` otherwise, nothing touched).
+        Making all 21 406 rows again after a Delete or a Paste on the plant
+        of #158 took ~0.8 s; this, the rows that changed."""
+        old = self._shape
+        if old is None or self._root is None:
+            return False
+        was = {k for k, _p in old}
+        now = {k for k, _p in shape}
+        gone = was - now
+        came = now - was
+        if len(gone) + len(came) > self._PATCH_MAX:
+            return False
+        if ([x for x in old if x[0] not in gone]
+                != [x for x in shape if x[0] not in came]):
+            return False                 # something else moved in the tree
+        counts = outliner.instance_counts(scene.groups)
+        opened = {id(g) for g in outliner.open_path(scene)}
+        scroll = self.tree.verticalScrollBar().value()
+        self._updating = True
+        self.tree.blockSignals(True)
+        try:
+            up = dict(old)
+            for key in gone:
+                item = self._items.pop(key)
+                self._groups.pop(key, None)
+                self._state.pop(key, None)
+                if up.get(key) in gone:
+                    continue        # goes with its parent's row
+                parent = item.parent()
+                if parent is not None:
+                    parent.removeChild(item)   # its own rows go with it
+            if came:
+                around = inherited_states(scene.groups)
+                editable = Qt.ItemIsEditable
+                place: dict = {}             # parent id → children so far
+                for g, parent, _depth in outliner.walk(scene.groups):
+                    pk = id(parent) if parent is not None else 0
+                    at = place.get(pk, 0)
+                    place[pk] = at + 1
+                    key = id(g)
+                    if key not in came:
+                        continue
+                    state = self._row_state(g, counts, opened,
+                                            around.get(key, (None, None)))
+                    item = QTreeWidgetItem([state[0], "", "", state[1],
+                                            state[2], state[7], state[8],
+                                            state[9]])
+                    item.setData(COL_NAME, Qt.UserRole, g)
+                    item.setFlags(item.flags() | editable)
+                    self._paint(item, None, state)
+                    (self._root if parent is None
+                     else self._items[id(parent)]).insertChild(at, item)
+                    self._items[key] = item
+                    self._groups[key] = g
+                    self._state[key] = state
+            # A component that gained or lost a copy: its rows' count.
+            before = getattr(self, "_counts", None) or {}
+            changed = {m for m in set(before) | set(counts)
+                       if before.get(m) != counts.get(m)}
+            if changed:
+                around = None
+                for key, g in self._groups.items():
+                    if key in came or id(g.mesh) not in changed:
+                        continue
+                    if around is None:
+                        around = inherited_states(scene.groups)
+                    state = self._row_state(g, counts, opened,
+                                            around.get(key, (None, None)))
+                    if state != self._state[key]:
+                        self._paint(self._items[key], self._state[key], state)
+                        self._state[key] = state
+            self._counts = counts
+        finally:
+            self.tree.blockSignals(False)
+            self._updating = False
+        self.tree.verticalScrollBar().setValue(scroll)
+        return True
 
     def _kind(self, group) -> str:
         return "ifc" if outliner.ifc_class(group) else outliner.kind(group)
@@ -1502,7 +1642,7 @@ class OutlinerPanel(QWidget):
                 item.setToolTip(COL_LOCK, "")
 
     def _update_rows(self, scene) -> None:
-        counts = outliner.instance_counts(scene.groups)
+        counts = self._counts = outliner.instance_counts(scene.groups)
         opened = {id(g) for g in outliner.open_path(scene)}
         self._updating = True
         try:
@@ -1512,6 +1652,35 @@ class OutlinerPanel(QWidget):
             state_of = self._state
             around = inherited_states(scene.groups)
             for key, g in self._groups.items():
+                state = self._row_state(g, counts, opened,
+                                        around.get(key, (None, None)))
+                old = state_of[key]
+                if state != old:
+                    self._paint(self._items[key], old, state)
+                    state_of[key] = state
+        finally:
+            self._updating = False
+
+    def _update_some_rows(self, scene, keys) -> None:
+        """``_update_rows`` for the rows of ``keys`` and of every copy of
+        a component whose count changed."""
+        counts = outliner.instance_counts(scene.groups)
+        old_counts = getattr(self, "_counts", None) or {}
+        moved = {m for m in set(counts) | set(old_counts)
+                 if counts.get(m) != old_counts.get(m)}
+        self._counts = counts
+        if moved:
+            keys = set(keys) | {k for k, g in self._groups.items()
+                                if id(g.mesh) in moved}
+        opened = {id(g) for g in outliner.open_path(scene)}
+        self._updating = True
+        try:
+            state_of = self._state
+            around = inherited_states(scene.groups)
+            for key in keys:
+                g = self._groups.get(key)
+                if g is None:
+                    continue
                 state = self._row_state(g, counts, opened,
                                         around.get(key, (None, None)))
                 old = state_of[key]

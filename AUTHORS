@@ -39,6 +39,8 @@ reports and the work they carried); they also come first in Help ▸ About.
     geometry (#690), first-point axis snaps for the drawing tools (#718),
     camera-aware planar previews (#719) and switching orbit and pan during a
     middle-button drag (#720). Over a hundred issues filed in all.
+    And for 0.5.10: Shift and the arrow locks steering a dimension's
+    placement step (#770, #810).
 
 ★ Rafael García Rodríguez — "Rafael 3D" (youtube.com/@Rafa3D)
     Draftsman and 3D modelling reviewer.
@@ -97,6 +99,13 @@ dafrobozao <dafrobozao.93@gmail.com>  (github.com/dafrobozao)
     toolbars that look like a window (#670), Restore default toolbars and
     panels (#668, #677), tooltips with the name in bold (#667), the left
     sidebar shortcut (#662) and About ▸ Copy to clipboard (#674).
+    For 0.5.10: Camera ▸ Axes (Alt+A) to switch the drawing axes off;
+    guides moved, copied and rotated like the rest of the model (#627);
+    zoom that comes within 5 mm of a small part (#653, #692); a flat tilted
+    circle far from the origin planar again (#571); Make Group → Explode
+    keeping both redo steps (#737); survey-coordinate files imported near
+    the origin, undistorted (#798); smooth curved surfaces and named
+    materials in GLB, DAE and OBJ export (#131, #794).
 
 José Castro Basso — FADU–UDELAR, Montevideo  (github.com/castrobasso)
     Architect and teacher of architectural representation. Two-point
@@ -208,11 +217,20 @@ RomanErshow  (github.com/RomanErshow)
 Francis Rebouças  (github.com/francisreboucas)
     Sheet dimensions and level marks born in the document's units (#403),
     and a sheet made through the AI bridge undone in one step (#694).
+    For 0.5.10: dimensions that stay put entering a component, follow the
+    object they were drawn in and ride the Move/Rotate preview (#621);
+    Push/Pull cutting a thin board with a corner (#710) and keeping a line
+    between two paints (#649); a tape guide point keeping its dashed
+    segment (#693).
 
 pkoska  (github.com/pkoska)
     The location map that starts no download inside its paint (#327), no
     Rotate helper left behind by a tool change mid grip (#480), and a comma
     after a decimal number starting the next typed value (#598).
+    For 0.5.10: the Line tool starting fresh once a segment cuts a face
+    (#496), an edge under the cursor beating the perpendicular lock (#544),
+    and managed extensions that left the catalog listed and set aside on
+    replacement (#611).
 
 Matt Van Horn  (github.com/mvanhorn)
     The AI Assistant no longer crashes in the Flatpak (#706).
@@ -223,6 +241,8 @@ Luis Romo  (github.com/luisfergromo)
 
 Victor Crespo  (github.com/vicc3d)
     A confirmation before installing an unreviewed extension (#578).
+    For 0.5.10: archives from outside that cannot unpack to all the memory
+    there is, and «Change date and time…» opening the Shadows panel again.
 
 APBureauEtude  (github.com/APBureauEtude)
     OBJ and MTL files read and written as UTF-8 on every platform (#523).
@@ -254,6 +274,29 @@ tomlai-git  (github.com/tomlai-git)
 arthurarquitetoamb  (github.com/arthurarquitetoamb)
     Feature requests from modelling practice: 3D text, copies along
     Follow Me, points, and Push/Pull on lines.
+
+tony1233200  (github.com/tony1233200)
+    Dimensions no longer doubled on every reopen (#765), New clearing the
+    previous document's materials (#759), hand-installed extensions with
+    CRLF line endings recognised by the manager (#764), the net area of a
+    face in Parts and the Text label (#742), and group rotation keeping
+    textures on faces without a fitted UV map (#847).
+
+Bogdan Demchenko  (github.com/hamzah1985)
+    Extension toolbars back where they were saved after the asynchronous
+    start-up (#845), and the Rectangle's idle preview starting at its corner
+    on the pencil (#848).
+
+Alexis  (github.com/bernalalexis-try)
+    Ctrl+Enter accepting the leader-text dialog.
+
+SPMech  (github.com/SPMech)
+    Reports and requests from mechanical modelling: Follow Me after a
+    fillet, styles, locked groups, a snapping grid and the selection colour.
+
+xcd-droid  (github.com/xcd-droid)
+    Reports on snapping (intersections, midpoints for dimensions), the
+    Rectangle and pasting several copied objects.
 
 ---
 

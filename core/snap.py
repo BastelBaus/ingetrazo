@@ -1168,8 +1168,33 @@ def _perpendicular_face_snap(
     return SnapResult(locked, "perp_face", COLOR_REFERENCE)
 
 
+def _pairs_that_may_meet(edges):
+    """The pairs (i < j, in order) of ``edges`` whose boxes come close
+    enough for ``segment_intersection`` to find a meeting: it accepts a
+    point up to its tolerance past either end and a gap up to
+    ``max(tol, 1e-7 * length)``, so each box grows by more than that.
+    Pairs apart are never asked — 1128 pairs under the cursor on the plant
+    of #158, most of them edges a metre away from each other."""
+    n = len(edges)
+    if n < 8:
+        return ((i, j) for i in range(n) for j in range(i + 1, n))
+    import numpy as np
+    from core.topology import _SPLIT_TOLERANCE as tol
+    ends = np.array([(e.a.x(), e.a.y(), e.a.z(), e.b.x(), e.b.y(), e.b.z())
+                     for e in edges], dtype=np.float64).reshape(n, 2, 3)
+    lo, hi = ends.min(axis=1), ends.max(axis=1)
+    length = np.linalg.norm(ends[:, 1] - ends[:, 0], axis=1)
+    grow = (2.5 * tol + 2e-7 * length
+            + 1e-6 * np.abs(ends).max(axis=(1, 2)))[:, None]
+    lo, hi = lo - grow, hi + grow
+    apart = ((lo[:, None, :] > hi[None, :, :])
+             | (lo[None, :, :] > hi[:, None, :])).any(axis=2)
+    ii, jj = np.nonzero(np.triu(~apart, 1))
+    return zip(ii.tolist(), jj.tolist())
+
+
 def _intersection_snap(
-    cx, cy, scene, world_to_pixel, et, is_occluded
+    cx, cy, scene, world_to_pixel, et, is_occluded, are_occluded=None
 ) -> Optional[SnapResult]:
     """Green intersection point where two edges / guide lines actually cross.
 
@@ -1212,26 +1237,33 @@ def _intersection_snap(
     if len(near) < 2:
         return None
 
-    best = None  # (dist_px, hit)
-    for i in range(len(near)):
-        e1 = near[i]
-        for j in range(i + 1, len(near)):
-            e2 = near[j]
-            hit = segment_intersection(e1.a, e1.b, e2.a, e2.b)
-            if hit is None:
-                continue  # parallel, collinear or skew — no real meeting
-            hp = world_to_pixel(hit)
-            if hp is None:
-                continue
-            dh = math.hypot(hp[0] - cx, hp[1] - cy)
-            if dh > et:
-                continue
-            if is_occluded is not None and is_occluded(hit):
-                continue
-            if best is None or dh < best[0]:
-                best = (dh, hit, e1, e2)
-    if best is None:
+    # The crossings under the cursor, in pair order; the nearest one in
+    # sight wins (the first of equals). Occlusion is asked once a point,
+    # nearest first, in batches (_first_visible): under the plant of #158
+    # a cursor on a hidden corner had 56 crossings, each one a ray.
+    found = []
+    for i, j in _pairs_that_may_meet(near):
+        e1, e2 = near[i], near[j]
+        hit = segment_intersection(e1.a, e1.b, e2.a, e2.b)
+        if hit is None:
+            continue  # parallel, collinear or skew — no real meeting
+        hp = world_to_pixel(hit)
+        if hp is None:
+            continue
+        dh = math.hypot(hp[0] - cx, hp[1] - cy)
+        if dh > et:
+            continue
+        found.append((dh, hit, e1, e2))
+    found.sort(key=lambda f: f[0])
+    first = {}
+    for k, f in enumerate(found):
+        first.setdefault((f[1].x(), f[1].y(), f[1].z()), k)
+    order = sorted(first.values())
+    k = _first_visible([found[i][1] for i in order], is_occluded,
+                       are_occluded)
+    if k is None:
         return None
+    best = found[order[k]]
     hit = best[1]
     corners = (best[2].a, best[2].b, best[3].a, best[3].b)
     if any((hit - c).lengthSquared() < 1e-12 for c in corners):
@@ -1846,7 +1878,8 @@ def compute_snap(
     #     intersection, so crossing guides never offered their meeting point —
     #     the cursor slid along the nearest guide. Runs before midpoint/on-edge
     #     so the exact crossing wins, but below every endpoint and lock.
-    inter = _intersection_snap(cx, cy, scene, world_to_pixel, et, is_occluded)
+    inter = _intersection_snap(cx, cy, scene, world_to_pixel, et, is_occluded,
+                               are_occluded)
     if inter is not None and axis_engaged is None:
         return inter
 
