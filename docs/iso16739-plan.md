@@ -311,16 +311,23 @@ sample house (the "casita" of `test_ifc_bridge.py`) that is clean in the
 buildingSMART Validation Service and opens correctly in BlenderBIM and
 IngePresupuestos.
 
-### M0 — Correctness fixes (small, no model change)
-1. Group objects export `world_mesh` geometry and quantities (export + CSV).
-   Test: a moved group and a component instance land at their world position.
-2. Mass unit in the unit assignment; `Tag` empty instead of `'IngeTrazo'`;
-   `IfcSpace.LongName` left empty.
-3. Header with `ViewDefinition [ReferenceView_V1.2]`, application version,
-   `IfcOwnerHistory` + `IfcApplication`.
+### M0 — Correctness fixes (small, no model change) — DONE 2026-10-27
+1. Group objects export `world_mesh` geometry and quantities (IFC, CSV and
+   the BIM panel's takeoff column), through `core.bim.object_faces`.
+   Tests: a moved group and a component whose geometry lives in a nested
+   placement land at their world position.
+2. Mass and plane-angle units in the unit assignment; `Tag` empty instead of
+   `'IngeTrazo'` (which also left `IfcSpace.LongName` empty).
+3. Header with `ViewDefinition [ReferenceView_V1.2]` and the application
+   version. The file name is escaped like any IFC string (a name with `ñ`
+   used to abort the export with `UnicodeEncodeError`).
+   `IfcOwnerHistory` + `IfcApplication` **moved to M4**: a valid
+   `IfcPerson` needs a name, and IngeTrazo has no author setting yet.
+   Inventing one, or writing the OS login into a file that gets shared, is
+   worse than the optional attribute left empty.
 4. `Body` sub-context.
-5. `ifcopenshell` in the dev requirements so CI actually runs the
-   validation tests instead of skipping them.
+5. CI installs `ifcopenshell==0.8.5` (test-only), so the validation tests
+   run in the gate instead of skipping.
 
 *Gate:* the existing tests and the validation suite pass in CI, not just locally.
 
@@ -368,6 +375,9 @@ riskiest step, so it lands alone.
 3. `IfcMapConversion` + `IfcProjectedCRS` from `scene.georef`;
    `IfcSite` lat/long.
 4. `IfcSpace` aggregated into storeys.
+5. Author and organization in the project dialog (stored in the document,
+   with a default from preferences) → `FILE_NAME` author/organization and
+   `IfcOwnerHistory` + `IfcPersonAndOrganization` + `IfcApplication`.
 
 ### M5 — Materials, styles, layers, classification
 1. `IfcMaterial` from the IngeTrazo material; layer sets for walls/slabs
