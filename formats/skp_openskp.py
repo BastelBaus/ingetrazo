@@ -1191,6 +1191,14 @@ def _adapt(model, name: str, skp_path=None):
     # once, so promoting it can only keep it inside its parent, never pull it
     # out next to it. Shared definitions below the sharing thresholds still
     # flatten into what holds them, as before.
+    #
+    # Tagged placements inside are no reason to flatten any more: a
+    # prototype's children carry their own tag, so hiding it hides them
+    # whole. They only must not be flattened into the parent's mesh, where
+    # a tag survives as a per-face one the renderer does not filter — so a
+    # tagged placement, and a shared definition with tagged placements
+    # inside, becomes a prototype too. «01_EG» (walls, doors and furniture
+    # in subgroups on their own tags) arrived as one flat mesh.
     def _promote_nested(d, stack=frozenset()):
         if id(d) in stack:
             return
@@ -1201,6 +1209,9 @@ def _adapt(model, name: str, skp_path=None):
                 continue
             if uses.get(getattr(c, "id", None)) == 1:
                 proto_ids.add(c.id)
+            elif ((getattr(ins, "layer", "") or _subtree_has_tagged(c))
+                    and not _subtree_has_faceme(c)):
+                proto_ids.add(c.id)
             _promote_nested(c, stack | {id(d)})
 
     for r in roots:
@@ -1210,8 +1221,6 @@ def _adapt(model, name: str, skp_path=None):
                 continue
             if getattr(child, "is_image", False) or \
                     getattr(child, "always_faces_camera", False):
-                continue
-            if not _shareable(child):
                 continue
             proto_ids.add(child.id)
             _promote_nested(child)
@@ -1301,6 +1310,100 @@ def _adapt(model, name: str, skp_path=None):
                            "layer": lay,
                            "axes": [float(x) for x in placed.data()]})
 
+    # Build each shared prototype ONCE, in local coordinates — per inherited
+    # material, so a component painted red and green as a whole yields two
+    # prototypes, not one wrongly shared.
+    #
+    # A prototype KEEPS the prototypes its own subtree places, as ``children``
+    # (proto index + local matrix). Flattening them instead — the old
+    # "no proto-in-proto" rule — threw away the sharing the file had already
+    # done inside a component: the hedge in piscina.igz is 4480 + 5120 faces
+    # placed 48 times, and it arrived as 230400 real ones, twenty-four times
+    # over, for the element that is 89% of that model.
+    protos: list = []
+    index_of: dict = {}
+
+    def _build_proto(did, inh):
+        """Index of the prototype for ``(did, inh)``, building it (and any
+        prototype it places) on the way. Reserves its slot before recursing
+        so a cycle cannot spin."""
+        key = (did, inh)
+        if key in index_of:
+            return index_of[key]
+        d = by_id.get(did)
+        if d is None:
+            return None
+        idx = index_of[key] = len(protos)
+        protos.append(None)
+        local: list = []
+        local_edges: list = []
+        local_lines: list = []
+        local_images: list = []
+        child_uses: dict = {}
+        _collect(d, QMatrix4x4(), by_id, attr_map, local, 0, set(),
+                 proto_ids, child_uses, inh, local_images,
+                 edges_out=local_edges, loose_out=local_lines)
+        children: list = []
+        for (cid, cinh), places in child_uses.items():
+            ci = _build_proto(cid, cinh)
+            if ci is None:
+                continue
+            for xf, ly, nm in places:
+                kid = {"proto": ci, "xform": xf}
+                if ly:
+                    kid["layer"] = ly
+                if nm:
+                    kid["name"] = nm
+                children.append(kid)
+        protos[idx] = {"name": getattr(d, "name", None) or name,
+                       "faces": local, "soft_edges": local_edges,
+                       "loose_edges": local_lines,
+                       # A GROUP placed once is a group. Copies of a group
+                       # share its definition in the file; they stay
+                       # components here, so editing one cannot reach into
+                       # the mesh the others share.
+                       "component": did not in single_groups,
+                       "children": children, "instances": [],
+                       # face-me pieces inside, in local coordinates: they
+                       # leave as billboards once the placements are known
+                       "_images": local_images}
+        return idx
+
+    for (did, inh), uses in list(proto_uses.items()):
+        if not uses:
+            continue
+        idx = _build_proto(did, inh)
+        if idx is None:
+            continue
+        protos[idx]["instances"] = [xf for xf, _ly, _nm in uses]
+        if any(ly for _xf, ly, _nm in uses):
+            # Layer (tag) per PLACEMENT — copies of one component can sit on
+            # different layers.
+            protos[idx]["instance_layers"] = [ly for _xf, ly, _nm in uses]
+        if any(nm for _xf, _ly, nm in uses):
+            # Name per PLACEMENT too: each copy can carry its own.
+            protos[idx]["instance_names"] = [nm for _xf, _ly, nm in uses]
+
+    # The face-me pieces a prototype holds turn toward the camera from
+    # their own WORLD spot, so they leave it like the ones outside any
+    # prototype: one per placement, its matrix composed down the tree, its
+    # tag the nearest one above it.
+    def _expand_images(idx, world, tag, depth=0):
+        pr = protos[idx]
+        for child, placed, inh, lay in pr["_images"]:
+            image_uses.append((child, world * placed, inh, lay or tag))
+        if depth < 32:      # a malformed file must not spin
+            for kid in pr["children"]:
+                _expand_images(kid["proto"], world * kid["xform"],
+                               kid.get("layer") or tag, depth + 1)
+
+    for idx, pr in enumerate(protos):
+        lays = pr.get("instance_layers") or []
+        for i, xf in enumerate(pr["instances"]):
+            _expand_images(idx, xf, lays[i] if i < len(lays) else None)
+    for pr in protos:
+        del pr["_images"]
+
     # Image entities → their own groups; cutout images (real alpha) become
     # face-me billboards that turn toward the camera, opaque photos stay
     # static panels — same rule as the DAE face-me import. An image quad
@@ -1330,76 +1433,6 @@ def _adapt(model, name: str, skp_path=None):
         if lay:
             gp["layer"] = lay
         groups.append(gp)
-
-    # Build each shared prototype ONCE, in local coordinates — per inherited
-    # material, so a component painted red and green as a whole yields two
-    # prototypes, not one wrongly shared.
-    #
-    # A prototype KEEPS the prototypes its own subtree places, as ``children``
-    # (proto index + local matrix). Flattening them instead — the old
-    # "no proto-in-proto" rule — threw away the sharing the file had already
-    # done inside a component: the hedge in piscina.igz is 4480 + 5120 faces
-    # placed 48 times, and it arrived as 230400 real ones, twenty-four times
-    # over, for the element that is 89% of that model.
-    protos: list = []
-    index_of: dict = {}
-
-    def _build_proto(did, inh):
-        """Index of the prototype for ``(did, inh)``, building it (and any
-        prototype it places) on the way. Reserves its slot before recursing
-        so a cycle cannot spin."""
-        key = (did, inh)
-        if key in index_of:
-            return index_of[key]
-        d = by_id.get(did)
-        if d is None:
-            return None
-        idx = index_of[key] = len(protos)
-        protos.append(None)
-        local: list = []
-        local_edges: list = []
-        local_lines: list = []
-        child_uses: dict = {}
-        _collect(d, QMatrix4x4(), by_id, attr_map, local, 0, set(),
-                 proto_ids, child_uses, inh, edges_out=local_edges,
-                 loose_out=local_lines)
-        children: list = []
-        for (cid, cinh), places in child_uses.items():
-            ci = _build_proto(cid, cinh)
-            if ci is None:
-                continue
-            for xf, ly, nm in places:
-                kid = {"proto": ci, "xform": xf}
-                if ly:
-                    kid["layer"] = ly
-                if nm:
-                    kid["name"] = nm
-                children.append(kid)
-        protos[idx] = {"name": getattr(d, "name", None) or name,
-                       "faces": local, "soft_edges": local_edges,
-                       "loose_edges": local_lines,
-                       # A GROUP placed once is a group. Copies of a group
-                       # share its definition in the file; they stay
-                       # components here, so editing one cannot reach into
-                       # the mesh the others share.
-                       "component": did not in single_groups,
-                       "children": children, "instances": []}
-        return idx
-
-    for (did, inh), uses in list(proto_uses.items()):
-        if not uses:
-            continue
-        idx = _build_proto(did, inh)
-        if idx is None:
-            continue
-        protos[idx]["instances"] = [xf for xf, _ly, _nm in uses]
-        if any(ly for _xf, ly, _nm in uses):
-            # Layer (tag) per PLACEMENT — copies of one component can sit on
-            # different layers.
-            protos[idx]["instance_layers"] = [ly for _xf, ly, _nm in uses]
-        if any(nm for _xf, _ly, nm in uses):
-            # Name per PLACEMENT too: each copy can carry its own.
-            protos[idx]["instance_names"] = [nm for _xf, _ly, nm in uses]
     # NOT filtered: ``children`` reference prototypes by INDEX, so dropping
     # an entry would silently repoint every reference after it. A container
     # with no faces of its own is real anyway — the hedge's top definition
