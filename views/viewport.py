@@ -231,6 +231,9 @@ GL_ALWAYS = 0x0207
 GL_EQUAL = 0x0202
 GL_KEEP = 0x1E00
 GL_REPLACE = 0x1E01
+#: Stencil bit the foliage cutouts leave, so the ambient occlusion (#954)
+#: skips the leaves: a crown of crossed cards reads as one dark corner.
+AO_FOLIAGE_BIT = 0x80
 GL_BLEND = 0x0BE2
 GL_SRC_ALPHA = 0x0302
 GL_ONE_MINUS_SRC_ALPHA = 0x0303
@@ -531,8 +534,8 @@ class _GlTape:
     replay runs the raw list natively when the engine is there, else the
     wrapper calls."""
 
-    DRAW, VAO, U1I, U1F, U4F, ENABLE, DISABLE, CULL, FRONT, ACTIVE, TEX = \
-        range(11)
+    DRAW, VAO, U1I, U1F, U4F, ENABLE, DISABLE, CULL, FRONT, ACTIVE, TEX, \
+        STENCIL = range(12)
 
     def __init__(self):
         self.calls: list = []
@@ -576,6 +579,10 @@ class _GlTape:
         self.call(fn, value)
         self._op(code, (value,))
 
+    def stencil_func(self, fn, func, ref, mask):
+        self.call(fn, func, ref, mask)
+        self._op(self.STENCIL, (func, ref, mask))
+
     def tex_bind(self, tex, unit):
         # QOpenGLTexture::bind(unit): active unit, then bind (not reset).
         self.call(tex.bind, unit)
@@ -613,7 +620,7 @@ def _callable_proc(addr: int) -> bool:
 _TAPE_FUNCS = (b"glDrawArraysInstanced", b"glBindVertexArray",
                b"glUniform1i", b"glUniform1f", b"glUniform4f", b"glEnable",
                b"glDisable", b"glCullFace", b"glFrontFace",
-               b"glActiveTexture", b"glBindTexture")
+               b"glActiveTexture", b"glBindTexture", b"glStencilFunc")
 
 
 class _InstanceBatch(list):
@@ -2067,7 +2074,17 @@ class Viewport(QOpenGLWidget):
         self._gl.glClearDepthf(1.0)
         bg = style.background
         self._gl.glClearColor(bg[0], bg[1], bg[2], 1.0)
-        self._gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        self._gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
+                         | GL_STENCIL_BUFFER_BIT)
+        # Foliage marking for the ambient occlusion: every opaque fragment
+        # that wins the depth test leaves its bit — set by a cutout, cleared
+        # by anything else (``_set_cutout``) — so the bit ends up saying
+        # whether the surface SEEN there is a leaf. The test always passes:
+        # colour and depth come out as ever. Off again at the occlusion.
+        self._gl.glEnable(GL_STENCIL_TEST)
+        self._gl.glStencilFunc(GL_ALWAYS, 0, 0xFF)
+        self._gl.glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE)
+        self._gl.glStencilMask(AO_FOLIAGE_BIT)
 
         mvp = self.camera.projection_matrix() * self.camera.view_matrix()
         # Frustum planes for chunk culling — also consumed by the
@@ -2458,9 +2475,7 @@ class Viewport(QOpenGLWidget):
                 if tex is None:
                     continue
                 self._program.setUniformValue1f(self._loc_shade, float(shade))
-                self._program.setUniformValue(
-                    self._loc_hard_cutout,
-                    1 if getattr(tex, "_cutout", False) else 0)
+                self._set_cutout(getattr(tex, "_cutout", False))
                 tex.bind(0)
                 for fade, spans in ((EDIT_REST_FADE, vis), (0.0, subj)) \
                         if fading else ((0.0, vis),):
@@ -2471,7 +2486,7 @@ class Viewport(QOpenGLWidget):
                         self._gl.glDrawArrays(GL_TRIANGLES, _vs, _vc)
                 tex.release(0)
             self._program.setUniformValue1f(self._loc_fade, 0.0)
-            self._program.setUniformValue(self._loc_hard_cutout, 0)
+            self._set_cutout(False)
             self._tex_faces_vao.release()
             if mode == "xray":
                 self._program.setUniformValue1f(self._loc_opacity, 1.0)
@@ -2555,19 +2570,20 @@ class Viewport(QOpenGLWidget):
                     if tex is None:
                         continue
                     self._program.setUniformValue1f(self._loc_shade, float(shade))
-                    self._program.setUniformValue(
-                        self._loc_hard_cutout,
-                        1 if getattr(tex, "_cutout", False) else 0)
+                    self._set_cutout(getattr(tex, "_cutout", False))
                     tex.bind(0)
                     self._gl.glDrawArrays(GL_TRIANGLES, start, count)
                     tex.release(0)
-                self._program.setUniformValue(self._loc_hard_cutout, 0)
+                self._set_cutout(False)
                 self._tex_faces_vao.release()
                 self._program.setUniformValue1f(self._loc_shade, 1.0)
                 self._program.setUniformValue(self._loc_use_tex, 0)
             self._gl.glDisable(GL_CULL_FACE)
 
         self._draw_section_fill(mode, style)
+        # Ambient occlusion (#954): onto the opaque faces only — the glass
+        # below, the billboards, highlights and every edge come after it.
+        self._apply_ambient_occlusion(w, h, mode, style)
 
         # Translucent material runs (.skp trans with useTrans): drawn
         # after everything opaque, blended, depth-tested but not depth-
@@ -3065,6 +3081,35 @@ class Viewport(QOpenGLWidget):
             self._gl.glDrawArrays(GL_LINES, 0, hover_count)
             self._hover_edges_vao.release()
             self._set_section_clip(False)
+
+    def _set_cutout(self, on) -> None:
+        """The foliage cutout switch of the face shader, and with it the
+        stencil mark the ambient occlusion skips (#954): the frame arms the
+        stencil (test always passing, ``AO_FOLIAGE_BIT`` writable) and only
+        the value a fragment leaves changes here."""
+        self._program.setUniformValue(self._loc_hard_cutout, 1 if on else 0)
+        self._gl.glStencilFunc(GL_ALWAYS, AO_FOLIAGE_BIT if on else 0, 0xFF)
+
+    def _apply_ambient_occlusion(self, w, h, mode, style=None) -> None:
+        """The ambient occlusion pass (#954, the style's experimental switch)
+        over the faces the scene FBO holds. Wireframe and X-ray have no
+        opaque faces to darken."""
+        # The foliage marking ends with the opaque faces, AO or not.
+        self._gl.glDisable(GL_STENCIL_TEST)
+        self._gl.glStencilMask(0xFF)
+        from views import ambient_occlusion as _ao
+        settings = _ao.settings_for(style)
+        if settings is None or mode in ("wireframe", "xray"):
+            return
+        if getattr(self, "_ao", None) is None:
+            self._ao = _ao.AmbientOcclusion(self, SHADER_DIR)
+        if not self._ao.apply(self._gl, self.context().extraFunctions(),
+                              self._scene_fbo, w, h,
+                              self.camera.projection_matrix(), settings):
+            if not getattr(self, "_ao_warned", False):
+                self._ao_warned = True
+                print(f"[ambient occlusion] off: {self._ao.broken}")
+        self._program.bind()
 
     # ---- Setup helpers ------------------------------------------------------
     def _compile_program(self) -> QOpenGLShaderProgram:
@@ -4322,6 +4367,9 @@ class Viewport(QOpenGLWidget):
 
         def set_cut(v):
             tape.uniform_i(prog, self._loc_hard_cutout, v)
+            # The foliage mark for the ambient occlusion (see _set_cutout).
+            tape.stencil_func(gl.glStencilFunc, GL_ALWAYS,
+                              AO_FOLIAGE_BIT if v else 0, 0xFF)
 
         def set_front(mirrored):
             tape.gl(gl.glFrontFace, tape.FRONT, GL_CW if mirrored else GL_CCW)
@@ -4476,14 +4524,12 @@ class Viewport(QOpenGLWidget):
                                 continue
                             self._program.setUniformValue1f(
                                 self._loc_shade, float(shade))
-                            self._program.setUniformValue(
-                                self._loc_hard_cutout,
-                                1 if getattr(tex, "_cutout", False) else 0)
+                            self._set_cutout(getattr(tex, "_cutout", False))
                             tex.bind(0)
                             extra.glDrawArraysInstanced(GL_TRIANGLES, s0, cnt, n)
                             tex.release(0)
                         entry["tex_vao"].release()
-                        self._program.setUniformValue(self._loc_hard_cutout, 0)
+                        self._set_cutout(False)
                         self._program.setUniformValue1f(self._loc_shade, 1.0)
                         self._program.setUniformValue(self._loc_use_tex, 0)
                 if (entry.get("dback_count") and not _NO_BACK_TINT
@@ -5265,6 +5311,9 @@ class Viewport(QOpenGLWidget):
                 terrain.destroy()
                 self._terrain_texture = None
             self._release_photo_textures_unsafe()
+            if getattr(self, "_ao", None) is not None:
+                self._ao.release()
+                self._ao = None
         finally:
             self.doneCurrent()
 
@@ -6155,14 +6204,12 @@ class Viewport(QOpenGLWidget):
                 if tex is None:
                     continue
                 self._program.setUniformValue1f(self._loc_shade, float(shade))
-                self._program.setUniformValue(
-                    self._loc_hard_cutout,
-                    1 if getattr(tex, "_cutout", False) else 0)
+                self._set_cutout(getattr(tex, "_cutout", False))
                 tex.bind(0)
                 self._gl.glDrawArrays(GL_TRIANGLES, start, count)
                 tex.release(0)
             self._program.setUniformValue1f(self._loc_shade, 1.0)
-            self._program.setUniformValue(self._loc_hard_cutout, 0)
+            self._set_cutout(False)
             self._pv_tex_vao.release()
             self._program.setUniformValue(self._loc_use_tex, 0)
         n = getattr(self, "_pv_edges_count", 0)

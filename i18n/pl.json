@@ -1459,6 +1459,7 @@
  "W": "W",
  "Wall": "Mur",
  "Wallpaper": "Tapeta",
+ "Pool Water": "Woda basenowa",
  "Water": "Woda",
  "Wavefront OBJ (*.obj)": "Wavefront OBJ (*.obj)",
  "Wavefront OBJ (*.obj);;All files (*)": "Wavefront OBJ (*.obj);;Wszystkie pliki (*)",
@@ -2989,6 +2990,7 @@
  "French translation of the interface.": "Francuskie tłumaczenie interfejsu.",
  "Polish translation of the interface.": "Polskie tłumaczenie interfejsu.",
  "Russian translation of the interface.": "Rosyjskie tłumaczenie interfejsu.",
+ "Korean translation of the interface.": "Koreańskie tłumaczenie interfejsu.",
  "Sheet dimensions and level marks in the document's units, and sheets made from the AI bridge undone in one step.": "Wymiary i rzędne arkusza w jednostkach dokumentu oraz arkusze utworzone przez most AI cofane jednym krokiem.",
  "Fixes for the location map, Move's rotation grips and typed values.": "Poprawki mapy lokalizacji, uchwytów obrotu w Przesuwaniu i wpisywanych wartości.",
  "A fix for the AI Assistant crash in the Flatpak.": "Poprawka awarii Asystenta AI w pakiecie Flatpak.",
@@ -3018,5 +3020,15 @@
  "Change the camera's angle of view, like a lens: wider takes more in, narrower keeps the lines calm.": "Zmienia kąt widzenia kamery jak obiektyw: szerszy obejmuje więcej, węższy zachowuje spokojne linie.",
  "Field of view in degrees (10–120):": "Pole widzenia w stopniach (10–120):",
  "Field of view applies to perspective; switch to Perspective first.": "Pole widzenia dotyczy perspektywy; najpierw przełącz na Perspektywę.",
- "{name}: every face has its own material, so nothing changed — open it and paint the faces": "{name}: każda ściana ma własny materiał, więc nic się nie zmieniło — otwórz go i pomaluj ściany"
+ "{name}: every face has its own material, so nothing changed — open it and paint the faces": "{name}: każda ściana ma własny materiał, więc nic się nie zmieniło — otwórz go i pomaluj ściany",
+ "Ambient occlusion (experimental)": "Okluzja otoczenia (eksperymentalna)",
+ "Softly darkens where surfaces meet — corners, the foot of a wall, under a bench. Experimental: if it looks wrong on your graphics card, turn it off and tell us.": "Delikatnie przyciemnia miejsca, gdzie stykają się powierzchnie: narożniki, podstawę ściany, przestrzeń pod ławką. Eksperymentalna: jeśli na Twojej karcie graficznej wygląda źle, wyłącz ją i daj nam znać.",
+ "Distance:": "Odległość:",
+ "How far a surface still darkens its neighbour": "Do jakiej odległości powierzchnia przyciemnia sąsiednią",
+ "Intensity:": "Intensywność:",
+ "Your graphics driver cannot draw ambient occlusion ({reason}).": "Twój sterownik grafiki nie potrafi narysować okluzji otoczenia ({reason}).",
+ "Vietnamese translation of the interface.": "Wietnamskie tłumaczenie interfejsu.",
+ "Lao translation of the interface.": "Laotańskie tłumaczenie interfejsu.",
+ "Thai translation of the interface.": "Tajskie tłumaczenie interfejsu.",
+ "Japanese translation of the interface.": "Japońskie tłumaczenie interfejsu."
 }

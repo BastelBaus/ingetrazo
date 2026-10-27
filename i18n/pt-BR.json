@@ -1461,6 +1461,7 @@
  "W": "L.",
  "Wall": "Parede",
  "Wallpaper": "Papel de parede",
+ "Pool Water": "Água de piscina",
  "Water": "Água",
  "Wavefront OBJ (*.obj)": "Wavefront OBJ (*.obj)",
  "Wavefront OBJ (*.obj);;All files (*)": "Wavefront OBJ (*.obj);;Todos os arquivos (*)",
@@ -2988,6 +2989,7 @@
  "French translation of the interface.": "Tradução da interface para o francês.",
  "Polish translation of the interface.": "Tradução da interface para o polonês.",
  "Russian translation of the interface.": "Tradução da interface para o russo.",
+ "Korean translation of the interface.": "Tradução da interface para o coreano.",
  "Sheet dimensions and level marks in the document's units, and sheets made from the AI bridge undone in one step.": "Cotas e níveis de prancha nas unidades do documento, e pranchas feitas pela ponte de IA desfeitas em um passo.",
  "Fixes for the location map, Move's rotation grips and typed values.": "Correções no mapa de localização, nas alças de giro de Mover e nos valores digitados.",
  "A fix for the AI Assistant crash in the Flatpak.": "Uma correção para o travamento do Assistente de IA no Flatpak.",
@@ -3017,5 +3019,15 @@
  "Change the camera's angle of view, like a lens: wider takes more in, narrower keeps the lines calm.": "Muda o ângulo de visão da câmera, como uma lente: mais aberto abrange mais, mais fechado deixa as linhas calmas.",
  "Field of view in degrees (10–120):": "Campo de visão em graus (10–120):",
  "Field of view applies to perspective; switch to Perspective first.": "O campo de visão é da perspectiva; mude primeiro para Perspectiva.",
- "{name}: every face has its own material, so nothing changed — open it and paint the faces": "{name}: todas as faces têm material próprio, então nada mudou — abra-o e pinte as faces"
+ "{name}: every face has its own material, so nothing changed — open it and paint the faces": "{name}: todas as faces têm material próprio, então nada mudou — abra-o e pinte as faces",
+ "Ambient occlusion (experimental)": "Oclusão de ambiente (experimental)",
+ "Softly darkens where surfaces meet — corners, the foot of a wall, under a bench. Experimental: if it looks wrong on your graphics card, turn it off and tell us.": "Escurece suavemente onde as superfícies se encontram: cantos, o pé de uma parede, sob um banco. Experimental: se parecer errado na sua placa de vídeo, desligue e nos avise.",
+ "Distance:": "Distância:",
+ "How far a surface still darkens its neighbour": "Até que distância uma superfície escurece a vizinha",
+ "Intensity:": "Intensidade:",
+ "Your graphics driver cannot draw ambient occlusion ({reason}).": "Seu driver gráfico não consegue desenhar a oclusão de ambiente ({reason}).",
+ "Vietnamese translation of the interface.": "Tradução da interface para o vietnamita.",
+ "Lao translation of the interface.": "Tradução da interface para o laosiano.",
+ "Thai translation of the interface.": "Tradução da interface para o tailandês.",
+ "Japanese translation of the interface.": "Tradução da interface para o japonês."
 }

@@ -4,6 +4,64 @@ All notable changes to IngeTrazo are documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com); versions
 follow [SemVer](https://semver.org).
 
+## [0.5.10.1] — 2026-10-27
+
+**Arreglo de una pérdida de datos y, como función experimental, la oclusión
+ambiental.**
+
+**Si viene de la 0.5.9, esta versión trae también todo lo de la 0.5.10:**
+- **Motor Rust encendido por defecto** (también en el Flatpak), con el de
+  Python de reserva en Preferencias: si el módulo no carga, IngeTrazo vuelve
+  solo a Python.
+- **Modelos enormes sin tirones** (planta de 14 M de caras): el cursor de
+  Línea y Rectángulo pasa de segundos a ~40 ms por movimiento; un clic de
+  selección, de 1,2 a 0,2 s; mover, deshacer, borrar, pegar y entrar o salir
+  de un grupo tocan solo lo que cambió; en Windows también.
+- **Nuevo:** Cámara ▸ Ejes (Alt+A), Cámara ▸ Campo de visión (10°–120°),
+  enganche «Intersección» donde se cruzan dos caras, y mover, copiar y rotar
+  guías.
+- **Unos sesenta arreglos:** Empujar/Tirar, inferencias, cotas que ya no se
+  duplican al reabrir (y las duplicadas se reparan), deshacer y rehacer,
+  importar y exportar (materiales, curvas, coordenadas topográficas),
+  extensiones, y protección contra archivos comprimidos maliciosos.
+- **Rendimiento:** las guías ya no ralentizan cada cuadro, y en Linux la
+  memoria ya no crece al reabrir documentos grandes.
+
+El detalle completo está en la sección 0.5.10, más abajo.
+
+### Añadido
+
+- **Oclusión ambiental (experimental)** en el panel Estilos (#954):
+  oscurece suavemente donde se juntan las superficies (rincones, el pie de
+  un muro, bajo una banca), con **Distancia** e **Intensidad** ajustables.
+  Viene apagada en todos los estilos y se guarda con el estilo, en el
+  archivo y en las escenas; un archivo guardado con ella abre en la 0.5.10,
+  que la ignora. Cuesta ~1 ms por cuadro incluso en una planta de 14
+  millones de caras. **Probada a fondo en Linux** (gráfica integrada AMD
+  Radeon 780M, Wayland). En Windows y Mac aún no la hemos visto funcionar:
+  si en su tarjeta gráfica se ve mal, apáguela y avísenos. Si el
+  controlador no puede dibujarla, la casilla se desactiva sola y dice por
+  qué.
+
+### Arreglado
+
+- **Un grupo o componente pintado entero con una textura ya no la pierde al
+  guardar dos veces** (#877, análisis de @alanmirandaj): el primer guardado
+  de la sesión borraba sin querer la ruta de la imagen en el modelo abierto,
+  y el siguiente (un autoguardado basta) escribía el archivo sin ella. Al
+  reabrirlo, el grupo salía sin textura. Venía desde la 0.5.0.
+- **Windows: los diálogos de Abrir, Guardar, Importar y Exportar vuelven a
+  abrirse** cuando la última carpeta usada estaba en una unidad de red que
+  ya no responde (#948): ahora empiezan en la carpeta del documento o en
+  Documentos.
+- **Las sombras del sol ya no se ven pixeladas** en el borde: cada muestra
+  se suaviza entre los puntos del mapa de sombras, y la orilla queda lisa en
+  vez de en escalones (de 4 cm en una plaza, de 30 cm en una planta de
+  280 m). **Probado en Linux** (Radeon 780M); en Windows y Mac aún no lo
+  hemos visto: si las sombras se ven mal o la vista va más lenta con ellas
+  encendidas, avísenos. El detalle fino de cerca en modelos grandes llega en
+  la 0.6 (#958).
+
 ## [0.5.10] — 2026-10-26
 
 **Motor Rust encendido por defecto y modelos enormes sin tirones.** El motor

@@ -75,6 +75,20 @@
   <url type="vcs-browser">https://github.com/ingelibre/ingetrazo</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.5.10.1" date="2026-10-27">
+      <description>
+        <p>Fixes a data loss: a group or component painted whole with a
+        texture lost it on its second save. Experimental ambient occlusion
+        in the Styles panel (off by default), sun shadows without staircase
+        edges, and network folders no longer stop the file dialogs on
+        Windows.</p>
+        <p xml:lang="es">Arregla una pérdida de datos: un grupo o componente
+        pintado entero con una textura la perdía al segundo guardado.
+        Oclusión ambiental experimental en el panel Estilos (apagada por
+        defecto), sombras del sol sin escalones, y en Windows las carpetas
+        de red ya no bloquean los diálogos de archivos.</p>
+      </description>
+    </release>
     <release version="0.5.10" date="2026-10-26">
       <description>
         <p>The Rust engine is now on by default, in this Flatpak too, with

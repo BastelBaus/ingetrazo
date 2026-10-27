@@ -3056,6 +3056,37 @@ class StylesPanel(QWidget):
                                     "section_fill_color")
         grid.addWidget(self._fill_c, 9, 1)
 
+        # Ambient occlusion (#954): experimental, off in every preset. The
+        # two values only take edits while the switch is on.
+        from views.length_field import LengthSpinBox
+        from core.style import AO_DISTANCE_RANGE
+        self._ao = QCheckBox(tr("Ambient occlusion (experimental)"))
+        self._ao.setToolTip(tr(
+            "Softly darkens where surfaces meet — corners, the foot of a "
+            "wall, under a bench. Experimental: if it looks wrong on your "
+            "graphics card, turn it off and tell us."))
+        self._ao.toggled.connect(self._apply_edits)
+        grid.addWidget(self._ao, 10, 0, 1, 2)
+        self._ao_dist_lbl = QLabel(tr("Distance:"))
+        grid.addWidget(self._ao_dist_lbl, 11, 0)
+        self._ao_dist = LengthSpinBox(minimum=AO_DISTANCE_RANGE[0],
+                                      maximum=AO_DISTANCE_RANGE[1])
+        self._ao_dist.setToolTip(tr(
+            "How far a surface still darkens its neighbour"))
+        self._ao_dist.valueChanged.connect(self._apply_edits)
+        grid.addWidget(self._ao_dist, 11, 1)
+        self._ao_int_lbl = QLabel(tr("Intensity:"))
+        grid.addWidget(self._ao_int_lbl, 12, 0)
+        int_row = QHBoxLayout()
+        self._ao_int = QSlider(Qt.Horizontal)
+        self._ao_int.setRange(0, 20)             # tenths: 0.0 – 2.0
+        self._ao_int.valueChanged.connect(self._apply_edits)
+        int_row.addWidget(self._ao_int, 1)
+        self._ao_int_val = QLabel()
+        self._ao_int_val.setMinimumWidth(28)
+        int_row.addWidget(self._ao_int_val)
+        grid.addLayout(int_row, 12, 1)
+
         row = QHBoxLayout()
         save_btn = QPushButton(tr("Save style…"))
         save_btn.clicked.connect(self._on_save)
@@ -3063,7 +3094,7 @@ class StylesPanel(QWidget):
         self._del_btn = QPushButton(tr("Delete"))
         self._del_btn.clicked.connect(self._on_delete)
         row.addWidget(self._del_btn)
-        grid.addLayout(row, 10, 0, 1, 2)
+        grid.addLayout(row, 13, 0, 1, 2)
 
         self.refresh()
 
@@ -3127,6 +3158,11 @@ class StylesPanel(QWidget):
             self._ground_c.setStyleSheet(self._css(style.ground_color))
             self._bg_c.setStyleSheet(self._css(style.background))
             self._fill_c.setStyleSheet(self._css(style.section_fill_color))
+            self._ao.setChecked(getattr(style, "ambient_occlusion", False))
+            self._ao_dist.setValue(getattr(style, "ao_distance", 0.5))
+            self._ao_int.setValue(round(getattr(style, "ao_intensity", 1.0)
+                                        * 10))
+            self._sync_ao_controls()
             self._del_btn.setEnabled(
                 any(s.name == self._combo.currentData() for s in users))
         finally:
@@ -3152,8 +3188,30 @@ class StylesPanel(QWidget):
         style.back_edges = self._back_edges.isChecked()
         style.sky = self._sky.isChecked()
         style.section_fill = self._fill.isChecked()
+        style.ambient_occlusion = self._ao.isChecked()
+        style.ao_distance = self._ao_dist.value()
+        style.ao_intensity = self._ao_int.value() / 10.0
+        self._sync_ao_controls()
         self._window._sync_style_menu()
         self._window.viewport.update()
+
+    def _sync_ao_controls(self) -> None:
+        """The distance and intensity follow the switch; a graphics driver
+        that refused the pass this session greys the switch with the
+        reason, instead of a box that does nothing."""
+        on = self._ao.isChecked()
+        for w in (self._ao_dist_lbl, self._ao_dist, self._ao_int_lbl,
+                  self._ao_int, self._ao_int_val):
+            w.setEnabled(on)
+        from core.units import localized
+        self._ao_int_val.setText(localized(f"{self._ao_int.value() / 10.0:.1f}"))
+        ao = getattr(self._window.viewport, "_ao", None)
+        broken = getattr(ao, "broken", None)
+        if broken:
+            self._ao.setEnabled(False)
+            self._ao.setToolTip(tr(
+                "Your graphics driver cannot draw ambient occlusion "
+                "({reason}).", reason=broken))
 
     def _pick_color(self, title: str, attr: str) -> None:
         style = self._style()

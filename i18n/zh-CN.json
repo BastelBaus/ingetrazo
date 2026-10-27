@@ -1461,6 +1461,7 @@
  "W": "宽",
  "Wall": "墙",
  "Wallpaper": "墙纸",
+ "Pool Water": "泳池水",
  "Water": "水",
  "Wavefront OBJ (*.obj)": "Wavefront OBJ (*.obj)",
  "Wavefront OBJ (*.obj);;All files (*)": "Wavefront OBJ (*.obj);;所有文件 (*)",
@@ -2982,6 +2983,7 @@
  "French translation of the interface.": "界面的法语翻译。",
  "Polish translation of the interface.": "界面的波兰语翻译。",
  "Russian translation of the interface.": "界面的俄语翻译。",
+ "Korean translation of the interface.": "界面韩语翻译。",
  "Sheet dimensions and level marks in the document's units, and sheets made from the AI bridge undone in one step.": "图纸尺寸与标高采用文档单位；通过 AI 桥创建的图纸可一步撤销。",
  "Fixes for the location map, Move's rotation grips and typed values.": "修复位置地图、移动工具的旋转手柄和输入数值的问题。",
  "A fix for the AI Assistant crash in the Flatpak.": "修复 Flatpak 中 AI 助手崩溃的问题。",
@@ -3011,5 +3013,15 @@
  "Change the camera's angle of view, like a lens: wider takes more in, narrower keeps the lines calm.": "像镜头一样改变相机的视角：越宽看到越多，越窄线条越平稳。",
  "Field of view in degrees (10–120):": "视野角度（10–120）：",
  "Field of view applies to perspective; switch to Perspective first.": "视野仅适用于透视；请先切换到透视。",
- "{name}: every face has its own material, so nothing changed — open it and paint the faces": "{name}：每个面都有自己的材质，所以没有变化——请进入其中并为各个面上色"
+ "{name}: every face has its own material, so nothing changed — open it and paint the faces": "{name}：每个面都有自己的材质，所以没有变化——请进入其中并为各个面上色",
+ "Ambient occlusion (experimental)": "环境光遮蔽（实验性）",
+ "Softly darkens where surfaces meet — corners, the foot of a wall, under a bench. Experimental: if it looks wrong on your graphics card, turn it off and tell us.": "在表面相接处柔和地加深阴影：墙角、墙脚、长椅下方。实验性功能：如果在您的显卡上显示不正确，请关闭它并告诉我们。",
+ "Distance:": "距离：",
+ "How far a surface still darkens its neighbour": "一个表面在多远的距离内仍会使相邻表面变暗",
+ "Intensity:": "强度：",
+ "Your graphics driver cannot draw ambient occlusion ({reason}).": "您的显卡驱动无法绘制环境光遮蔽（{reason}）。",
+ "Vietnamese translation of the interface.": "界面的越南语翻译。",
+ "Lao translation of the interface.": "界面的老挝语翻译。",
+ "Thai translation of the interface.": "界面的泰语翻译。",
+ "Japanese translation of the interface.": "界面的日语翻译。"
 }

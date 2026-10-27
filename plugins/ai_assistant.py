@@ -68,6 +68,7 @@ _LANGUAGE_NAMES = {
     "es": "español", "en": "English", "de": "Deutsch", "fr": "français",
     "id": "Bahasa Indonesia", "it": "italiano", "pl": "polski",
     "pt-BR": "português do Brasil", "ru": "русский", "zh-CN": "简体中文",
+    "vi": "Tiếng Việt", "lo": "ລາວ", "th": "ไทย", "ja": "日本語", "ko": "한국어",
 }
 
 
