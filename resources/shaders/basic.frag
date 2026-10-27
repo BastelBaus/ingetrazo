@@ -74,7 +74,10 @@ uniform vec3 u_light_fixed;
 out vec4 fragColor;
 
 // Fraction of light reaching this fragment (0..1): 3x3 PCF over the
-// packed-depth shadow map. Outside the map = fully lit.
+// packed-depth shadow map, each tap bilinearly weighted between the four
+// texels around it — so the edge is a smooth ramp instead of the map's
+// staircase (each texel is centimetres of ground, 30 cm on a 280 m plant).
+// Outside the map = fully lit.
 float shadow_light() {
     vec4 lp = u_light_vp * vec4(v_world, 1.0);
     vec3 uvz = lp.xyz / lp.w * 0.5 + 0.5;
@@ -111,13 +114,29 @@ float shadow_light() {
     // Margin: constant term + 1.5 texels of slope along the gradient
     // (covers the within-texel offset of both receiver and caster raster).
     float bias = u_shadow_bias + glen * texel.x * 1.5;
-    float lit = 0.0;
-    for (int dx = -1; dx <= 1; dx++) {
-        for (int dy = -1; dy <= 1; dy++) {
-            vec2 off = vec2(dx, dy) * texel;
-            vec3 e = texture(u_shadow_map, uvz.xy + off).rgb;
+    // The 4x4 texels under the kernel, each compared once against the
+    // receiver plane at its own centre...
+    vec2 size = vec2(textureSize(u_shadow_map, 0));
+    vec2 st = uvz.xy * size - 0.5;
+    vec2 cell = floor(st);
+    vec2 f = st - cell;
+    float t[16];
+    for (int j = 0; j < 4; j++) {
+        for (int i = 0; i < 4; i++) {
+            vec2 uv = (cell + vec2(i - 1, j - 1) + 0.5) * texel;
+            vec2 off = uv - uvz.xy;
+            vec3 e = texture(u_shadow_map, uv).rgb;
             float d = dot(e, vec3(1.0, 1.0 / 255.0, 1.0 / 65025.0));
-            lit += (uvz.z + dot(grad, off) - bias <= d) ? 1.0 : 0.0;
+            t[j * 4 + i] = (uvz.z + dot(grad, off) - bias <= d) ? 1.0 : 0.0;
+        }
+    }
+    // ...then the nine taps, each the bilinear blend of its 2x2.
+    float lit = 0.0;
+    for (int j = 0; j < 3; j++) {
+        for (int i = 0; i < 3; i++) {
+            float a = mix(t[j * 4 + i], t[j * 4 + i + 1], f.x);
+            float b = mix(t[(j + 1) * 4 + i], t[(j + 1) * 4 + i + 1], f.x);
+            lit += mix(a, b, f.y);
         }
     }
     return lit / 9.0;

@@ -3011,5 +3011,11 @@
  "Change the camera's angle of view, like a lens: wider takes more in, narrower keeps the lines calm.": "像镜头一样改变相机的视角：越宽看到越多，越窄线条越平稳。",
  "Field of view in degrees (10–120):": "视野角度（10–120）：",
  "Field of view applies to perspective; switch to Perspective first.": "视野仅适用于透视；请先切换到透视。",
- "{name}: every face has its own material, so nothing changed — open it and paint the faces": "{name}：每个面都有自己的材质，所以没有变化——请进入其中并为各个面上色"
+ "{name}: every face has its own material, so nothing changed — open it and paint the faces": "{name}：每个面都有自己的材质，所以没有变化——请进入其中并为各个面上色",
+ "Ambient occlusion (experimental)": "环境光遮蔽（实验性）",
+ "Softly darkens where surfaces meet — corners, the foot of a wall, under a bench. Experimental: if it looks wrong on your graphics card, turn it off and tell us.": "在表面相接处柔和地加深阴影：墙角、墙脚、长椅下方。实验性功能：如果在您的显卡上显示不正确，请关闭它并告诉我们。",
+ "Distance:": "距离：",
+ "How far a surface still darkens its neighbour": "一个表面在多远的距离内仍会使相邻表面变暗",
+ "Intensity:": "强度：",
+ "Your graphics driver cannot draw ambient occlusion ({reason}).": "您的显卡驱动无法绘制环境光遮蔽（{reason}）。"
 }

@@ -3010,5 +3010,11 @@
  "Change the camera's angle of view, like a lens: wider takes more in, narrower keeps the lines calm.": "Cambia el ángulo de visión de la cámara, como un objetivo: más abierto abarca más, más cerrado deja las líneas tranquilas.",
  "Field of view in degrees (10–120):": "Campo de visión en grados (10–120):",
  "Field of view applies to perspective; switch to Perspective first.": "El campo de visión es de la perspectiva; cambie primero a Perspectiva.",
- "{name}: every face has its own material, so nothing changed — open it and paint the faces": "{name}: todas sus caras tienen material propio, así que no cambió nada; entre en él y pinte las caras"
+ "{name}: every face has its own material, so nothing changed — open it and paint the faces": "{name}: todas sus caras tienen material propio, así que no cambió nada; entre en él y pinte las caras",
+ "Ambient occlusion (experimental)": "Oclusión ambiental (experimental)",
+ "Softly darkens where surfaces meet — corners, the foot of a wall, under a bench. Experimental: if it looks wrong on your graphics card, turn it off and tell us.": "Oscurece suavemente donde se juntan las superficies: rincones, el pie de un muro, bajo una banca. Experimental: si en su tarjeta gráfica se ve mal, apáguela y avísenos.",
+ "Distance:": "Distancia:",
+ "How far a surface still darkens its neighbour": "Hasta qué distancia una superficie oscurece a su vecina",
+ "Intensity:": "Intensidad:",
+ "Your graphics driver cannot draw ambient occlusion ({reason}).": "Su controlador gráfico no puede dibujar la oclusión ambiental ({reason})."
 }

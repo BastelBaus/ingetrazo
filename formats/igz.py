@@ -117,17 +117,24 @@ def _texture_entries(node):
     to hang a texture is embedded without touching this module. Coordinate
     blocks (:data:`_TEXTURE_WALK_SKIP`) and leaf value lists are skipped —
     they are the bulk of the document and can never carry a texture."""
+    for parent, key in _texture_slots(node):
+        yield parent[key]
+
+
+def _texture_slots(node):
+    """Yield ``(parent, key)`` for every ``"texture"`` dict that
+    :func:`_texture_entries` walks, so a caller can put a copy in its place."""
     if isinstance(node, dict):
         for key, value in node.items():
             if key == "texture" and isinstance(value, dict):
-                yield value
+                yield node, key
             elif key not in _TEXTURE_WALK_SKIP:
-                yield from _texture_entries(value)
+                yield from _texture_slots(value)
     elif isinstance(node, list):
         if node and not isinstance(node[0], (dict, list)):
             return                       # a leaf value list (colour, offsets)
         for value in node:
-            yield from _texture_entries(value)
+            yield from _texture_slots(value)
 
 
 def _pack_textures(payload) -> tuple[dict, int]:
@@ -166,7 +173,13 @@ def _pack_textures(payload) -> tuple[dict, int]:
             blobs[member] = data
         return member
 
-    for tex in _texture_entries(payload):
+    for parent, key in _texture_slots(payload):
+        # Rewrite a copy, never the dict itself: the payload may still share
+        # it with the live scene (a group's paint went in through a shallow
+        # dict(), #877), and rewriting it there took "path" away for good —
+        # the next save, an autosave included, wrote the texture without its
+        # image.
+        tex = parent[key] = dict(parent[key])
         src = tex.get("path")
         if src:
             member = _member_for(src)
