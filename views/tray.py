@@ -4493,14 +4493,35 @@ class BimPanel(QWidget):
         if not (0 <= idx < len(self._objects)):
             return
         obj = self._objects[idx]
+        vp = self._window.viewport
         scene = self._scene()
+        # A grouped object is selected where it sits: the groups around it
+        # open, as the Browser opens them to pick a nested row.
+        target = obj.get("group") or obj.get("owner")
+        if target is not None:
+            from core import outliner
+            from views.outliner import open_to
+            path = outliner.path_to(scene.groups, target)
+            if "owner" in obj and path is not None:
+                path = path + [target]
+            if path is None or not open_to(vp, path):
+                vp.flash_status(tr(
+                    "A group around it is hidden or locked: show or unlock "
+                    "it to select inside"), 3500)
+                return
         scene.selection.clear()
         if "group" in obj:
             scene.selection.add(obj["group"])
+        elif "owner" in obj:
+            # Opening a copy edits a world copy of its mesh: the faces are
+            # found again by their tag.
+            scene.selection.update(
+                f for f in scene.mesh.faces
+                if (f.attrs.get("ifc") or {}).get("id") == obj["tag_id"])
         else:
             scene.selection.update(obj["faces"])
         scene.bump_view()
-        self._window.viewport.update()
+        vp.update()
 
     def _on_export_csv(self) -> None:
         from PySide6.QtWidgets import QFileDialog
