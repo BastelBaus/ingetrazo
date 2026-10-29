@@ -8,6 +8,7 @@ only read the loose faces and the top-level groups, so both objects
 vanished from them while the Browser still showed the class."""
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QMatrix4x4
 from PySide6.QtGui import QVector3D as V
 
@@ -164,9 +165,21 @@ def test_the_bim_panel_lists_and_picks_grouped_objects():
         wall = _group(scene, h, faces)
         panel = win.bim_tray.bim
         panel.refresh()
-        rows = {panel.tree.topLevelItem(i).text(1): panel.tree.topLevelItem(i)
-                for i in range(panel.tree.topLevelItemCount())}
+        from PySide6.QtWidgets import QTreeWidgetItemIterator
+        items = []
+        it = QTreeWidgetItemIterator(panel.tree)
+        while it.value() is not None:
+            items.append(it.value())
+            it += 1
+        rows = {i.text(1): i for i in items if i.text(1)}
         assert set(rows) == {"C-1", "Muro"}
+        # Each row sits under the group that holds it.
+        assert rows["C-1"].parent().data(0, Qt.UserRole) < 0
+        assert rows["Muro"].parent().data(0, Qt.UserRole) < 0
+        assert panel._containers[-rows["C-1"].parent().data(
+            0, Qt.UserRole) - 1] is outer
+        assert panel._containers[-rows["Muro"].parent().data(
+            0, Qt.UserRole) - 1] is wall
         # The column sits inside «outer»: picking it opens that group.
         panel._on_pick_object(rows["C-1"], 0)
         assert scene.edit_group is outer
