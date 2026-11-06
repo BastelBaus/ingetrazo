@@ -36,7 +36,7 @@ from core.composition import (COMMON_SCALES, NEW_FRAME_STYLE, PAPER_SIZES_MM, RE
                               AddItemCommand, BarraEscala, Cajetin,
                               ComposerHistory, Composicion, CompoundCommand, CotaAngularItem, CotaItem,
                               CotaRadialItem,
-                              EditItemCommand, EtiquetaItem, expand_fields, set_field_context, FlechaNorte, FormaItem, LlamadaItem, NivelItem,
+                              EditItemCommand, EtiquetaItem, expand_fields, local_field_names, set_field_context, FlechaNorte, FormaItem, LlamadaItem, NivelItem,
                               ImagenItem, Leyenda, MarcoVista,
                               PerfilTerreno, RemoveItemCommand, TextoItem,
                               apply_frame_camera, cota_line_deg,
@@ -110,6 +110,18 @@ def text_baseline_rect_mm(size_mm: float, baseline_y: float,
     s = size_mm / 100.0 * 0.75              # the scale _draw_text_mm applies
     asc, desc = fm.ascent() * s, fm.descent() * s
     return QRectF(-width / 2, baseline_y - asc, width, asc + desc)
+
+
+def text_cap_rect_mm(size_mm: float, cap_top_y: float,
+                     width: float = 80.0) -> QRectF:
+    """Like :func:`text_baseline_rect_mm`, but the TOP of the capitals and
+    figures lands on ``cap_top_y`` — the gap of a label hanging BELOW a
+    dimension line is measured to where its letters begin."""
+    from PySide6.QtGui import QFontMetricsF
+    font = QFont("Sans Serif")
+    font.setPixelSize(100)
+    cap = QFontMetricsF(font).capHeight() * size_mm / 100.0 * 0.75
+    return text_baseline_rect_mm(size_mm, cap_top_y + cap, width)
 
 
 def _fit_text_size_mm(text: str, rect: QRectF, base_size_mm: float,
@@ -592,6 +604,35 @@ def _paint_annots_mm(painter: QPainter, frame: MarcoVista, annots) -> None:
 _VECTOR_INK = QColor(30, 36, 44)
 
 
+def dxf_groups_by_layer(drawing, view_layer: str, hidden_lines: bool) -> list:
+    """The DXF groups of a layer-tagged view drawing: one DXF layer per
+    model layer — its name, its line type and its colour (the default
+    layer keeps the CAD's own) — and its profiles beside it on
+    «<layer>-PERFIL», so a plan's outlines stay on their layer and keep
+    their own pen; the cut and the hidden lines, which belong to no layer,
+    on the view's «-CORTE» and «-OCULTAS»."""
+    from core.hlr import KIND_CUT, KIND_HIDDEN, KIND_PROFILE
+    from core.layers import DXF_LINETYPES
+    styles = getattr(drawing, "styles", None) or {}
+    k = drawing.kinds
+    tags = drawing.layers
+    groups = [(f"{view_layer}-CORTE", drawing.segs[k == KIND_CUT])]
+    if hidden_lines:
+        groups.append((f"{view_layer}-OCULTAS", drawing.segs[k == KIND_HIDDEN],
+                       "DASHED"))
+    by_tag: dict = {}
+    for i in range(len(k)):
+        if k[i] in (KIND_CUT, KIND_HIDDEN):
+            continue
+        suffix = "-PERFIL" if k[i] == KIND_PROFILE else ""
+        by_tag.setdefault((tags[i] or view_layer, suffix), []).append(i)
+    for (tag, suffix), ids in by_tag.items():
+        rgb, linetype, _w = styles.get(tag, (None, "continuous", None))
+        groups.append((tag + suffix, drawing.segs[ids],
+                       DXF_LINETYPES.get(linetype, "CONTINUOUS"), rgb))
+    return groups
+
+
 def vector_pens(frame: MarcoVista) -> dict:
     """The three pens of the vector style, by line class (core.hlr KIND_*):
     cut / profile / edge widths from the frame, in paper mm."""
@@ -616,15 +657,43 @@ def vector_pens(frame: MarcoVista) -> dict:
     return pens
 
 
+def _layer_pen(base: QPen, style, kind) -> QPen:
+    """``base`` (the class pen) with a layer's own line on it: its colour,
+    its weight and its dash pattern in paper millimetres. A hidden line
+    stays dashed and a cut keeps the cut's pen."""
+    from core.hlr import KIND_CUT, KIND_HIDDEN
+    from core.layers import LINETYPES
+    if style is None or kind == KIND_CUT:
+        return base
+    rgb, linetype, weight = style
+    pen = QPen(base)
+    if rgb is not None:
+        # A shade darker than the swatch: the mid tones read on paper.
+        pen.setColor(QColor.fromRgbF(*[c * 0.8 for c in rgb[:3]]))
+    if weight is not None:
+        pen.setWidthF(max(0.05, float(weight)))
+    w = max(0.05, pen.widthF())
+    pattern = LINETYPES.get(linetype, ())
+    if kind == KIND_HIDDEN:
+        pen.setDashPattern([1.5 / w, 0.8 / w])
+    elif pattern:
+        pen.setCapStyle(Qt.FlatCap)
+        pen.setDashPattern([max(0.05, d) / w for d in pattern])
+    return pen
+
+
 def _paint_hlr_lines_mm(painter: QPainter, frame: MarcoVista, hlr,
-                        kinds, budget=None) -> None:
+                        kinds, budget=None, styles=None) -> None:
     """Ink the hidden-line segments thin → profile → cut, so the heavy
     lines always sit on top where they cross the light ones.
 
     With a ``budget`` it inks at most that many, keeping the SILHOUETTE:
     every cut line and every profile first, plain edges with what is left.
     That is the drag pass — see ``_DRAG_SEG_BUDGET``; a printed or exported
-    sheet never passes one."""
+    sheet never passes one.
+
+    ``styles`` — ``(tags, {layer: (rgb, linetype, weight)})`` from the
+    layer-tagged drawing — inks each layer's lines with its own pen."""
     import numpy as np
     from PySide6.QtCore import QLineF
     from core.hlr import KIND_CUT, KIND_EDGE, KIND_HIDDEN, KIND_PROFILE
@@ -646,10 +715,24 @@ def _paint_hlr_lines_mm(painter: QPainter, frame: MarcoVista, hlr,
         groups = [(kind, rows[kind])
                   for kind in (KIND_HIDDEN, KIND_EDGE, KIND_PROFILE,
                                KIND_CUT)]
-    for kind, rows in groups:
+        tags = styles[0] if styles is not None else None
+        if tags is not None and len(tags) == len(segs):
+            # The same rows, split by layer: each layer with its own pen.
+            groups = []
+            for kind in (KIND_HIDDEN, KIND_EDGE, KIND_PROFILE, KIND_CUT):
+                idx = np.nonzero(k == kind)[0][:len(rows[kind])]
+                by_tag: dict = {}
+                for i in idx:
+                    by_tag.setdefault(tags[i], []).append(i)
+                for tag, ids in by_tag.items():
+                    groups.append((kind, segs[ids],
+                                   _layer_pen(pens[kind],
+                                              styles[1].get(tag), kind)))
+    for group in groups:
+        kind, rows = group[0], group[1]
         if not len(rows):
             continue
-        painter.setPen(pens[kind])
+        painter.setPen(group[2] if len(group) > 2 else pens[kind])
         painter.drawLines([QLineF(float(x0), float(y0), float(x1), float(y1))
                            for x0, y0, x1, y1 in rows])
 
@@ -754,7 +837,8 @@ def _paint_section_mark_mm(painter: QPainter, a, ink: QColor,
 def paint_frame_mm(painter: QPainter, frame: MarcoVista,
                    image: Optional[QImage], hlr=None, annots=None,
                    screen: bool = False, kinds=None, fills=None,
-                   budget=None, missing: Optional[str] = None) -> None:
+                   budget=None, missing: Optional[str] = None,
+                   styles=None) -> None:
     r = QRectF(0, 0, frame.w_mm, frame.h_mm)
     if missing is not None:
         # The frame names a scene the model no longer has. It used to
@@ -780,7 +864,7 @@ def paint_frame_mm(painter: QPainter, frame: MarcoVista,
             painter.save()
             painter.setClipRect(r)
             _paint_cut_fills_mm(painter, frame, fills)
-            _paint_hlr_lines_mm(painter, frame, hlr, kinds, budget)
+            _paint_hlr_lines_mm(painter, frame, hlr, kinds, budget, styles)
             painter.restore()
         else:
             _draw_text_mm(painter, r.adjusted(2, 2, -2, -2),
@@ -1074,10 +1158,25 @@ def paint_leyenda_mm(painter: QPainter, le: Leyenda) -> None:
                   3.2, bold=True)
     y = 7.5
     rows = le.rows or [tr("(no layers)")]
+    from core.layers import LINETYPES
+    swatches = getattr(le, "swatches", None) or {}
     for name in rows:
-        painter.setBrush(QBrush(QColor(226, 232, 238)))
+        sw = swatches.get(name) or {}
+        rgb = sw.get("color")
+        fill = (QColor.fromRgbF(*[float(c) for c in rgb[:3]])
+                if isinstance(rgb, (list, tuple)) and len(rgb) >= 3
+                else QColor(226, 232, 238))
+        painter.setBrush(QBrush(fill))
         painter.setPen(QPen(QColor(30, 36, 44), 0.2))
         painter.drawRect(QRectF(2.2, y + 0.8, 4.0, 3.2))
+        pattern = LINETYPES.get(sw.get("linetype"), ())
+        if pattern:
+            # The layer's line type, drawn across the swatch.
+            line = QPen(QColor(30, 36, 44), 0.25)
+            line.setCapStyle(Qt.FlatCap)
+            line.setDashPattern([max(0.05, d) / 0.25 * 0.4 for d in pattern])
+            painter.setPen(line)
+            painter.drawLine(QPointF(2.2, y + 2.4), QPointF(6.2, y + 2.4))
         _draw_text_mm(painter, QRectF(8, y + 0.7, le.w_mm - 10, 5),
                       name, 2.8)
         y += 5.5
@@ -1257,7 +1356,80 @@ def cota_aside_frame(ct: CotaItem) -> tuple:
         ux, uy = -ux, -uy
     half = (tw / 2 * abs(ux) + th / 2 * abs(uy)) if horizontal else th / 2
     dist = ct.offset_mm + half
-    return ux * dist, uy * dist, (0.0 if horizontal else deg), tw, th
+    if horizontal:
+        deg = 0.0
+    elif getattr(ct, "text_flip", False):
+        deg += 180.0                      # same spot, read the other way
+    return ux * dist, uy * dist, deg, tw, th
+
+
+def cota_text_layout(ct: CotaItem) -> tuple:
+    """``(pos, deg)`` a cota's label is laid out with, in the frame the
+    text is drawn in: the rotation, and which side of the line (``above``
+    = the frame's -y) the words go to.
+
+    A flipped label turns half a turn to read the other way along its line
+    (a vertical cota read from the right) but keeps its SIDE: in the
+    turned frame the side the drafter chose is the other one, so «above»
+    and «below» swap. A horizontal label has no other way to read and is
+    never flipped."""
+    pos = getattr(ct, "text_pos", "above") or "above"
+    if (getattr(ct, "text_align", "aligned") or "aligned") == "horizontal":
+        return pos, 0.0
+    deg = cota_line_deg(ct)                       # ISO: head to the LEFT
+    if getattr(ct, "text_flip", False):
+        deg += 180.0
+        pos = {"above": "below", "below": "above"}.get(pos, pos)
+    return pos, deg
+
+
+def snap_sep_to_cotas(origin, frame, pos, cotas, thr_mm: float,
+                      exclude=None) -> tuple:
+    """``(sep, dot)``: the sep the page point *pos* gives a dimension line
+    measured from *origin* along ``frame = (ux, uy, nx, ny)`` (its
+    direction and the normal its sep runs along) — pulled onto the line of
+    a PARALLEL cota of *cotas* when it passes within *thr_mm*, so
+    dimensions line up in a row without counting millimetres. ``dot`` is
+    the end of the line it took (``None`` when free). Drawing a cota and
+    dragging the line of one use it alike; *exclude* is the dragged one."""
+    import math as _math
+    ox, oy = origin
+    ux, uy, nx, ny = frame
+    sep = (pos[0] - ox) * nx + (pos[1] - oy) * ny
+    best = None
+    for ct in cotas:
+        if ct is exclude or getattr(ct, "hidden", False):
+            continue
+        (p0x, p0y), (p1x, p1y) = ct.line_points()
+        p0x, p0y = p0x + ct.x_mm, p0y + ct.y_mm
+        p1x, p1y = p1x + ct.x_mm, p1y + ct.y_mm
+        ln = _math.hypot(p1x - p0x, p1y - p0y)
+        if ln < 1e-9:
+            continue
+        if abs((p1x - p0x) / ln * uy - (p1y - p0y) / ln * ux) > 0.01:
+            continue                                      # not parallel
+        cand = (p0x - ox) * nx + (p0y - oy) * ny
+        d = abs(cand - sep)
+        if best is None or d < best[0]:
+            # the end of that line nearer the cursor carries the dot
+            near = min(((p0x, p0y), (p1x, p1y)),
+                       key=lambda p: _math.hypot(p[0] - pos[0],
+                                                 p[1] - pos[1]))
+            best = (d, cand, near)
+    if best is not None and best[0] <= thr_mm:
+        return best[1], best[2]
+    return sep, None
+
+
+def oblique_tick_angle(line_angle: float) -> float:
+    """Direction (radians, y DOWN) of the oblique tick that ends a
+    dimension line running at ``line_angle``: 45° to the line, turned
+    counter-clockwise ON THE SHEET, so a horizontal cota ends in «/» as the
+    technical-drawing standards draw it. Adding 45° in y-down space gave
+    «\\», 135° to the line (#741). The line's sense does not matter: a
+    reversed line gives the same tick."""
+    import math as _math
+    return line_angle - _math.pi / 4
 
 
 def paint_cota_mm(painter: QPainter, ct: CotaItem) -> None:
@@ -1344,12 +1516,13 @@ def paint_cota_mm(painter: QPainter, ct: CotaItem) -> None:
         painter.restore()
     elif ct.ends != "none":
         tick = 1.6
+        t = oblique_tick_angle(ang)
         for pt in (a2, b2):
             painter.drawLine(
-                QPointF(pt.x() - tick * _math.cos(ang + _math.radians(45)),
-                        pt.y() - tick * _math.sin(ang + _math.radians(45))),
-                QPointF(pt.x() + tick * _math.cos(ang + _math.radians(45)),
-                        pt.y() + tick * _math.sin(ang + _math.radians(45))))
+                QPointF(pt.x() - tick * _math.cos(t),
+                        pt.y() - tick * _math.sin(t)),
+                QPointF(pt.x() + tick * _math.cos(t),
+                        pt.y() + tick * _math.sin(t)))
     painter.save()
     tcol = QColor(ct.text_color) if getattr(ct, "text_color", "") else color
     lx, ly = cota_label_anchor(ct)          # outside an end / dragged
@@ -1361,12 +1534,10 @@ def paint_cota_mm(painter: QPainter, ct: CotaItem) -> None:
         align = Qt.AlignHCenter | Qt.AlignVCenter
     else:
         painter.translate(lx, ly)
-        deg = cota_line_deg(ct)                     # ISO: head to the LEFT
-        if (getattr(ct, "text_align", "aligned") or "aligned") == "horizontal":
-            deg = 0.0
+        text_pos, deg = cota_text_layout(ct)
         painter.rotate(deg)
         if text_pos == "below":
-            rect = QRectF(-40, ct.offset_mm, 80, ct.text_mm * 1.3)
+            rect = text_cap_rect_mm(ct.text_mm, ct.offset_mm)
             align = Qt.AlignHCenter | Qt.AlignTop
         elif text_pos == "centered":
             rect = QRectF(-40, -ct.text_mm * 0.65, 80, ct.text_mm * 1.3)
@@ -1750,7 +1921,8 @@ def paint_cota_angular_mm(painter: QPainter, ca: CotaAngularItem) -> None:
         tick = 1.6
         for ang, _d in ends:
             cx, cy = R * _math.cos(ang), R * _math.sin(ang)
-            t = ang + _math.radians(45)
+            # the arc's tangent is ang + 90°: same «/» as a straight cota
+            t = oblique_tick_angle(ang + _math.pi / 2)
             painter.drawLine(QPointF(cx - tick * _math.cos(t),
                                      cy - tick * _math.sin(t)),
                              QPointF(cx + tick * _math.cos(t),
@@ -1827,7 +1999,7 @@ def paint_cota_radial_mm(painter: QPainter, cr) -> None:
         painter.restore()
     elif cr.ends != "none":
         t = 1.6
-        ang = _math.atan2(uy, ux) + _math.radians(45)
+        ang = oblique_tick_angle(_math.atan2(uy, ux))
         for (px, py), _h in tips:
             painter.drawLine(
                 QPointF(px - t * _math.cos(ang), py - t * _math.sin(ang)),
@@ -2653,6 +2825,18 @@ class _SheetItem(QGraphicsItem):
             self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setSelected(True)
 
+    def _select_on_press(self, event) -> None:
+        """A press that grabs a handle or a cota's text, which the item
+        takes for itself instead of Qt: select it as a plain click would.
+        Adding it to the selection left the item selected before (often
+        the frame under a cota) in charge of the panel, so the cota's
+        properties did not show; Ctrl / Shift still add it."""
+        if (not self.isSelected() and self.scene() is not None
+                and not (event.modifiers()
+                         & (Qt.ControlModifier | Qt.ShiftModifier))):
+            self.scene().clearSelection()
+        self.setSelected(True)
+
     # -- hover: advertise the resize handle with the right cursor -------------
     def hoverMoveEvent(self, event) -> None:
         if (not getattr(self.model, "locked", False)
@@ -2843,7 +3027,7 @@ class _SheetItem(QGraphicsItem):
                           and self._on_resize_handle(event.pos()))
         if self._resizing:
             event.accept()
-            self.setSelected(True)
+            self._select_on_press(event)
             return
         self._set_drag_cache(True)
         super().mousePressEvent(event)
@@ -2870,6 +3054,12 @@ class _SheetItem(QGraphicsItem):
         self._resizing = False
         self._set_drag_cache(False)
         super().mouseReleaseEvent(event)
+        # A click that did not move keeps only the clicked item selected
+        # (Qt clears the rest on release), which dropped the partners the
+        # press had just pulled in: a grouped item clicked alone looked
+        # ungrouped and was moved alone (#1042). Bring the group back.
+        if self.isSelected() and getattr(self.model, "group_id", ""):
+            self.composer.sync_group_selection(self)
         if self._press_state is None:
             return
         current = {k: getattr(self.model, k) for k in self._press_state}
@@ -2966,7 +3156,8 @@ class FrameItem(_SheetItem):
                        screen=True, kinds=self.composer.hlr_kinds.get(fid),
                        fills=self.composer.hlr_fills.get(fid),
                        budget=_DRAG_SEG_BUDGET if self._dragging else None,
-                       missing=self.composer.missing_scene(self.model))
+                       missing=self.composer.missing_scene(self.model),
+                       styles=self.composer.hlr_styles.get(fid))
         if self.composer.is_stale(self.model):
             _paint_stale_badge(painter, self.model)
         if self.composer.view_edit_item is self:
@@ -3192,7 +3383,7 @@ class EtiquetaCanvasItem(_SheetItem):
                           and self._on_resize_handle(event.pos()))
         if self._anchor_drag or self._resizing:
             event.accept()
-            self.setSelected(True)
+            self._select_on_press(event)
             return
         QGraphicsItem.mousePressEvent(self, event)
 
@@ -3336,7 +3527,7 @@ class LlamadaCanvasItem(_SheetItem):
             self._press_state = {k: getattr(self.model, k)
                                  for k in ("bx_mm", "by_mm")}
             event.accept()
-            self.setSelected(True)
+            self._select_on_press(event)
             return
         super().mousePressEvent(event)
 
@@ -3514,7 +3705,7 @@ class CotaAngularCanvasItem(_SheetItem):
                              and self._on_radius_handle(event.pos()))
         if self._radius_drag:
             event.accept()
-            self.setSelected(True)
+            self._select_on_press(event)
             return
         QGraphicsItem.mousePressEvent(self, event)
 
@@ -3615,7 +3806,7 @@ class CotaRadialCanvasItem(_SheetItem):
                           and self._on_arc_handle(event.pos()))
         if self._arc_drag:
             event.accept()
-            self.setSelected(True)
+            self._select_on_press(event)
             return
         QGraphicsItem.mousePressEvent(self, event)
 
@@ -3684,14 +3875,30 @@ class CotaCanvasItem(_SheetItem):
         """Hit area = the drawn lines (extension, dimension, label strip)
         with a few mm of slack — not the bounding box, which for a long
         oblique cota covers half the sheet and steals every click meant for
-        the small cotas inside it (Marco, 2026-09-02)."""
+        the small cotas inside it (Marco, 2026-09-02).
+
+        The slack is a few SCREEN pixels (at most the old 3 mm) and stops
+        square at the line's ends: 3 mm of paper on every side, capped
+        past each end, buried a short cota of a chain under its
+        neighbours' slack at any zoom, so it could not be picked."""
         from PySide6.QtGui import QPainterPath, QPainterPathStroker
         m = self.model
         p0, p1 = QPointF(0.0, 0.0), QPointF(m.dx_mm, m.dy_mm)
         (a2x, a2y), (b2x, b2y) = m.line_points()
         a2, b2 = QPointF(a2x, a2y), QPointF(b2x, b2y)
+        import math as _math
+        slack = self._hit_slack_mm()
         lines = QPainterPath()
-        segs = [(p0, a2), (p1, b2), (a2, b2)]
+        segs = [(a2, b2)]
+        # The extension lines stop short of the dimension line: the next
+        # cota of a chain SHARES them, so near the line they would hand the
+        # click to whichever of the two is on top.
+        for p, foot in ((p0, a2), (p1, b2)):
+            ln = _math.hypot(foot.x() - p.x(), foot.y() - p.y())
+            if ln > 2 * slack:
+                k = (ln - 2 * slack) / ln
+                segs.append((p, QPointF(p.x() + (foot.x() - p.x()) * k,
+                                        p.y() + (foot.y() - p.y()) * k)))
         tail = m.text_tail()
         if tail is not None:
             segs.append((QPointF(*tail[0]), QPointF(*tail[1])))
@@ -3699,20 +3906,31 @@ class CotaCanvasItem(_SheetItem):
             lines.moveTo(a)
             lines.lineTo(b)
         stroker = QPainterPathStroker()
-        stroker.setWidth(2.0 * _HANDLE_MM)
+        stroker.setWidth(2.0 * slack)
+        stroker.setCapStyle(Qt.FlatCap)
         path = stroker.createStroke(lines)
         path.addPath(self._label_path())
         return path
+
+    #: How far from its lines a press still picks a cota, on screen.
+    _HIT_SLACK_PX = 6.0
+
+    def _hit_slack_mm(self) -> float:
+        views = self.scene().views() if self.scene() is not None else []
+        if not views:
+            return _HANDLE_MM
+        px = self._HIT_SLACK_PX / max(views[0].transform().m11(), 1e-6)
+        return min(_HANDLE_MM, px)
 
     def _label_path(self):
         """The label's strip in item space — what a press must hit to drag
         the TEXT alone («click and drag it by its selection box»),
         as opposed to the lines, which drag the whole cota."""
         from PySide6.QtGui import QPainterPath, QTransform
-        import math as _math
         m = self.model
-        length = _math.hypot(m.dx_mm, m.dy_mm)
-        w = min(80.0, length + 2 * m.text_mm)
+        # the words themselves: a strip the whole line long, and a text
+        # height past each end, covered the next cota of a chain
+        w = len(m.label()) * m.text_mm * 0.62 + 2.0
         strip = QPainterPath()
         pos = getattr(m, "text_pos", "above") or "above"
         lx, ly = cota_label_anchor(m)
@@ -3722,9 +3940,7 @@ class CotaCanvasItem(_SheetItem):
                                  tw + 2.0, th + 2.0))
             t = QTransform().translate(lx + ox, ly + oy).rotate(deg)
             return t.map(strip)
-        if (getattr(m, "text_along", "middle") or "middle") != "middle":
-            # outside an end the strip is the label itself, not the line
-            w = len(m.label()) * m.text_mm * 0.62 + 2.0
+        pos, deg = cota_text_layout(m)
         if pos == "below":
             strip.addRect(QRectF(-w / 2, -1.0, w,
                                  m.offset_mm + m.text_mm * 1.3 + 2.0))
@@ -3734,9 +3950,6 @@ class CotaCanvasItem(_SheetItem):
         else:
             strip.addRect(QRectF(-w / 2, -m.offset_mm - m.text_mm * 1.3 - 1.0,
                                  w, m.offset_mm + m.text_mm * 1.3 + 2.0))
-        deg = cota_line_deg(m)
-        if (getattr(m, "text_align", "aligned") or "aligned") == "horizontal":
-            deg = 0.0
         t = QTransform().translate(lx, ly).rotate(deg)
         return t.map(strip)
 
@@ -3772,7 +3985,26 @@ class CotaCanvasItem(_SheetItem):
         return (abs(pos.x() - mx) <= _HANDLE_MM
                 and abs(pos.y() - my) <= _HANDLE_MM)
 
+    #: Whether the press has travelled the platform's drag distance yet.
+    _drag_armed = True
+
+    def _past_drag_distance(self, event) -> bool:
+        """A press only becomes a drag once the pointer has travelled the
+        system's drag distance. Before, the first pixel of a hand's
+        jitter moved the cota — the sheet's magnet could then pull it
+        2 mm — and the release took that for a move by hand and broke the
+        anchor; on the text it left a hand offset, so the label no longer
+        sat in its automatic spot."""
+        if not self._drag_armed:
+            travel = (event.screenPos()
+                      - event.buttonDownScreenPos(Qt.LeftButton))
+            self._drag_armed = travel.manhattanLength() >= _drag_px()
+        return self._drag_armed
+
     def mouseMoveEvent(self, event) -> None:
+        if not self._past_drag_distance(event):
+            event.accept()
+            return
         if self._text_dragging:
             # The text box goes where the mouse takes it; the
             # dimension line stays.
@@ -3783,29 +4015,109 @@ class CotaCanvasItem(_SheetItem):
             self.update()
             return
         if self._sep_dragging:
-            m = self.model
             self.prepareGeometryChange()
-            if m.axis == "h":            # the line only moves up and down
-                m.sep_mm = event.pos().y()
-            elif m.axis == "v":
-                m.sep_mm = event.pos().x()
-            else:
-                nx, ny = m.normal()
-                m.sep_mm = event.pos().x() * nx + event.pos().y() * ny
+            self.model.sep_mm = self._dragged_sep(event.pos())
             self.update()
             return
         if self._resizing:
             self.prepareGeometryChange()
-            self.model.dx_mm = event.pos().x()
-            self.model.dy_mm = event.pos().y()
+            self.model.dx_mm, self.model.dy_mm = self._snap_end(event.pos())
             self.update()
             return
         super(_SheetItem, self).mouseMoveEvent(event)
+
+    def _dragged_sep(self, pos) -> float:
+        """The sep the line handle dragged to *pos* (item space) gives —
+        onto a parallel cota's line when it passes near one, as when the
+        cota was drawn; the snap dot shows which."""
+        m = self.model
+        if m.axis == "h":                # the line only moves up and down
+            frame = (1.0, 0.0, 0.0, 1.0)
+        elif m.axis == "v":
+            frame = (0.0, 1.0, 1.0, 0.0)
+        else:
+            nx, ny = m.normal()
+            frame = (ny, -nx, nx, ny)
+        o = self.pos()
+        views = self.scene().views() if self.scene() is not None else []
+        comp = getattr(self.composer, "comp", None)
+        if not views or comp is None:
+            return (pos.x() * frame[2] + pos.y() * frame[3])
+        view = views[0]
+        thr = 7.0 / max(view.transform().m11(), 1e-6)
+        sep, dot = snap_sep_to_cotas(
+            (o.x(), o.y()), frame, (o.x() + pos.x(), o.y() + pos.y()),
+            getattr(comp, "cotas", None) or (), thr, exclude=m)
+        if hasattr(view, "_show_snap_marker"):
+            if dot is not None:
+                view._show_snap_marker(*dot)
+            else:
+                view._clear_snap_marker()
+        return sep
+
+    def _snap_end(self, pos) -> tuple:
+        """The dragged measured point, snapped to the views' geometry the
+        way the cota tool snaps (~7 px on screen) — what lets a point
+        dragged off the model go back ON it and anchor again (#1053).
+        Remembers the hit for the release; item coordinates in and out."""
+        self._end_hit = None
+        snap = getattr(self.composer, "nearest_snap_point", None)
+        views = self.scene().views() if self.scene() is not None else []
+        if not callable(snap) or not views:
+            return pos.x(), pos.y()
+        thr = 7.0 / max(views[0].transform().m11(), 1e-6)
+        o = self.pos()
+        hit = snap(o.x() + pos.x(), o.y() + pos.y(), thr)
+        if hit is None or hit[3] is None:
+            return pos.x(), pos.y()
+        self._end_hit = hit
+        return hit[0] - o.x(), hit[1] - o.y()
+
+    def _reanchor(self) -> None:
+        """A measured point dragged back onto the model anchors the cota
+        again (#1053): the dragged end snapped to a view's geometry and the
+        other end sits on that same view's geometry too — the rule a new
+        cota is anchored by. Drawn as the green handles again."""
+        hit_b = getattr(self, "_end_hit", None)
+        self._end_hit = None
+        snap = getattr(self.composer, "nearest_snap_point", None)
+        if hit_b is None or not callable(snap):
+            return
+        m = self.model
+        frame = hit_b[3]
+        views = self.scene().views() if self.scene() is not None else []
+        thr = (7.0 / max(views[0].transform().m11(), 1e-6) if views
+               else 1e-3)
+        hit_a = snap(m.x_mm, m.y_mm, thr)        # the end left in place
+        if hit_a is None or hit_a[3] is not frame:
+            return
+        if (hit_a[0], hit_a[1]) != (m.x_mm, m.y_mm):
+            # onto its point, the dragged end staying where it snapped
+            bx, by = m.x_mm + m.dx_mm, m.y_mm + m.dy_mm
+            self.prepareGeometryChange()
+            m.x_mm, m.y_mm = hit_a[0], hit_a[1]
+            m.dx_mm, m.dy_mm = bx - m.x_mm, by - m.y_mm
+            self._nudging = True             # exact: no magnetic snap
+            try:
+                self.setPos(m.x_mm, m.y_mm)
+            finally:
+                self._nudging = False
+        if not frame.uid:
+            import uuid
+            frame.uid = uuid.uuid4().hex
+        m.anchor_uid = frame.uid
+        m.a_world = list(hit_a[2])
+        m.b_world = list(hit_b[2])
+        follow = getattr(self.composer, "_follow_anchor", None)
+        if callable(follow):
+            follow(m, "a_world")
+            follow(m, "b_world")
 
     def mousePressEvent(self, event) -> None:
         note = getattr(self.composer, "note_drag_start", None)
         if note is not None:
             note()
+        self._drag_armed = False
         self._press_state = {k: getattr(self.model, k, 0.0)
                              for k in ("x_mm", "y_mm", "dx_mm", "dy_mm",
                                        "sep_mm", "anchor_uid", "a_world",
@@ -3826,11 +4138,15 @@ class CotaCanvasItem(_SheetItem):
                 float(getattr(self.model, "text_dy_mm", 0.0) or 0.0))
         if self._sep_dragging or self._resizing or self._text_dragging:
             event.accept()
-            self.setSelected(True)
+            self._select_on_press(event)
             return
         super(_SheetItem, self).mousePressEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if self._sep_dragging and self.scene() is not None:
+            for view in self.scene().views():
+                if hasattr(view, "_clear_snap_marker"):
+                    view._clear_snap_marker()      # the line's snap dot
         self._sep_dragging = False
         self._text_dragging = False
         # Moving the cota or one of its measured points BY HAND means the
@@ -3844,6 +4160,8 @@ class CotaCanvasItem(_SheetItem):
                 self.model.anchor_uid = ""
                 self.model.a_world = None
                 self.model.b_world = None
+        if self._press_state is not None and self._resizing:
+            self._reanchor()
         super().mouseReleaseEvent(event)
 
     def _paint_selection(self, painter: QPainter) -> None:
@@ -4604,18 +4922,51 @@ class ComposerCanvasView(QGraphicsView):
         """Where the cursor puts the dimension line: the ⟂ distance from
         the measured segment, or — when the cota is forced straight — the
         page row or column the line sits on."""
-        import math as _math
         a, b = self._drag_start, self._second_pt
-        if self._cota_axis == "h":
-            return pos.y() - a.y()
-        if self._cota_axis == "v":
-            return pos.x() - a.x()
+        return self._sep_on_other_lines(a, b, self._cota_axis, pos)
+
+    def _sep_frame(self, a, b, axis: str):
+        """``(ux, uy, nx, ny)``: the direction of the dimension line a cota
+        a→b gets and the normal its sep is measured along — the same
+        convention as :meth:`CotaItem.line_points`."""
+        import math as _math
+        if axis == "h":
+            return 1.0, 0.0, 0.0, 1.0
+        if axis == "v":
+            return 0.0, 1.0, 1.0, 0.0
         dx, dy = b.x() - a.x(), b.y() - a.y()
         length = _math.hypot(dx, dy)
         if length < 1e-9:
+            return None
+        ux, uy = dx / length, dy / length
+        return ux, uy, -uy, ux
+
+    def _sep_on_other_lines(self, a, b, axis: str, pos,
+                            on_geometry: bool = False) -> float:
+        """The sep the cursor at *pos* gives the dimension line of a cota
+        a→b — pulled onto the line of a PARALLEL cota already on the sheet
+        when it passes within the snap radius, so dimensions line up in a
+        row without counting millimetres. The dot marks the end of the
+        line it took.
+
+        *on_geometry*: *pos* is already snapped to a point of the model
+        (the chain's offset click). That snap wins and keeps its dot —
+        taking it away made snapping to the drawing look dead."""
+        frame = self._sep_frame(a, b, axis)
+        if frame is None:
             return 0.0
-        nx, ny = -dy / length, dx / length
-        return (pos.x() - a.x()) * nx + (pos.y() - a.y()) * ny
+        if on_geometry:
+            ux, uy, nx, ny = frame
+            return (pos.x() - a.x()) * nx + (pos.y() - a.y()) * ny
+        comp = getattr(self.composer, "comp", None)
+        sep, dot = snap_sep_to_cotas(
+            (a.x(), a.y()), frame, (pos.x(), pos.y()),
+            getattr(comp, "cotas", None) or (), self._snap_thr_mm())
+        if dot is not None:
+            self._show_snap_marker(*dot)
+        else:
+            self._clear_snap_marker()
+        return sep
 
     def _enter_sep_phase(self, second) -> None:
         self._second_pt = second
@@ -4879,18 +5230,10 @@ class ComposerCanvasView(QGraphicsView):
 
     def _sep_between(self, a, b, pos) -> float:
         """Signed ⟂ distance from segment a→b to *pos* (page mm), or the
-        row / column the line sits on when the chain is forced straight."""
-        import math as _math
-        if self._chain_axis == "h":
-            return pos.y() - a.y()
-        if self._chain_axis == "v":
-            return pos.x() - a.x()
-        dx, dy = b.x() - a.x(), b.y() - a.y()
-        length = _math.hypot(dx, dy)
-        if length < 1e-9:
-            return 0.0
-        nx, ny = -dy / length, dx / length
-        return (pos.x() - a.x()) * nx + (pos.y() - a.y()) * ny
+        row / column the line sits on when the chain is forced straight —
+        onto a parallel cota's line when the cursor passes near it."""
+        return self._sep_on_other_lines(a, b, self._chain_axis, pos,
+                                        on_geometry=self._last_hit is not None)
 
     def _chain_sep_for(self, a, b) -> float:
         """The sep that puts cota a→b's line ON the chain's dimension line
@@ -5472,6 +5815,16 @@ class _PanelTabs(QTabWidget):
         p.end()
 
 
+def bring_to_front(window) -> None:
+    """Show ``window``, out of the taskbar if minimised, and raise it —
+    ``show()`` alone leaves a minimised window where it is."""
+    if window.isMinimized():
+        window.setWindowState(window.windowState() & ~Qt.WindowMinimized)
+    window.show()
+    window.raise_()
+    window.activateWindow()
+
+
 class ComposerWindow(QMainWindow):
     """Page canvas on the left, composition manager + properties on the
     right. Compositions live in ``scene.compositions`` and persist in the
@@ -5493,7 +5846,13 @@ class ComposerWindow(QMainWindow):
         super().changeEvent(event)
 
     def __init__(self, main_window) -> None:
-        super().__init__(main_window)
+        # A window of its own, not one OWNED by the model window: an owned
+        # window has no taskbar button, always stays above the model and,
+        # under Windows, minimises to a stub over the model's bottom-left
+        # corner that cannot be moved. On its own it minimises to the
+        # taskbar, goes behind the model, Alt+Tabs and moves to another
+        # monitor as any program does. The model window closes it on quit.
+        super().__init__(None)
         self.setWindowFlag(Qt.Window, True)
         self._window = main_window
         from views.floating_toolbar import watch_toolbars
@@ -5533,6 +5892,7 @@ class ComposerWindow(QMainWindow):
         self.hlr_cache: dict[int, object] = {}
         self.hlr_kinds: dict[int, object] = {}     # line class per segment
         self.hlr_fills: dict[int, object] = {}     # section-cut rings, mm
+        self.hlr_styles: dict[int, object] = {}    # layer pens per segment
         self.snap_cache: dict[int, object] = {}   # frame → (page stamp, snap pts)
         self.circle_cache: dict[int, list] = {}   # frame → page-mm circles
         self.annot_cache: dict[int, list] = {}    # frame → model annotations
@@ -5547,8 +5907,12 @@ class ComposerWindow(QMainWindow):
             scene.compositions.append(comp)
         self.comp: Composicion = scene.compositions[0]
 
-        self.setWindowTitle(tr("Sheet composer"))
+        self.set_document_title(None)
         self.resize(1280, 840)
+        # Size, place, monitor and maximised as the user left them.
+        geometry = QSettings().value("composer/geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
         self.tool_mode = "select"
         self.canvas = QGraphicsScene(self)
         view = ComposerCanvasView(self.canvas, self)
@@ -5990,9 +6354,9 @@ class ComposerWindow(QMainWindow):
         elif mode == "norte":
             item = FlechaNorte(x_mm=x0, y_mm=y0)
         elif mode == "leyenda":
-            item = Leyenda(x_mm=x0, y_mm=y0,
-                           rows=[ly.name for ly in
-                                 self._scene().layers if ly.visible])
+            from core.layers import legend_rows
+            rows, swatches = legend_rows(self._scene())
+            item = Leyenda(x_mm=x0, y_mm=y0, rows=rows, swatches=swatches)
         elif mode == "perfil":
             paths = getattr(self._scene(), "geo_paths", None) or []
             item = PerfilTerreno(x_mm=x, y_mm=y, w_mm=max(w, 80.0),
@@ -6037,6 +6401,7 @@ class ComposerWindow(QMainWindow):
         # carry ``units`` and ``decimals``, so a feet document still bore
         # metre cotas (issue #403). The look (text, ends, colour) stays.
         style.update(self._document_length_style())
+        style["show_unit"] = self._document_shows_unit()
         # The gap line → baseline. Rafael's sheet shows about a quarter of
         # the text height (AutoCAD's DIMGAP); 0.5 mm reads like it at the
         # 2.5 mm text a new cota takes.
@@ -6143,6 +6508,7 @@ class ComposerWindow(QMainWindow):
                          "color", "text_color", "ends", "text_bg",
                          "text_bg_opacity", "offset_mm")}
         keep.update(self._document_length_style())
+        keep["show_unit"] = self._document_shows_unit()
         item = CotaRadialItem(
             x_mm=centre[0], y_mm=centre[1], radius_mm=r, scale_n=n,
             kind=("diameter" if kind == "diameter" else "radius"),
@@ -6287,10 +6653,10 @@ class ComposerWindow(QMainWindow):
         tpl_btn.clicked.connect(self._on_templates_menu)
         mgr.addWidget(tpl_btn)
         dis_lay.addLayout(mgr)
-        fields_note = QLabel(tr(
+        fields_note = QLabel(local_field_names(tr(
             "Dynamic fields for texts and the title block: {proyecto} "
             "{autor} {lamina} {escala} {escena} {fecha} {archivo} {hoja} "
-            "{total}"))
+            "{total}")))
         fields_note.setWordWrap(True)
         theme_style(fields_note, "color:{muted}; font-size: 11px;")
         dis_lay.addWidget(fields_note)
@@ -6477,6 +6843,10 @@ class ComposerWindow(QMainWindow):
         grid.addWidget(self.ruler_h, 0, 1)
         grid.addWidget(self.ruler_v, 1, 0)
         grid.addWidget(view, 1, 1)
+        # The sheet is a drawing: its rulers and canvas stay as they are in a
+        # right-to-left interface (#1067), the ruler on the left included.
+        from views.rtl import keep_ltr
+        keep_ltr(area)
         for bar in (view.horizontalScrollBar(), view.verticalScrollBar()):
             bar.valueChanged.connect(lambda *_a: self._refresh_rulers())
         return area
@@ -6715,11 +7085,11 @@ class ComposerWindow(QMainWindow):
         self.paper_bg_check.toggled.connect(self._on_frame_props)
         form.addRow("", self.paper_bg_check)
         self.title_check = QCheckBox(tr("View title"))
-        self.title_check.setToolTip(tr(
+        self.title_check.setToolTip(local_field_names(tr(
             "The label of the view: a numbered bubble, the title and the "
             "scale over a rule, a vertical bar beside the frame, "
             "or a plain centred line. Fields like {escala}, {lamina} and "
-            "{escena} expand."))
+            "{escena} expand.")))
         self.title_check.toggled.connect(self._on_frame_props)
         form.addRow(self.title_check)
         self.title_style_combo = QComboBox()
@@ -6745,9 +7115,9 @@ class ComposerWindow(QMainWindow):
         _row(self._title_rows, tr("Number"), self.title_number_edit)
         self.title_sheet_edit = QLineEdit()
         self.title_sheet_edit.setPlaceholderText(tr("none"))
-        self.title_sheet_edit.setToolTip(tr(
+        self.title_sheet_edit.setToolTip(local_field_names(tr(
             "The bubble's lower half: the sheet the view lives on "
-            "(«A101», or {lamina} to read the title block)."))
+            "(«A101», or {lamina} to read the title block).")))
         self.title_sheet_edit.textChanged.connect(self._on_frame_title)
         _row(self._title_rows, tr("Sheet in the bubble"), self.title_sheet_edit)
         self.title_scale_check = QCheckBox(tr("Append the scale"))
@@ -6871,6 +7241,13 @@ class ComposerWindow(QMainWindow):
             "of a technical drawing (recomputes the view)."))
         self.hidden_check.toggled.connect(self._on_frame_pens)
         _row(self._pen_rows, None, self.hidden_check)
+        self.layer_colours_check = QCheckBox(tr("Lines in their layer's colour"))
+        self.layer_colours_check.setToolTip(tr(
+            "Each line in the colour of its layer, the faces in their "
+            "material — a services or zoning plan in colour (recomputes the "
+            "view)."))
+        self.layer_colours_check.toggled.connect(self._on_frame_pens)
+        _row(self._pen_rows, None, self.layer_colours_check)
         self.cut_fill_combo = QComboBox()
         self.cut_fill_combo.addItem(tr("Solid"), "solid")
         self.cut_fill_combo.addItem(tr("Hatched 45°"), "hatch")
@@ -6931,9 +7308,9 @@ class ComposerWindow(QMainWindow):
         w = QWidget()
         form = QFormLayout(w)
         self.text_edit = QPlainTextEdit()
-        self.text_edit.setToolTip(tr(
+        self.text_edit.setToolTip(local_field_names(tr(
             "Dynamic fields: {proyecto} {autor} {lamina} {escala} {escena} "
-            "{fecha} {archivo} {nombre} {hoja} {total}"))
+            "{fecha} {archivo} {nombre} {hoja} {total}")))
         self.text_edit.setFixedHeight(70)
         self.text_edit.textChanged.connect(self._on_text_props)
         form.addRow(tr("Text"), self.text_edit)
@@ -7103,7 +7480,7 @@ class ComposerWindow(QMainWindow):
         self.cota_text.editingFinished.connect(self._on_cota_props)
         form.addRow(tr("Label"), self.cota_text)
         self.cota_sep = QDoubleSpinBox()
-        self.cota_sep.setRange(-100.0, 100.0)
+        self.cota_sep.setRange(-1000.0, 1000.0)   # an A0 is 1189 mm long
         self.cota_sep.setSingleStep(0.5)
         self.cota_sep.setSuffix(" mm")
         self.cota_sep.valueChanged.connect(self._on_cota_props)
@@ -7129,6 +7506,13 @@ class ComposerWindow(QMainWindow):
             "0 = whole inches, 1 = 1/4, 2 = 1/16, 3 = 1/32, 4 = 1/64."))
         self.cota_units.currentTextChanged.connect(self._on_cota_props)
         form.addRow(tr("Units"), self.cota_units)
+        self.cota_show_unit = QCheckBox(tr("Show unit"))
+        self.cota_show_unit.setToolTip(tr(
+            "Off: only the number (1.30 instead of 1.30 m), for sheets "
+            "that state the unit once. Feet and inches together keep "
+            "their marks."))
+        self.cota_show_unit.toggled.connect(self._on_cota_props)
+        form.addRow("", self.cota_show_unit)
         self.cota_ends = QComboBox()
         for label, key in ((tr("Arrows"), "arrow"),
                            (tr("Oblique ticks"), "tick"),
@@ -7146,15 +7530,33 @@ class ComposerWindow(QMainWindow):
         self.cota_color_btn.setFixedHeight(22)
         self.cota_color_btn.clicked.connect(self._on_pick_cota_color)
         form.addRow(tr("Colour"), self.cota_color_btn)
-        # Only ISO for now — the German/Japanese position and the ones
-        # outside any standard are off the menu until a future release
-        # (Marco, 2026-09-20: «en posición de texto sé restrictivo, solo que
-        # esté la ISO»). The painter still honours a cota that carries one
-        # of the old values, so an existing sheet keeps its look.
+        # ISO's «above» is what every new cota is born with; «below» is
+        # for the cota whose upper side is taken (a wall, another chain).
+        # The German/Japanese «centered» and the «aside» positions stay off
+        # the menu (Marco, 2026-09-20: «en posición de texto sé
+        # restrictivo»); the painter still honours a cota that carries one
+        # of them, so an existing sheet keeps its look.
         self.cota_text_pos = QComboBox()
         self.cota_text_pos.addItem(tr("Above the line (ISO)"), "above")
+        self.cota_text_pos.addItem(tr("Below the line"), "below")
         self.cota_text_pos.currentIndexChanged.connect(self._on_cota_props)
         form.addRow(tr("Text position"), self.cota_text_pos)
+        self.cota_offset = QDoubleSpinBox()
+        self.cota_offset.setRange(0.0, 20.0)
+        self.cota_offset.setSingleStep(0.1)
+        self.cota_offset.setSuffix(" mm")
+        self.cota_offset.setToolTip(tr(
+            "Gap between the dimension line and its text, on paper. "
+            "(Separation moves the line away from the measured points.)"))
+        self.cota_offset.valueChanged.connect(self._on_cota_props)
+        form.addRow(tr("Text gap"), self.cota_offset)
+        self.cota_text_flip = QCheckBox(tr("Flip text direction"))
+        self.cota_text_flip.setToolTip(tr(
+            "Turns the text half a turn so it reads the other way along "
+            "the line — a vertical dimension read from the right instead "
+            "of from the left. The text stays on the same side."))
+        self.cota_text_flip.toggled.connect(self._on_cota_props)
+        form.addRow("", self.cota_text_flip)
         # AutoCAD's DIMALIGNED / DIMLINEAR. A cota already drawn can be
         # straightened from here, which is the way back when Shift was let
         # go a moment early (Rafael, 41:30).
@@ -7229,9 +7631,9 @@ class ComposerWindow(QMainWindow):
         self.ll_number.textChanged.connect(self._on_llamada_props)
         form.addRow(tr("Detail number"), self.ll_number)
         self.ll_sheet = QLineEdit()
-        self.ll_sheet.setToolTip(tr(
+        self.ll_sheet.setToolTip(local_field_names(tr(
             "The sheet the detail is drawn on (lower half): «L-05», or "
-            "{lamina} for this sheet's own name."))
+            "{lamina} for this sheet's own name.")))
         self.ll_sheet.textChanged.connect(self._on_llamada_props)
         form.addRow(tr("Detail sheet"), self.ll_sheet)
         self.ll_shape = QComboBox()
@@ -7341,9 +7743,9 @@ class ComposerWindow(QMainWindow):
         form = QFormLayout(w)
         self.et_text = QPlainTextEdit()
         self.et_text.setMaximumHeight(70)
-        self.et_text.setToolTip(tr(
+        self.et_text.setToolTip(local_field_names(tr(
             "Dynamic fields: {proyecto} {autor} {lamina} {escala} {escena} "
-            "{fecha} {archivo} {nombre} {hoja} {total}"))
+            "{fecha} {archivo} {nombre} {hoja} {total}")))
         self.et_text.textChanged.connect(self._on_etiqueta_props)
         form.addRow(tr("Text"), self.et_text)
         self.et_size = QDoubleSpinBox()
@@ -7454,6 +7856,9 @@ class ComposerWindow(QMainWindow):
         self.crad_units.addItems(list(UNIT_CHOICES))
         self.crad_units.currentTextChanged.connect(self._on_cota_rad_props)
         form.addRow(tr("Units"), self.crad_units)
+        self.crad_show_unit = QCheckBox(tr("Show unit"))
+        self.crad_show_unit.toggled.connect(self._on_cota_rad_props)
+        form.addRow("", self.crad_show_unit)
         self.crad_ends = QComboBox()
         for label, key in ((tr("Arrows"), "arrow"),
                            (tr("Oblique ticks"), "tick"),
@@ -7489,6 +7894,7 @@ class ComposerWindow(QMainWindow):
             "text_mm": self.crad_text_mm.value(),
             "decimals": int(self.crad_decimals.value()),
             "units": self.crad_units.currentText() or "m",
+            "show_unit": self.crad_show_unit.isChecked(),
             "ends": self.crad_ends.currentData() or "arrow",
             "stroke_mm": self.crad_stroke.value()})
 
@@ -7885,10 +8291,14 @@ class ComposerWindow(QMainWindow):
         comps = self._scene().compositions
         if 0 <= index < len(comps) and comps[index] is not self.comp:
             self.comp_combo.setCurrentIndex(index)     # → _on_comp_switched
-        self.show()
-        self.raise_()
-        self.activateWindow()
+        bring_to_front(self)
         self._refresh_sheet_tabs()
+
+    def set_document_title(self, name) -> None:
+        """«Sheet composer — <document>»: its taskbar button tells which
+        model's sheets it holds."""
+        title = tr("Sheet composer")
+        self.setWindowTitle(f"{title} — {name}" if name else title)
 
     def step_sheet(self, step: int) -> None:
         """The sheet ``step`` places before or after this one — no
@@ -7917,16 +8327,13 @@ class ComposerWindow(QMainWindow):
         needs a token GNOME does not always grant (Marco, 0.3.13 Flatpak:
         «quiero cambiar con los botones de abajo, no cambia»; and later,
         with a grace-period guess in place, «a veces no hace efecto, como
-        que tengo que hacer doble clic»); under Windows an owned window
-        always stays above its owner. So the hand-over does not guess: if
+        que tengo que hacer doble clic»). So the hand-over does not guess: if
         this window overlaps the model window it steps aside by hiding,
         at once, on every platform — a sheet tab in the model window
         brings it back exactly as it was. Side by side (two monitors)
         both stay."""
         win = self._window
-        win.show()
-        win.raise_()
-        win.activateWindow()
+        bring_to_front(win)
         self._refresh_sheet_tabs()
         if self._covers(win):
             self.hide()
@@ -8258,6 +8665,8 @@ class ComposerWindow(QMainWindow):
                     bool(getattr(f, "profiles", True)))
                 self.hidden_check.setChecked(
                     bool(getattr(f, "hidden_lines", False)))
+                self.layer_colours_check.setChecked(
+                    bool(getattr(f, "layer_colours", False)))
                 fidx = self.cut_fill_combo.findData(
                     getattr(f, "cut_fill", "solid") or "solid")
                 self.cut_fill_combo.setCurrentIndex(max(fidx, 0))
@@ -8407,6 +8816,8 @@ class ComposerWindow(QMainWindow):
                 self.cota_decimals.setValue(item.model.decimals)
                 self.cota_units.setCurrentText(
                     getattr(item.model, "units", "m") or "m")
+                self.cota_show_unit.setChecked(
+                    bool(getattr(item.model, "show_unit", True)))
                 eidx = self.cota_ends.findData(item.model.ends)
                 self.cota_ends.setCurrentIndex(max(eidx, 0))
                 self.cota_stroke.setValue(item.model.stroke_mm)
@@ -8415,6 +8826,12 @@ class ComposerWindow(QMainWindow):
                 pidx = self.cota_text_pos.findData(
                     getattr(item.model, "text_pos", "above") or "above")
                 self.cota_text_pos.setCurrentIndex(max(pidx, 0))
+                self.cota_offset.setValue(item.model.offset_mm)
+                self.cota_text_flip.setChecked(
+                    bool(getattr(item.model, "text_flip", False)))
+                self.cota_text_flip.setEnabled(
+                    (getattr(item.model, "text_align", "aligned")
+                     or "aligned") != "horizontal")
                 xidx = self.cota_axis.findData(
                     getattr(item.model, "axis", "") or "")
                 self.cota_axis.setCurrentIndex(max(xidx, 0))
@@ -8526,6 +8943,8 @@ class ComposerWindow(QMainWindow):
                 self.crad_decimals.setValue(m.decimals)
                 self.crad_units.setCurrentText(
                     getattr(m, "units", "m") or "m")
+                self.crad_show_unit.setChecked(
+                    bool(getattr(m, "show_unit", True)))
                 eidx = self.crad_ends.findData(m.ends)
                 self.crad_ends.setCurrentIndex(max(eidx, 0))
                 self.crad_stroke.setValue(m.stroke_mm)
@@ -8724,8 +9143,8 @@ class ComposerWindow(QMainWindow):
 
     def _frame_caches(self) -> tuple:
         return (self.render_cache, self.hlr_cache, self.hlr_kinds,
-                self.hlr_fills, self.snap_cache, self.circle_cache,
-                self.annot_cache)
+                self.hlr_fills, self.hlr_styles, self.snap_cache,
+                self.circle_cache, self.annot_cache)
 
     def _forget_frame(self, frame) -> None:
         """Drop every cache of *frame*: render, lines and their classes,
@@ -9396,7 +9815,8 @@ class ComposerWindow(QMainWindow):
     # ---- Copy / paste style (Edit ▸ Copy Style / Paste Style) ----------------
     #: The look of each item kind — never its geometry or content.
     STYLE_FIELDS = {
-        CotaItem: ("text_mm", "decimals", "units", "ends", "stroke_mm", "color",
+        CotaItem: ("text_mm", "decimals", "units", "show_unit", "ends",
+                   "stroke_mm", "color",
                    "offset_mm",
                    "text_color", "text_bg", "text_bg_opacity"),
         TextoItem: ("size_pt", "bold", "italic", "underline", "family",
@@ -9411,9 +9831,10 @@ class ComposerWindow(QMainWindow):
                      "title_style", "title_scale", "title_align",
                      "title_pos", "title_mm",
                      "pen_cut_mm", "pen_profile_mm", "pen_edge_mm",
-                     "profiles", "hidden_lines", "cut_fill",
+                     "profiles", "hidden_lines", "layer_colours",
+                     "cut_fill",
                      "cut_fill_color", "cut_hatch_mm"),
-        CotaRadialItem: ("text_mm", "decimals", "units", "ends",
+        CotaRadialItem: ("text_mm", "decimals", "units", "show_unit", "ends",
                          "stroke_mm", "color", "text_color", "offset_mm",
                          "text_bg", "text_bg_opacity", "centre_mark"),
         CotaAngularItem: ("text_mm", "decimals", "ends", "stroke_mm",
@@ -9969,12 +10390,10 @@ class ComposerWindow(QMainWindow):
                 ends = style.get("ends", "arrow") or "arrow"
                 for (x, y), heading in ((a2, ang), (b2, ang + math.pi)):
                     if ends == "tick":                # oblique ticks
-                        t = 1.6
+                        t, k = 1.6, oblique_tick_angle(ang)
                         out.append(("line",
-                                    x - t * math.cos(ang + math.radians(45)),
-                                    y - t * math.sin(ang + math.radians(45)),
-                                    x + t * math.cos(ang + math.radians(45)),
-                                    y + t * math.sin(ang + math.radians(45))))
+                                    x - t * math.cos(k), y - t * math.sin(k),
+                                    x + t * math.cos(k), y + t * math.sin(k)))
                     elif ends != "none":              # inside arrows
                         out.append(("arrow", x, y, math.cos(heading),
                                     math.sin(heading)))
@@ -10429,6 +10848,16 @@ class ComposerWindow(QMainWindow):
         return {"units": chosen["length"],
                 "decimals": int(chosen["precision"])}
 
+    def _document_shows_unit(self) -> bool:
+        """Whether a new sheet cota is born with its unit symbol: what the
+        document's dimension style says, so «1.30» on the model is «1.30»
+        on the sheet too (#374, #637). Each cota can still change it."""
+        try:
+            style = self._scene().dimension_style or {}
+        except AttributeError:
+            return True
+        return bool(style.get("show_unit", True))
+
     def dimension_norma(self) -> str:
         """The drafting standard the DOCUMENT's dimensions obey — ``"iso"``
         (the default, and so UNE) or ``"din"`` (German/Japanese). It lives
@@ -10721,11 +11150,14 @@ class ComposerWindow(QMainWindow):
             "pen_edge_mm": float(self.pen_edge_spin.value()),
             "profiles": self.profiles_check.isChecked(),
             "hidden_lines": self.hidden_check.isChecked(),
+            "layer_colours": self.layer_colours_check.isChecked(),
             "cut_fill": self.cut_fill_combo.currentData() or "solid",
             "cut_hatch_mm": float(self.cut_hatch_spin.value())}
         recompute = (changes["profiles"] != getattr(m, "profiles", True)
                      or changes["hidden_lines"] != getattr(m, "hidden_lines",
                                                            False)
+                     or changes["layer_colours"] != getattr(m, "layer_colours",
+                                                            False)
                      or ((changes["cut_fill"] == "none")
                          != (getattr(m, "cut_fill", "solid") == "none")))
         # A raster frame bakes the edge / profile pens into its pixels.
@@ -11054,8 +11486,9 @@ class ComposerWindow(QMainWindow):
         if not isinstance(item, LeyendaItem):
             return
         item.prepareGeometryChange()
-        self._panel_edit(item, {"rows": [ly.name for ly in
-                                         self._scene().layers if ly.visible]})
+        from core.layers import legend_rows
+        rows, swatches = legend_rows(self._scene())
+        self._panel_edit(item, {"rows": rows, "swatches": swatches})
 
     def _on_forma_props(self, *_a) -> None:
         item = self._selected_item()
@@ -11094,23 +11527,47 @@ class ComposerWindow(QMainWindow):
             n = float(text.replace(",", "."))
         except ValueError:
             n = item.model.scale_n
+        m = item.model
+
+        def spun(spin, attr):
+            # Every edit writes the whole panel back. A box the user did
+            # not touch shows the cota's value rounded (2 decimals) and
+            # clamped to its range: writing THAT back moved the line of a
+            # cota placed further than the range on any edit — the «Show
+            # unit» tick included. Untouched, the cota keeps its own value.
+            cur = float(getattr(m, attr))
+            shown = min(max(round(cur, spin.decimals()), spin.minimum()),
+                        spin.maximum())
+            return cur if abs(spin.value() - shown) < 1e-9 else spin.value()
+
+        pos = self.cota_text_pos.currentData() or "above"
+        if (self.cota_text_pos.findData(getattr(m, "text_pos", "above"))
+                < 0 and self.cota_text_pos.currentIndex() == 0):
+            # a position off the menu («centered», «aside» of older
+            # sheets) shows as the first entry; untouched, it stays
+            pos = m.text_pos
         item.prepareGeometryChange()
         self._panel_edit(item, {
             "scale_n": n if n > 0 else item.model.scale_n,
             "text": self.cota_text.text(),
-            "sep_mm": self.cota_sep.value(),
-            "text_mm": self.cota_text_mm.value(),
+            "sep_mm": spun(self.cota_sep, "sep_mm"),
+            "text_mm": spun(self.cota_text_mm, "text_mm"),
             "decimals": int(self.cota_decimals.value()),
             "units": self.cota_units.currentText() or "m",
+            "show_unit": self.cota_show_unit.isChecked(),
             "ends": self.cota_ends.currentData() or "arrow",
-            "stroke_mm": self.cota_stroke.value(),
-            "text_pos": self.cota_text_pos.currentData() or "above",
+            "stroke_mm": spun(self.cota_stroke, "stroke_mm"),
+            "text_pos": pos,
+            "offset_mm": spun(self.cota_offset, "offset_mm"),
+            "text_flip": self.cota_text_flip.isChecked(),
             "axis": self.cota_axis.currentData() or "",
             "text_along": self.cota_text_along.currentData() or "middle",
             "text_align": self.cota_text_align.currentData() or "aligned",
             "text_color": ("" if self.cota_text_same.isChecked()
                            else (item.model.text_color or item.model.color))})
         self._remember_cota_style(item.model)
+        self.cota_text_flip.setEnabled(
+            (item.model.text_align or "aligned") != "horizontal")
         self.cota_text_reset.setEnabled(
             not cota_label_is_automatic(item.model))
 
@@ -11875,6 +12332,10 @@ class ComposerWindow(QMainWindow):
         try:
             apply_frame_camera(cam, frame, saved_view, scene)
             apply_frame_shadows(frame, scene)
+            # A layer set not to print stays out of every sheet, whatever
+            # the frame's scene shows (the visibility comes back below).
+            from core.layers import hide_unprinted
+            hide_unprinted(scene)
             return fn()
         finally:
             (cam.target, cam.distance, cam.yaw, cam.pitch, cam.fov_deg,
@@ -11920,19 +12381,56 @@ class ComposerWindow(QMainWindow):
         if fast is not None:
             self._geom_cache = fast()               # arrays, ~30 ms
         else:                                       # stub viewports (tests)
-            from core.hlr import collect_geometry
-            import numpy as np
-            tris, hard, soft = collect_geometry(self._scene())
-            nan3 = (float("nan"),) * 3
-            self._geom_cache = (
-                np.asarray(tris, dtype=np.float64).reshape(-1, 3, 3),
-                np.asarray(hard, dtype=np.float64).reshape(-1, 2, 3),
-                np.asarray([(p0, p1) for p0, p1, _a, _b in soft],
-                           dtype=np.float64).reshape(-1, 2, 3),
-                np.asarray([(na, nan3 if nb is None else nb)
-                            for _p0, _p1, na, nb in soft],
-                           dtype=np.float64).reshape(-1, 2, 3))
+            self._geom_cache = self._collect_geometry_arrays()
         return self._geom_cache
+
+    def _collect_geometry_arrays(self):
+        """collect_geometry(scene) as the arrays :meth:`_scene_geometry`
+        hands out — the slow Python walk, which honours the layers as they
+        are switched NOW."""
+        from core.hlr import collect_geometry
+        import numpy as np
+        tris, hard, soft = collect_geometry(self._scene())
+        nan3 = (float("nan"),) * 3
+        return (
+            np.asarray(tris, dtype=np.float64).reshape(-1, 3, 3),
+            np.asarray(hard, dtype=np.float64).reshape(-1, 2, 3),
+            np.asarray([(p0, p1) for p0, p1, _a, _b in soft],
+                       dtype=np.float64).reshape(-1, 2, 3),
+            np.asarray([(na, nan3 if nb is None else nb)
+                        for _p0, _p1, na, nb in soft],
+                       dtype=np.float64).reshape(-1, 2, 3))
+
+    def _visibility_sig(self) -> tuple:
+        """Which layers and map / terrain objects are switched on, now."""
+        scene = self._scene()
+        return (tuple((ly.name, bool(ly.visible))
+                      for ly in getattr(scene, "layers", []) or []),
+                tuple(bool(getattr(obj, "visible", True))
+                      for _k, obj in georef_objects(scene)
+                      if obj is not None))
+
+    def _frame_geometry(self, live_sig: tuple):
+        """The geometry a frame shows — called with its camera applied.
+
+        The shared collection (:meth:`_scene_geometry`) is the LIVE model's:
+        the viewport's fast arrays take their triangles from a pick index
+        built with the live layers. A frame whose scene switches other
+        layers on — the upper floor's plan, while the model shows the
+        attic — found none of its walls there: nothing on that sheet would
+        snap. Such a frame gets its own collection, kept per set of
+        layers, until the model changes. *live_sig* is
+        :meth:`_visibility_sig` taken OUTSIDE the frame."""
+        sig = self._visibility_sig()
+        if sig == live_sig:
+            return self._scene_geometry()
+        by_sig = getattr(self, "_geom_by_sig", None)
+        if by_sig is None:
+            by_sig = self._geom_by_sig = {}
+        geometry = by_sig.get(sig)
+        if geometry is None:
+            geometry = by_sig[sig] = self._collect_geometry_arrays()
+        return geometry
 
     def _scene_circles(self) -> list:
         """collect_circles(scene), cached like :meth:`_scene_geometry` —
@@ -11949,6 +12447,7 @@ class ComposerWindow(QMainWindow):
         """The model may have changed: drop the collected geometry and
         every frame's snap set (renders are handled by their own caches)."""
         self._geom_cache = None
+        self._geom_by_sig = None
         self._circles_cache = None
         self.snap_cache.clear()
         self.circle_cache.clear()
@@ -12024,8 +12523,28 @@ class ComposerWindow(QMainWindow):
         A move must not depend on whoever moved it remembering to drop the
         cache: a drag lands in ``push_geometry_edit`` and an undo in
         ``_on_history_change`` -> ``_rebuild_after_change``, and neither of
-        them forgets anything."""
-        return (frame.x_mm, frame.y_mm, frame.w_mm, frame.h_mm)
+        them forgets anything. The style and the hidden-lines switch are in
+        it too: they decide whether the edges behind the faces snap."""
+        return (frame.x_mm, frame.y_mm, frame.w_mm, frame.h_mm,
+                frame.style, bool(getattr(frame, "hidden_lines", False)))
+
+    def _frame_sees_through(self, frame: MarcoVista) -> bool:
+        """Whether *frame* draws the edges hidden behind faces — a
+        Wireframe or X-ray style, or hidden lines inked dashed — so its
+        snap set must hold them. Called with the frame's camera applied:
+        a «Model style» frame bound to a scene takes that scene's style."""
+        if getattr(frame, "hidden_lines", False):
+            return True
+        key = {"lineas": "style:Wireframe"}.get(frame.style, frame.style)
+        if isinstance(key, str) and key.startswith("style:"):
+            from core.style import style_by_name
+            style = style_by_name(key[6:])
+        elif key == "sombreado":
+            style = getattr(self._window.viewport.scene, "display_style",
+                            None)
+        else:
+            return False
+        return getattr(style, "face_mode", "") in ("wireframe", "xray")
 
     def frame_snap_points(self, frame: MarcoVista):
         """Snappable geometry points of *frame*'s view — an ``(M, 2)`` array
@@ -12044,10 +12563,9 @@ class ComposerWindow(QMainWindow):
             return cached[1]
 
         from core.composition import frame_page_projector
-        from core.hlr import _to_cam, camera_basis, hlr_view
+        from core.hlr import KIND_HIDDEN, _to_cam, camera_basis, hlr_drawing
 
-        geometry = self._scene_geometry()
-        tris, hard, soft, _soft_n = geometry
+        live_sig = self._visibility_sig()       # taken OUTSIDE the frame
 
         def page_mapper():
             local = frame_page_projector(
@@ -12058,19 +12576,38 @@ class ComposerWindow(QMainWindow):
                 return (frame.x_mm + px, frame.y_mm + py)
             return to_page
 
+        def clip_mask(arr):
+            return ((arr[:, 0] >= frame.x_mm - 0.5)
+                    & (arr[:, 0] <= frame.x_mm + frame.w_mm + 0.5)
+                    & (arr[:, 1] >= frame.y_mm - 0.5)
+                    & (arr[:, 1] <= frame.y_mm + frame.h_mm + 0.5))
+
         def clip(arr, warr):
-            m = ((arr[:, 0] >= frame.x_mm - 0.5)
-                 & (arr[:, 0] <= frame.x_mm + frame.w_mm + 0.5)
-                 & (arr[:, 1] >= frame.y_mm - 0.5)
-                 & (arr[:, 1] <= frame.y_mm + frame.h_mm + 0.5))
+            m = clip_mask(arr)
             return arr[m], warr[m]
 
-        def run_exact():
+        #: how many of the points are DRAWN edges (the rest hidden ones);
+        #: None = all of them
+        visible = [None]
+
+        def run_exact(geometry, hidden: bool = False):
             vp = self._window.viewport
-            segs, world = hlr_view(vp.scene, vp.camera, return_world=True,
-                                   geometry=geometry)
+            # ``hidden``: the edges behind the faces too — still through
+            # the section cut and the layers, as the frame draws them.
+            d = hlr_drawing(vp.scene, vp.camera, geometry=geometry,
+                            profiles=False, fills=False, hidden=hidden)
+            segs, world = d.segs, d.world
             if not len(segs):
                 return np.empty((0, 2)), np.empty((0, 3))
+            if hidden:
+                # the drawn edges FIRST, the hidden ones after them: the
+                # snap looks through the first ``visible`` points before
+                # the rest (see ``frame_snap_visible``)
+                order = np.argsort(np.asarray(d.kinds) == KIND_HIDDEN,
+                                   kind="stable")
+                segs, world = segs[order], world[order]
+                visible[0] = 3 * int((np.asarray(d.kinds)
+                                      != KIND_HIDDEN).sum())
             to_page = page_mapper()
             pts = []
             wpts = []
@@ -12079,9 +12616,13 @@ class ComposerWindow(QMainWindow):
                 pts.append(to_page(x1, y1))
                 pts.append(to_page((x0 + x1) / 2, (y0 + y1) / 2))
                 wpts.extend((w0, w1, (w0 + w1) / 2))
-            return clip(np.array(pts), np.array(wpts))
+            pts, wpts = np.array(pts), np.array(wpts)
+            if visible[0] is not None:
+                visible[0] = int(clip_mask(pts)[:visible[0]].sum())
+            return clip(pts, wpts)
 
-        def run_fast():
+        def run_fast(geometry):
+            _tris, hard, soft, _soft_n = geometry
             vp = self._window.viewport
             E = np.concatenate([np.asarray(hard, dtype=np.float64),
                                 np.asarray(soft, dtype=np.float64)])
@@ -12097,14 +12638,26 @@ class ComposerWindow(QMainWindow):
             px, py = to_page(cam[:, 0], cam[:, 1], cam[:, 2])
             return clip(np.stack([px, py], axis=1), world)
 
-        # The exact pass goes through ``hlr_view``, which projects in
-        # PARALLEL: a perspective frame always takes the projected path,
-        # whose points carry their depth.
-        exact = (len(hard) + len(soft) <= self._EXACT_SNAP_EDGE_BUDGET
-                 and not self.frame_is_perspective(frame))
-        pair = self._with_frame_camera(frame, run_exact if exact
-                                       else run_fast)
-        self.snap_cache[id(frame)] = (stamp, pair)
+        def run():
+            # The geometry of the layers THIS frame shows, not the live
+            # model's (see ``_frame_geometry``).
+            geometry = self._frame_geometry(live_sig)
+            _tris, hard, soft, _soft_n = geometry
+            # The exact pass goes through ``hlr_drawing``, which projects
+            # in PARALLEL: a perspective frame always takes the projected
+            # path, whose points carry their depth.
+            exact = (len(hard) + len(soft) <= self._EXACT_SNAP_EDGE_BUDGET
+                     and not self.frame_is_perspective(frame))
+            if not exact:
+                return run_fast(geometry)
+            # A frame that draws the edges behind the faces snaps to them
+            # too. Through the exact pass, asked for its hidden edges: a
+            # raw projection of every edge also offered the floors above a
+            # plan's cut, whose corners then beat the drawn ones.
+            return run_exact(geometry,
+                             hidden=self._frame_sees_through(frame))
+        pair = self._with_frame_camera(frame, run)
+        self.snap_cache[id(frame)] = (stamp, pair, visible[0])
 
         return pair
 
@@ -12290,22 +12843,41 @@ class ComposerWindow(QMainWindow):
         Searches every frame whose rectangle contains the cursor first, then
         all frames (so an edge just past a frame border still catches)."""
         import numpy as np
-        best = None
-        best_d2 = thr_mm * thr_mm
-        for frame in self.comp.frames:
-            if getattr(frame, "hidden", False):
-                continue                    # a hidden view offers no snaps
-            pts, wpts = self.frame_snap_points(frame)
-            if not len(pts):
-                continue
-            d2 = ((pts[:, 0] - x_mm) ** 2 + (pts[:, 1] - y_mm) ** 2)
-            i = int(np.argmin(d2))
-            if d2[i] < best_d2:
-                best_d2 = float(d2[i])
-                best = (float(pts[i, 0]), float(pts[i, 1]),
-                        (float(wpts[i, 0]), float(wpts[i, 1]),
-                         float(wpts[i, 2])), frame)
-        return best
+        frames = [f for f in self.comp.frames
+                  if not getattr(f, "hidden", False)]  # hidden views: none
+        # The DRAWN edges first; the edges a see-through frame shows behind
+        # the faces only when nothing drawn is in reach — they are many,
+        # and crowding the drawn corners they took the snap off them.
+        for hidden_pass in (False, True):
+            best = None
+            best_d2 = thr_mm * thr_mm
+            for frame in frames:
+                pts, wpts = self.frame_snap_points(frame)
+                nv = self.frame_snap_visible(frame)
+                sl = (slice(nv, None) if hidden_pass else slice(0, nv))
+                pts, wpts = pts[sl], wpts[sl]
+                if not len(pts):
+                    continue
+                d2 = ((pts[:, 0] - x_mm) ** 2 + (pts[:, 1] - y_mm) ** 2)
+                i = int(np.argmin(d2))
+                if d2[i] < best_d2:
+                    best_d2 = float(d2[i])
+                    best = (float(pts[i, 0]), float(pts[i, 1]),
+                            (float(wpts[i, 0]), float(wpts[i, 1]),
+                             float(wpts[i, 2])), frame)
+            if best is not None:
+                return best
+        return None
+
+    def frame_snap_visible(self, frame: MarcoVista) -> int:
+        """How many of :meth:`frame_snap_points` lie on DRAWN edges — they
+        come first; the rest are edges hidden behind faces, which only a
+        see-through frame offers. All of them when the cache says
+        nothing (an older entry, a fast pass)."""
+        self.frame_snap_points(frame)
+        cached = self.snap_cache.get(id(frame))
+        nv = cached[2] if cached is not None and len(cached) > 2 else None
+        return len(cached[1][0]) if nv is None else nv
 
     def compute_hlr(self, frame: MarcoVista):
         """Hidden-line segments of *frame*'s view in PAPER millimetres
@@ -12313,15 +12885,32 @@ class ComposerWindow(QMainWindow):
         import numpy as np
         from core.composition import model_height_for_frame
         from core.hlr import hlr_drawing
+        live_sig = self._visibility_sig()       # taken OUTSIDE the frame
 
         def run():
+            from core.layers import (layer_lines_wanted, line_styles,
+                                     unprinted)
             vp = self._window.viewport
+            coloured = bool(getattr(frame, "layer_colours", False))
+            by_layer = layer_lines_wanted(vp.scene) or coloured
+            # The shared geometry is collected once for every frame; with a
+            # layer left out of the sheets this one is collected fresh,
+            # without it.
+            fresh = by_layer or bool(unprinted(vp.scene))
             drawing = hlr_drawing(
-                vp.scene, vp.camera, geometry=self._scene_geometry(),
+                vp.scene, vp.camera,
+                geometry=None if fresh else self._frame_geometry(live_sig),
                 profiles=bool(getattr(frame, "profiles", True)),
                 fills=(getattr(frame, "cut_fill", "solid") or "solid")
                 != "none",
-                hidden=bool(getattr(frame, "hidden_lines", False)))
+                hidden=bool(getattr(frame, "hidden_lines", False)),
+                layers=by_layer)
+            style = getattr(vp.scene, "display_style", None)
+            self.hlr_styles[id(frame)] = (
+                (drawing.layers, line_styles(
+                    vp.scene, coloured
+                    or bool(getattr(style, "color_by_layer", False))))
+                if drawing.layers is not None else None)
             segs = drawing.segs
             model_h = model_height_for_frame(frame.h_mm, frame.scale_n)
             k = frame.h_mm / model_h                 # paper mm per metre
@@ -12354,20 +12943,37 @@ class ComposerWindow(QMainWindow):
         plane) — what the DXF bridge to IngeCAD writes."""
         return self.model_view_drawing(frame).segs
 
-    def model_view_drawing(self, frame: MarcoVista):
+    def model_view_drawing(self, frame: MarcoVista, for_dxf: bool = False):
         """The frame's classified line drawing (core.hlr.HlrDrawing) in
-        MODEL units: segments + cut / profile / edge classes, no fills."""
+        MODEL units: segments + cut / profile / edge classes, no fills.
+        ``for_dxf``: split by layer whenever the model has layers, each with
+        its colour — a CAD file arrives organised, its layers coloured as
+        CAD users expect (the sheet itself still prints black)."""
         from core.hlr import hlr_drawing
 
         def run():
+            from core.layers import layer_lines_wanted, unprinted
             vp = self._window.viewport
-            return hlr_drawing(vp.scene, vp.camera,
-                               geometry=self._scene_geometry(),
-                               profiles=bool(getattr(frame, "profiles",
-                                                     True)),
-                               fills=False,
-                               hidden=bool(getattr(frame, "hidden_lines",
-                                                   False)))
+            by_layer = layer_lines_wanted(vp.scene) or (
+                for_dxf and len(getattr(vp.scene, "layers", ())) > 1)
+            fresh = by_layer or bool(unprinted(vp.scene))   # see compute_hlr
+            drawing = hlr_drawing(vp.scene, vp.camera,
+                                  geometry=(None if fresh
+                                            else self._scene_geometry()),
+                                  profiles=bool(getattr(frame, "profiles",
+                                                        True)),
+                                  fills=False,
+                                  hidden=bool(getattr(frame, "hidden_lines",
+                                                      False)),
+                                  layers=by_layer)
+            if drawing.layers is not None:
+                # What the DXF export needs to write each layer as itself.
+                from core.layers import line_styles
+                style = getattr(vp.scene, "display_style", None)
+                drawing.styles = line_styles(
+                    vp.scene, for_dxf
+                    or bool(getattr(style, "color_by_layer", False)))
+            return drawing
 
         return self._with_frame_camera(frame, run)
 
@@ -12504,7 +13110,8 @@ class ComposerWindow(QMainWindow):
                     getattr(frame, "pen_edge_mm", 0.18), RENDER_DPI)
                 vp._export_profile_px = pen_px(
                     getattr(frame, "pen_profile_mm", 0.35), RENDER_DPI)
-                return vp.render_image(w_px, h_px, overlays=False)
+                return vp.render_image(w_px, h_px, overlays=False,
+                                       sharp_shadows=True)
             finally:
                 vp.plano_style = None
                 vp.style_override = None
@@ -12573,11 +13180,21 @@ class ComposerWindow(QMainWindow):
             self, tr("Export view as DXF…"), "vista.dxf", "DXF (*.dxf)")
         if not path:
             return
-        drawing = self.model_view_drawing(item.model)
+        drawing = self.model_view_drawing(item.model, for_dxf=True)
         from core.hlr import KIND_CUT, KIND_EDGE, KIND_HIDDEN, KIND_PROFILE
         from formats.dxf_out import save_dxf_layers
         layer = frame_title_text(item.model).split(" — ")[0]
         k = drawing.kinds
+        if drawing.layers is not None:
+            # Each model layer as a DXF layer of its own, with its colour
+            # and line type; the cut and the hidden lines keep theirs.
+            groups = dxf_groups_by_layer(drawing, layer,
+                                         getattr(item.model, "hidden_lines",
+                                                 False))
+            n = save_dxf_layers(path, groups)
+            self.statusBar().showMessage(
+                tr("Exported {n} lines to {name}", n=n, name=path), 5000)
+            return
         # One layer per line class — IngeCAD's pen table does the weights;
         # the hidden lines go on their own layer, dashed (#81).
         groups = [
@@ -12854,7 +13471,8 @@ class ComposerWindow(QMainWindow):
                                annots=self.annot_cache.get(id(m)),
                                kinds=self.hlr_kinds.get(id(m)),
                                fills=self.hlr_fills.get(id(m)),
-                               missing=self.missing_scene(m))
+                               missing=self.missing_scene(m),
+                               styles=self.hlr_styles.get(id(m)))
             elif isinstance(m, ImagenItem):
                 paint_image_mm(painter, m, self.image_cache(m.path))
             elif isinstance(m, TextoItem):
@@ -12907,6 +13525,7 @@ class ComposerWindow(QMainWindow):
         st.setValue("composer/window_state",
                     clean if (self._act_clean_screen.isChecked()
                               and clean is not None) else self.saveState())
+        st.setValue("composer/geometry", self.saveGeometry())
         super().closeEvent(event)
 
     # ---- Window: sidebar handle + clean screen (as in the model window) ------

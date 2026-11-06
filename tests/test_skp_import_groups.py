@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Marco Sumari Tellez and IngeTrazo contributors.
 """SKP import keeps the file's groups, nested as the file nests them.
 
-``tests/data/test_export.skp`` (SketchUp 2017) holds one group «geometries»
+``tests/data/test_export.skp`` (a .skp of the 2017 version) holds one group «geometries»
 with «closed» (a circle and a rectangle, each a group) and «lines» (two
 edges, no face). It arrived as ONE component named after its definition
 («Gruppe#3») with both faces flattened into it and the lines gone. Now each
