@@ -3319,5 +3319,22 @@
  "Text gap": "Afastamento do texto",
  "Gap between the dimension line and its text, on paper. (Separation moves the line away from the measured points.)": "Distância entre a linha de cota e seu texto, no papel. (Separação afasta a linha dos pontos medidos.)",
  "Flip text direction": "Inverter o sentido do texto",
- "Turns the text half a turn so it reads the other way along the line — a vertical dimension read from the right instead of from the left. The text stays on the same side.": "Gira o texto meia volta para que seja lido no outro sentido ao longo da linha — uma cota vertical lida pela direita em vez de pela esquerda. O texto fica do mesmo lado."
+ "Turns the text half a turn so it reads the other way along the line — a vertical dimension read from the right instead of from the left. The text stays on the same side.": "Gira o texto meia volta para que seja lido no outro sentido ao longo da linha — uma cota vertical lida pela direita em vez de pela esquerda. O texto fica do mesmo lado.",
+ "Filter by IFC class": "Filtrar por classe IFC",
+ "How the rows are structured": "Como as linhas são estruturadas",
+ "Group by group": "Agrupar por grupo",
+ "Group by IFC class": "Agrupar por classe IFC",
+ "No grouping": "Sem agrupamento",
+ "Export all CSV…": "Exportar tudo em CSV…",
+ "The whole takeoff table — the bridge to IngePresupuestos": "A tabela inteira de quantitativos — a ponte para o IngePresupuestos",
+ "Export shown CSV…": "Exportar as linhas visíveis em CSV…",
+ "Only the objects the search and the class filter show": "Só os objetos que a busca e o filtro de classe mostram",
+ "Filter by IFC class: {n} hidden": "Filtrar por classe IFC: {n} ocultas",
+ "Show all classes": "Mostrar todas as classes",
+ "(no BIM objects)": "(nenhum objeto BIM)",
+ "Search name, class or outline… (* and ? work)": "Buscar nome, classe ou estrutura… (* e ? funcionam)",
+ "Group by name": "Agrupar por nome",
+ "Outline path": "Caminho na estrutura",
+ "(no name)": "(sem nome)",
+ "Columns: show or hide Takeoff, Vol m³ and Outline path": "Colunas: mostrar ou ocultar Quantitativo, Vol m³ e Caminho na estrutura"
 }

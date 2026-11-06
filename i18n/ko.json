@@ -3278,5 +3278,22 @@
  "Text gap": "문자 간격",
  "Gap between the dimension line and its text, on paper. (Separation moves the line away from the measured points.)": "치수선과 그 문자 사이의 용지상 간격입니다. ('간격'은 치수선을 측정점에서 떨어뜨립니다.)",
  "Flip text direction": "문자 방향 뒤집기",
- "Turns the text half a turn so it reads the other way along the line — a vertical dimension read from the right instead of from the left. The text stays on the same side.": "문자를 반 바퀴 돌려 선을 따라 반대 방향으로 읽히게 합니다 — 세로 치수를 왼쪽이 아닌 오른쪽에서 읽습니다. 문자는 같은 쪽에 남습니다."
+ "Turns the text half a turn so it reads the other way along the line — a vertical dimension read from the right instead of from the left. The text stays on the same side.": "문자를 반 바퀴 돌려 선을 따라 반대 방향으로 읽히게 합니다 — 세로 치수를 왼쪽이 아닌 오른쪽에서 읽습니다. 문자는 같은 쪽에 남습니다.",
+ "Filter by IFC class": "IFC 클래스로 필터",
+ "How the rows are structured": "행 구성 방식",
+ "Group by group": "그룹별로 묶기",
+ "Group by IFC class": "IFC 클래스별로 묶기",
+ "No grouping": "묶지 않음",
+ "Export all CSV…": "모두 CSV로 내보내기…",
+ "The whole takeoff table — the bridge to IngePresupuestos": "전체 물량 산출표 — IngePresupuestos로 연결되는 다리",
+ "Export shown CSV…": "표시된 행 CSV로 내보내기…",
+ "Only the objects the search and the class filter show": "검색과 클래스 필터가 보여 주는 객체만",
+ "Filter by IFC class: {n} hidden": "IFC 클래스로 필터: {n}개 숨김",
+ "Show all classes": "모든 클래스 표시",
+ "(no BIM objects)": "(BIM 객체 없음)",
+ "Search name, class or outline… (* and ? work)": "이름, 클래스 또는 경로 검색… (* 및 ? 사용 가능)",
+ "Group by name": "이름별로 묶기",
+ "Outline path": "구조 경로",
+ "(no name)": "(이름 없음)",
+ "Columns: show or hide Takeoff, Vol m³ and Outline path": "열: 물량, Vol m³, 구조 경로 표시/숨기기"
 }

@@ -3293,5 +3293,22 @@
  "Text gap": "Відступ тексту",
  "Gap between the dimension line and its text, on paper. (Separation moves the line away from the measured points.)": "Відстань між розмірною лінією та її текстом на папері. («Відступ» вище відсуває лінію від виміряних точок.)",
  "Flip text direction": "Перевернути напрямок тексту",
- "Turns the text half a turn so it reads the other way along the line — a vertical dimension read from the right instead of from the left. The text stays on the same side.": "Повертає текст на пів оберту, щоб він читався в інший бік уздовж лінії — вертикальний розмір читається справа, а не зліва. Текст залишається з того ж боку."
+ "Turns the text half a turn so it reads the other way along the line — a vertical dimension read from the right instead of from the left. The text stays on the same side.": "Повертає текст на пів оберту, щоб він читався в інший бік уздовж лінії — вертикальний розмір читається справа, а не зліва. Текст залишається з того ж боку.",
+ "Filter by IFC class": "Фільтр за класом IFC",
+ "How the rows are structured": "Як упорядковано рядки",
+ "Group by group": "Групувати за групами",
+ "Group by IFC class": "Групувати за класом IFC",
+ "No grouping": "Без групування",
+ "Export all CSV…": "Експортувати все в CSV…",
+ "The whole takeoff table — the bridge to IngePresupuestos": "Уся відомість обсягів — міст до IngePresupuestos",
+ "Export shown CSV…": "Експортувати показане в CSV…",
+ "Only the objects the search and the class filter show": "Лише об'єкти, які показують пошук і фільтр класів",
+ "Filter by IFC class: {n} hidden": "Фільтр за класом IFC: приховано {n}",
+ "Show all classes": "Показати всі класи",
+ "(no BIM objects)": "(немає об'єктів BIM)",
+ "Search name, class or outline… (* and ? work)": "Пошук за назвою, класом або шляхом… (* і ? працюють)",
+ "Group by name": "Групувати за назвою",
+ "Outline path": "Шлях у структурі",
+ "(no name)": "(без назви)",
+ "Columns: show or hide Takeoff, Vol m³ and Outline path": "Стовпці: показати або приховати Обсяг, Vol m³ і Шлях у структурі"
 }

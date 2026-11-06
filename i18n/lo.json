@@ -3281,5 +3281,22 @@
  "Text gap": "ໄລຍະຫ່າງຂໍ້ຄວາມ",
  "Gap between the dimension line and its text, on paper. (Separation moves the line away from the measured points.)": "ໄລຍະຫ່າງລະຫວ່າງເສັ້ນບອກຂະໜາດ ແລະ ຂໍ້ຄວາມຂອງມັນ ເທິງເຈ້ຍ. (ໄລຍະຫ່າງດ້ານເທິງຍ້າຍເສັ້ນອອກຈາກຈຸດທີ່ວັດ.)",
  "Flip text direction": "ປີ້ນທິດທາງຂໍ້ຄວາມ",
- "Turns the text half a turn so it reads the other way along the line — a vertical dimension read from the right instead of from the left. The text stays on the same side.": "ໝຸນຂໍ້ຄວາມເຄິ່ງຮອບ ເພື່ອໃຫ້ອ່ານໄປອີກທາງໜຶ່ງຕາມເສັ້ນ — ຂະໜາດແນວຕັ້ງອ່ານຈາກດ້ານຂວາແທນດ້ານຊ້າຍ. ຂໍ້ຄວາມຍັງຢູ່ດ້ານເດີມ."
+ "Turns the text half a turn so it reads the other way along the line — a vertical dimension read from the right instead of from the left. The text stays on the same side.": "ໝຸນຂໍ້ຄວາມເຄິ່ງຮອບ ເພື່ອໃຫ້ອ່ານໄປອີກທາງໜຶ່ງຕາມເສັ້ນ — ຂະໜາດແນວຕັ້ງອ່ານຈາກດ້ານຂວາແທນດ້ານຊ້າຍ. ຂໍ້ຄວາມຍັງຢູ່ດ້ານເດີມ.",
+ "Filter by IFC class": "ກັ່ນຕອງຕາມຊັ້ນ IFC",
+ "How the rows are structured": "ວິທີຈັດແຖວ",
+ "Group by group": "ຈັດກຸ່ມຕາມກຸ່ມ",
+ "Group by IFC class": "ຈັດກຸ່ມຕາມຊັ້ນ IFC",
+ "No grouping": "ບໍ່ຈັດກຸ່ມ",
+ "Export all CSV…": "ສົ່ງອອກທັງໝົດເປັນ CSV…",
+ "The whole takeoff table — the bridge to IngePresupuestos": "ຕາຕະລາງປະລິມານວຽກທັງໝົດ — ຂົວຕໍ່ໄປສູ່ IngePresupuestos",
+ "Export shown CSV…": "ສົ່ງອອກແຖວທີ່ສະແດງເປັນ CSV…",
+ "Only the objects the search and the class filter show": "ສະເພາະວັດຖຸທີ່ການຄົ້ນຫາ ແລະ ຕົວກັ່ນຕອງຊັ້ນສະແດງ",
+ "Filter by IFC class: {n} hidden": "ກັ່ນຕອງຕາມຊັ້ນ IFC: ເຊື່ອງ {n}",
+ "Show all classes": "ສະແດງທຸກຊັ້ນ",
+ "(no BIM objects)": "(ບໍ່ມີວັດຖຸ BIM)",
+ "Search name, class or outline… (* and ? work)": "ຄົ້ນຫາຊື່, ຊັ້ນ ຫຼື ເສັ້ນທາງ… (ໃຊ້ * ແລະ ? ໄດ້)",
+ "Group by name": "ຈັດກຸ່ມຕາມຊື່",
+ "Outline path": "ເສັ້ນທາງໃນໂຄງສ້າງ",
+ "(no name)": "(ບໍ່ມີຊື່)",
+ "Columns: show or hide Takeoff, Vol m³ and Outline path": "ຖັນ: ສະແດງ ຫຼື ເຊື່ອງ ປະລິມານວຽກ, Vol m³ ແລະ ເສັ້ນທາງໃນໂຄງສ້າງ"
 }

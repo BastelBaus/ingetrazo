@@ -3312,5 +3312,22 @@
  "Text gap": "Отступ текста",
  "Gap between the dimension line and its text, on paper. (Separation moves the line away from the measured points.)": "Расстояние между размерной линией и её текстом на бумаге. («Разделение / Отступ» отодвигает линию от измеряемых точек.)",
  "Flip text direction": "Перевернуть направление текста",
- "Turns the text half a turn so it reads the other way along the line — a vertical dimension read from the right instead of from the left. The text stays on the same side.": "Поворачивает текст на пол-оборота, чтобы он читался в другую сторону вдоль линии — вертикальный размер читается справа, а не слева. Текст остаётся с той же стороны."
+ "Turns the text half a turn so it reads the other way along the line — a vertical dimension read from the right instead of from the left. The text stays on the same side.": "Поворачивает текст на пол-оборота, чтобы он читался в другую сторону вдоль линии — вертикальный размер читается справа, а не слева. Текст остаётся с той же стороны.",
+ "Filter by IFC class": "Фильтр по классу IFC",
+ "How the rows are structured": "Как организованы строки",
+ "Group by group": "Группировать по группам",
+ "Group by IFC class": "Группировать по классу IFC",
+ "No grouping": "Без группировки",
+ "Export all CSV…": "Экспортировать всё в CSV…",
+ "The whole takeoff table — the bridge to IngePresupuestos": "Вся спецификация — мост в IngePresupuestos",
+ "Export shown CSV…": "Экспортировать показанное в CSV…",
+ "Only the objects the search and the class filter show": "Только объекты, которые показывают поиск и фильтр классов",
+ "Filter by IFC class: {n} hidden": "Фильтр по классу IFC: скрыто {n}",
+ "Show all classes": "Показать все классы",
+ "(no BIM objects)": "(нет объектов BIM)",
+ "Search name, class or outline… (* and ? work)": "Поиск по имени, классу или пути… (* и ? работают)",
+ "Group by name": "Группировать по имени",
+ "Outline path": "Путь в структуре",
+ "(no name)": "(без имени)",
+ "Columns: show or hide Takeoff, Vol m³ and Outline path": "Столбцы: показать или скрыть Объём работ, Vol m³ и Путь в структуре"
 }

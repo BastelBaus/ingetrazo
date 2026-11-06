@@ -3315,5 +3315,22 @@
  "Text gap": "Jarak teks",
  "Gap between the dimension line and its text, on paper. (Separation moves the line away from the measured points.)": "Jarak antara garis dimensi dan teksnya, di kertas. (Jarak pisah menjauhkan garis dari titik yang diukur.)",
  "Flip text direction": "Balik arah teks",
- "Turns the text half a turn so it reads the other way along the line — a vertical dimension read from the right instead of from the left. The text stays on the same side.": "Memutar teks setengah putaran agar terbaca ke arah sebaliknya di sepanjang garis — dimensi vertikal dibaca dari kanan, bukan dari kiri. Teks tetap di sisi yang sama."
+ "Turns the text half a turn so it reads the other way along the line — a vertical dimension read from the right instead of from the left. The text stays on the same side.": "Memutar teks setengah putaran agar terbaca ke arah sebaliknya di sepanjang garis — dimensi vertikal dibaca dari kanan, bukan dari kiri. Teks tetap di sisi yang sama.",
+ "Filter by IFC class": "Saring menurut kelas IFC",
+ "How the rows are structured": "Cara baris disusun",
+ "Group by group": "Kelompokkan menurut grup",
+ "Group by IFC class": "Kelompokkan menurut kelas IFC",
+ "No grouping": "Tanpa pengelompokan",
+ "Export all CSV…": "Ekspor semua ke CSV…",
+ "The whole takeoff table — the bridge to IngePresupuestos": "Seluruh tabel rekap volume — jembatan ke IngePresupuestos",
+ "Export shown CSV…": "Ekspor yang ditampilkan ke CSV…",
+ "Only the objects the search and the class filter show": "Hanya objek yang ditampilkan pencarian dan saringan kelas",
+ "Filter by IFC class: {n} hidden": "Saring menurut kelas IFC: {n} disembunyikan",
+ "Show all classes": "Tampilkan semua kelas",
+ "(no BIM objects)": "(tidak ada objek BIM)",
+ "Search name, class or outline… (* and ? work)": "Cari nama, kelas, atau jalur… (* dan ? bisa dipakai)",
+ "Group by name": "Kelompokkan menurut nama",
+ "Outline path": "Jalur di struktur",
+ "(no name)": "(tanpa nama)",
+ "Columns: show or hide Takeoff, Vol m³ and Outline path": "Kolom: tampilkan atau sembunyikan Volume, Vol m³, dan Jalur di struktur"
 }

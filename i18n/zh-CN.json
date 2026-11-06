@@ -3313,5 +3313,22 @@
  "Text gap": "文字间距",
  "Gap between the dimension line and its text, on paper. (Separation moves the line away from the measured points.)": "尺寸线与其文字之间在图纸上的距离。（“分离”是让尺寸线远离测量点。）",
  "Flip text direction": "翻转文字方向",
- "Turns the text half a turn so it reads the other way along the line — a vertical dimension read from the right instead of from the left. The text stays on the same side.": "将文字旋转半圈，使其沿尺寸线反向阅读——竖向尺寸从右侧而不是左侧阅读。文字仍在同一侧。"
+ "Turns the text half a turn so it reads the other way along the line — a vertical dimension read from the right instead of from the left. The text stays on the same side.": "将文字旋转半圈，使其沿尺寸线反向阅读——竖向尺寸从右侧而不是左侧阅读。文字仍在同一侧。",
+ "Filter by IFC class": "按 IFC 类筛选",
+ "How the rows are structured": "行的组织方式",
+ "Group by group": "按组分组",
+ "Group by IFC class": "按 IFC 类分组",
+ "No grouping": "不分组",
+ "Export all CSV…": "全部导出为 CSV…",
+ "The whole takeoff table — the bridge to IngePresupuestos": "整个工程量计算表 — 连接到 IngePresupuestos 的桥梁",
+ "Export shown CSV…": "将显示的行导出为 CSV…",
+ "Only the objects the search and the class filter show": "仅搜索和类筛选所显示的对象",
+ "Filter by IFC class: {n} hidden": "按 IFC 类筛选：已隐藏 {n} 个",
+ "Show all classes": "显示所有类",
+ "(no BIM objects)": "（无 BIM 对象）",
+ "Search name, class or outline… (* and ? work)": "搜索名称、类或路径…（可用 * 和 ?）",
+ "Group by name": "按名称分组",
+ "Outline path": "大纲路径",
+ "(no name)": "（无名称）",
+ "Columns: show or hide Takeoff, Vol m³ and Outline path": "列：显示或隐藏工程量、Vol m³ 和大纲路径"
 }

@@ -3312,5 +3312,22 @@
  "Text gap": "Textabstand",
  "Gap between the dimension line and its text, on paper. (Separation moves the line away from the measured points.)": "Abstand zwischen Maßlinie und Text, auf dem Papier. („Abstand“ oben rückt die Linie von den gemessenen Punkten ab.)",
  "Flip text direction": "Leserichtung umkehren",
- "Turns the text half a turn so it reads the other way along the line — a vertical dimension read from the right instead of from the left. The text stays on the same side.": "Dreht den Text um eine halbe Umdrehung, sodass er entlang der Linie andersherum gelesen wird — ein senkrechtes Maß von rechts statt von links gelesen. Der Text bleibt auf derselben Seite."
+ "Turns the text half a turn so it reads the other way along the line — a vertical dimension read from the right instead of from the left. The text stays on the same side.": "Dreht den Text um eine halbe Umdrehung, sodass er entlang der Linie andersherum gelesen wird — ein senkrechtes Maß von rechts statt von links gelesen. Der Text bleibt auf derselben Seite.",
+ "Filter by IFC class": "Nach IFC-Klasse filtern",
+ "How the rows are structured": "Wie die Zeilen gegliedert sind",
+ "Group by group": "Nach Gruppe gliedern",
+ "Group by IFC class": "Nach IFC-Klasse gliedern",
+ "No grouping": "Keine Gliederung",
+ "Export all CSV…": "Alles als CSV exportieren…",
+ "The whole takeoff table — the bridge to IngePresupuestos": "Die ganze Mengentabelle — die Brücke zu IngePresupuestos",
+ "Export shown CSV…": "Angezeigtes als CSV exportieren…",
+ "Only the objects the search and the class filter show": "Nur die Objekte, die Suche und Klassenfilter zeigen",
+ "Filter by IFC class: {n} hidden": "Nach IFC-Klasse filtern: {n} ausgeblendet",
+ "Show all classes": "Alle Klassen zeigen",
+ "(no BIM objects)": "(keine BIM-Objekte)",
+ "Search name, class or outline… (* and ? work)": "Name, Klasse oder Gliederung suchen… (* und ? gehen)",
+ "Group by name": "Nach Name gliedern",
+ "Outline path": "Pfad in der Gliederung",
+ "(no name)": "(ohne Name)",
+ "Columns: show or hide Takeoff, Vol m³ and Outline path": "Spalten: Menge, Vol m³ und Pfad in der Gliederung ein- oder ausblenden"
 }
