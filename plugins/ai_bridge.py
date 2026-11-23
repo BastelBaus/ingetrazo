@@ -47,6 +47,19 @@ DEFAULT_PORT = 4763
 #: QSettings key of the panel's «Allow the agent to save the document».
 ALLOW_SAVE_KEY = "ai_bridge/allow_save"
 _REFUSED = b'{"id": null, "ok": false, "error": "not a bridge request; closing"}\n'
+#: How long one call may hold the Qt main thread before the agent hears
+#: "timed out on the UI thread", in seconds; ``INGETRAZO_AI_TIMEOUT`` raises
+#: it (large documents rendered in software need longer for export_sheets).
+DEFAULT_CALL_TIMEOUT = 120.0
+
+
+def call_timeout() -> float:
+    raw = os.environ.get("INGETRAZO_AI_TIMEOUT", "").strip()
+    try:
+        value = float(raw) if raw else DEFAULT_CALL_TIMEOUT
+    except ValueError:
+        return DEFAULT_CALL_TIMEOUT
+    return value if value > 0 else DEFAULT_CALL_TIMEOUT
 
 
 class _NoDialogs(QObject):
@@ -229,7 +242,7 @@ class _Bridge(QObject):
             return None
         job = {"req": req, "done": threading.Event(), "reply": None}
         self._dispatch.emit(job)
-        job["done"].wait(timeout=120.0)
+        job["done"].wait(timeout=call_timeout())
         reply = job["reply"] or {"id": req.get("id"), "ok": False,
                                  "error": "timed out on the UI thread"}
         return (json.dumps(reply) + "\n").encode()

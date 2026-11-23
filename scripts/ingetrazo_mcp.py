@@ -53,6 +53,20 @@ PORT = int(os.environ.get("INGETRAZO_AI_PORT", 4763))
 HOST = os.environ.get("INGETRAZO_AI_HOST", "").strip() or "127.0.0.1"
 PROTOCOL = "2024-11-05"
 
+
+def _operation_timeout() -> float:
+    """The bridge's limit (INGETRAZO_AI_TIMEOUT) plus a margin, so the
+    bridge's own "timed out" reply arrives before a socket timeout here."""
+    raw = os.environ.get("INGETRAZO_AI_TIMEOUT", "").strip()
+    try:
+        value = float(raw) if raw else 150.0
+    except ValueError:
+        value = 150.0
+    return max(180.0, (value if value > 0 else 150.0) + 30.0)
+
+
+OPERATION_TIMEOUT = _operation_timeout()
+
 # The recipe book the model needs, from the app's own copy — the SAME text
 # the in-app assistant teaches (core/ai_recipes.py explains what its absence
 # cost). This process is stdlib-only and starts from four layouts (checkout,
@@ -427,7 +441,7 @@ def _bridge(tool: str, args: dict) -> dict:
     for attempt in (0, 1):
         if _sock is None:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(180.0)
+            s.settimeout(OPERATION_TIMEOUT)
             s.connect((HOST, PORT))
             _sock = s
         _req_id += 1
