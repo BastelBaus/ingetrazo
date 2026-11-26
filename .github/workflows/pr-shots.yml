@@ -1,0 +1,42 @@
+name: pr-shots
+# Scratch workflow (not part of any PR): renders screenshots of a feature
+# branch for its pull request and commits them to the pr-assets branch.
+on:
+  pull_request:
+    paths: ["scratch_shots/**", ".github/workflows/pr-shots.yml"]
+permissions:
+  contents: write
+jobs:
+  shots:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: {path: scratch, ref: "${{ github.head_ref }}"}
+      - name: Which branch
+        id: cfg
+        run: echo "branch=$(cat scratch/scratch_shots/BRANCH)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with: {ref: "${{ steps.cfg.outputs.branch }}", path: src}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 fonts-dejavu-core
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -r src/requirements.txt pypdf
+      - name: Shots
+        env: {QT_QPA_PLATFORM: offscreen}
+        run: |
+          mkdir -p out
+          cd src
+          for s in ../scratch/scratch_shots/shots_*.py; do echo "== $s"; OUT=../out timeout 600 python "$s" || echo "FAILED $s"; done
+          ls -la ../out
+      - name: Publish
+        run: |
+          cd out
+          git init -q
+          git checkout -q -b pr-assets
+          git add .
+          git -c user.name=shots -c user.email=shots@users.noreply.github.com commit -qm "screenshots for ${{ steps.cfg.outputs.branch }}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" pr-assets:pr-assets-$(echo "${{ steps.cfg.outputs.branch }}" | tr / -)
