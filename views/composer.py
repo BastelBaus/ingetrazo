@@ -7480,7 +7480,7 @@ class ComposerWindow(QMainWindow):
         fields_note = QLabel(local_field_names(tr(
             "Dynamic fields for texts and the title block: {proyecto} "
             "{autor} {lamina} {escala} {escena} {fecha} {archivo} {hoja} "
-            "{total}")))
+            "{total} {juego}")))
         fields_note.setWordWrap(True)
         theme_style(fields_note, "color:{muted}; font-size: 11px;")
         dis_lay.addWidget(fields_note)
@@ -7523,13 +7523,20 @@ class ComposerWindow(QMainWindow):
         self.border_color_btn.clicked.connect(self._on_pick_border_color)
         form.addRow(tr("Border colour"), self.border_color_btn)
         dis_lay.addLayout(form)
+        # The plan sets this sheet is in (#1519) — and the one place sets
+        # are made, renamed and deleted.
+        from views.sheet_sets_ui import PlanSetsBox
+        self.plan_sets = PlanSetsBox(self._window,
+                                     on_changed=self._after_sets_changed,
+                                     on_open=self._open_sheet_of_set)
+        dis_lay.addWidget(self.plan_sets)
         renum_btn = QPushButton(tr("Renumber sheets"))
         renum_btn.setToolTip(tr(
             "Set every title block's sheet number to L-01, L-02, … "
             "in manager order."))
         renum_btn.clicked.connect(self._on_renumber)
         dis_lay.addWidget(renum_btn)
-        atlas_btn = QPushButton(tr("Export all sheets (PDF)…"))
+        atlas_btn = QPushButton(tr("Export all sheets…"))
         atlas_btn.clicked.connect(self._on_export_all)
         dis_lay.addWidget(atlas_btn)
         dis_lay.addStretch(1)
@@ -9478,6 +9485,7 @@ class ComposerWindow(QMainWindow):
     def _copy_of(self, data: dict, name: str):
         dup = Composicion.from_dict(data)
         dup.name = name + tr(" (copy)")
+        dup.uid = ""              # a new sheet: in none of the original's sets
         return dup
 
     def duplicate_sheet(self, index: int, show: bool = False) -> None:
@@ -9866,6 +9874,8 @@ class ComposerWindow(QMainWindow):
         self.landscape_check.setChecked(self.comp.landscape)
         if hasattr(self, "border_check"):
             self._sync_border_panel()
+        if hasattr(self, "plan_sets"):
+            self.plan_sets.set_sheet(self.comp)
         self._refresh_items_list()
         self._sync_item_caches()      # fresh items, current zoom
         self._updating = False
@@ -10598,7 +10608,8 @@ class ComposerWindow(QMainWindow):
                 path.read_text(encoding="utf-8")))
         except Exception:  # noqa: BLE001 — a broken template is skipped
             return None
-        for f in comp.frames:               # fresh identities per sheet
+        comp.uid = ""                       # fresh identities per sheet
+        for f in comp.frames:
             f.uid = uuid.uuid4().hex
         for ct in comp.cotas:
             ct.anchor_uid, ct.a_world, ct.b_world = "", None, None
@@ -13284,7 +13295,7 @@ class ComposerWindow(QMainWindow):
         """``(rows, page, pages)`` of sheet index *ix* sitting on *comp*
         (the open sheet by default), read from the document now."""
         from core.composition import toc_entries, toc_slice
-        comps = getattr(self._scene(), "compositions", None) or []
+        comps, _set_name = self._counted_sheets()   # a set prints its own
         here = comp if comp is not None else self.comp
         return toc_slice(toc_entries(
             comps, ix, here, getattr(self._scene(), "sheet_folders", None)),
@@ -15331,27 +15342,30 @@ class ComposerWindow(QMainWindow):
 
     def _on_export_all(self) -> None:
         """Export all: the sheets marked for printing in the sheet
-        explorer, in its order — the same set its Export all and Print all
-        take."""
-        from core.sheet_folders import printed_sheets
-        sheets = printed_sheets(self._scene())
-        if not sheets:
-            self.statusBar().showMessage(
-                tr("No sheet is marked for printing"), 4000)
-            return
-        path, _ = file_dialogs.getSaveFileName(
-            self, tr("Export all sheets (PDF)…"), self.default_pdf_path(),
-            "PDF (*.pdf)")
-        if not path:
-            return
-        troubled = self.export_all_pdf(path, sheets)
-        if troubled:
-            self.statusBar().showMessage(
-                tr("Exported {name} — but a view would not render on {sheets}",
-                   name=path, sheets=", ".join(troubled)), 10000)
-        else:
-            self.statusBar().showMessage(tr("Exported {name}", name=path),
-                                         4000)
+        explorer, in its order — or the sheet set its Set box shows
+        (#1519) — as PDF, PNG or SVG (the file type picked)."""
+        from views.sheet_sets_ui import export_sheets_interactive
+        explorer = getattr(getattr(self, "views_panel", None), "sheets",
+                           None)
+        current = explorer.current_set_id() if explorer is not None else None
+        export_sheets_interactive(
+            self, self, current,
+            status=lambda text, ms: self.statusBar().showMessage(text, ms))
+
+    def _after_sets_changed(self) -> None:
+        """A plan set made, renamed, deleted or ticked: the explorer's Set
+        box and greyed rows follow."""
+        explorer = getattr(getattr(self, "views_panel", None), "sheets",
+                           None)
+        if explorer is not None:
+            explorer.refresh(force=True)
+
+    def _open_sheet_of_set(self, sheet) -> None:
+        """A sheet double-clicked in the Plan sets box's list of a set's
+        sheets: the composer goes to it."""
+        comps = self._scene().compositions
+        if sheet in comps:
+            self.show_sheet(comps.index(sheet))
 
     def frame_line_groups(self, frame: MarcoVista) -> list:
         """The frame's hidden-line view as the line groups the DXF and SVG
@@ -15609,21 +15623,12 @@ class ComposerWindow(QMainWindow):
         views that failed. The window need never have been shown, and it
         stays on the sheet it was on."""
         self.sync_with_document()
-        saved = self.comp
-        self.comp = comp
-        blank = []
+        blank = self._render_views_of(comp)
+        self._set_field_context(comp)
         try:
-            for f in comp.frames:
-                try:
-                    self.render_frame(f)
-                except Exception:  # noqa: BLE001 — one view, not the sheet
-                    self._forget_frame(f)
-                    blank.append(f.list_name or f.title_text or f.view_key)
-            self._set_field_context(comp)
             return self._sheet_qimage(comp, dpi), blank
         finally:
-            self.comp = saved
-            self._set_field_context(saved)
+            self._set_field_context(self.comp)
 
     def sync_with_document(self) -> None:
         """Catch up with sheets changed from outside the window (the AI
@@ -15733,7 +15738,8 @@ class ComposerWindow(QMainWindow):
             from formats.pdfa import normalize_qt_metadata
             normalize_qt_metadata(path)
 
-    def export_all_pdf(self, path: str, sheets=None) -> list:
+    def export_all_pdf(self, path: str, sheets=None,
+                       sheet_set=None) -> list:
         """The atlas: every sheet of the document into ONE PDF, each on
         its own page at its own paper size. Returns the names of the sheets
         where a frame would not render.
@@ -15746,14 +15752,152 @@ class ComposerWindow(QMainWindow):
         vista» and the caller says which sheets to look at.
 
         ``sheets`` limits it to those (in the document's order) — the
-        Browser exports the ones selected there."""
-        comps = self._scene().compositions
-        if sheets is not None:
-            wanted = {id(c) for c in sheets}
-            comps = [c for c in comps if id(c) in wanted]
+        Browser exports the ones selected there. ``sheet_set`` (a set, its
+        name or id; #1519) exports that set instead, in its own order, its
+        pages numbered within it (see :meth:`export_scope`)."""
+        comps, name = self._sheets_to_export(sheets, sheet_set)
+        with self.export_scope(comps if sheet_set is not None else None,
+                               name):
+            return self._paint_atlas_pdf(path, comps)
+
+    def _paint_atlas_pdf(self, path: str, comps) -> list:
+        """``comps`` as they are given into one PDF (in whatever export
+        scope is current): the sheets where a frame would not render."""
         writer = QPdfWriter(path)
         writer.setResolution(RENDER_DPI)
         return self._paint_atlas(writer, comps, RENDER_DPI)
+
+    def export_sheets(self, path: str, sheets=None, fmt: str = "pdf",
+                      dpi: float = 150.0, sheet_set=None) -> dict:
+        """Export ``sheets`` (default: every sheet), or the sheet set
+        ``sheet_set`` numbered within it (#1519), without the window being
+        shown: ``pdf`` is ONE file, the atlas; ``png`` and ``svg`` one file
+        per sheet (see :meth:`export_sheet_files`). Returns ``{"files":
+        [...], "errors": {sheet: [messages]}}``."""
+        comps, set_name = self._sheets_to_export(sheets, sheet_set)
+        fmt = (fmt or "pdf").lower()
+        with self.export_scope(comps if sheet_set is not None else None,
+                               set_name):
+            if fmt == "pdf":
+                troubled = self._paint_atlas_pdf(str(path), comps)
+                return {"files": [str(path)],
+                        "errors": {name: [tr("a view did not render")]
+                                   for name in troubled}}
+            return self.export_sheet_files(comps, path, fmt, dpi)
+
+    def export_sheet_files(self, comps, path, fmt: str = "png",
+                           dpi: float = 150.0) -> dict:
+        """One file per sheet of ``comps``, ``<stem>-<nn>-<sheet>.<fmt>``
+        beside ``path`` (a file name) or ``<nn>-<sheet>.<fmt>`` inside it
+        (a folder): ``png`` at ``dpi``, or ``svg`` drawn by the PDF's
+        painter. Each sheet's views rendered fresh, the window never shown.
+        Returns ``{"files": [...], "errors": {sheet: [view names]}}``."""
+        import re
+        from pathlib import Path
+        fmt = (fmt or "png").lower()
+        if fmt not in ("png", "svg"):
+            raise ValueError(f"format must be 'png' or 'svg', not {fmt!r}")
+        out = Path(path)
+        if out.suffix:
+            folder, stem = out.parent, out.stem + "-"
+        else:
+            folder, stem = out, ""
+        folder.mkdir(parents=True, exist_ok=True)
+        files, errors = [], {}
+        for i, c in enumerate(comps, 1):
+            safe = re.sub(r"[^\w\-]+", "_", c.name).strip("_") or "sheet"
+            target = folder / f"{stem}{i:02d}-{safe}.{fmt}"
+            if fmt == "svg":
+                blank = self._render_views_of(c)
+                ok = self._sheet_svg(c, str(target))
+            else:
+                image, blank = self.render_sheet_image(c, dpi)
+                ok = image.save(str(target))
+            if not ok:
+                raise OSError(f"could not write {target}")
+            files.append(str(target))
+            if blank:
+                errors[c.name] = blank
+        return {"files": files, "errors": errors}
+
+    def _render_views_of(self, comp) -> list:
+        """Render ``comp``'s views fresh; the names of those that failed."""
+        saved = self.comp
+        self.comp = comp
+        blank = []
+        try:
+            for f in comp.frames:
+                try:
+                    self.render_frame(f)
+                except Exception:  # noqa: BLE001 — one view, not the sheet
+                    self._forget_frame(f)
+                    blank.append(f.list_name or f.title_text or f.view_key)
+        finally:
+            self.comp = saved
+        return blank
+
+    def _sheet_svg(self, comp, path: str) -> bool:
+        """``comp`` as an SVG file, page size in millimetres, drawn by the
+        same painter as the PDF from the renders its views have now."""
+        from pathlib import Path
+        from PySide6.QtCore import QRectF, QSize
+        from PySide6.QtSvg import QSvgGenerator
+        pw, ph = comp.page_size_mm()
+        gen = QSvgGenerator()
+        gen.setFileName(str(path))
+        gen.setResolution(int(RENDER_DPI))
+        scale = RENDER_DPI / 25.4
+        gen.setSize(QSize(int(round(pw * scale)), int(round(ph * scale))))
+        gen.setViewBox(QRectF(0, 0, pw * scale, ph * scale))
+        gen.setTitle(comp.name)
+        painter = QPainter()
+        if not painter.begin(gen):
+            return False
+        self._set_field_context(comp)
+        try:
+            painter.fillRect(QRectF(0, 0, pw * scale, ph * scale), Qt.white)
+            painter.scale(scale, scale)
+            self._paint_sheet(painter, comp)
+        finally:
+            painter.end()
+            self._set_field_context(self.comp)
+        return Path(path).is_file()
+
+    def _sheets_to_export(self, sheets=None, sheet_set=None) -> tuple:
+        """``(sheets, set name)``: ``sheet_set`` given, what printing that
+        set takes (its members with Print on, in its order) and its name —
+        an unknown set raises ``ValueError``; else ``sheets`` in the
+        document's order, or every sheet."""
+        scene = self._scene()
+        if sheet_set is not None:
+            from core import sheet_sets as ss
+            found = ss.find_set(scene, sheet_set)
+            return ss.export_list(scene, found), (found.name if found
+                                                  else "")
+        comps = list(scene.compositions)
+        if sheets is not None:
+            wanted = {id(c) for c in sheets}
+            comps = [c for c in comps if id(c) in wanted]
+        return comps, ""
+
+    def export_scope(self, sheets=None, set_name: str = ""):
+        """A context in which the sheets painted count within ``sheets``
+        (a sheet set being printed or exported, #1519): ``{hoja}`` /
+        ``{total}`` say the place and count in it, ``{juego}`` / ``{set}``
+        its name, and every sheet index lists only those sheets, numbered
+        alike. ``None``: the document, as on the canvas."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def scope():
+            saved = getattr(self, "_export_scope", None)
+            self._export_scope = (None if sheets is None
+                                  else (list(sheets), set_name or ""))
+            try:
+                yield
+            finally:
+                self._export_scope = saved
+        return scope()
 
     def _paint_atlas(self, device, comps, dpi) -> list:
         """Paint ``comps`` on ``device`` (a PDF writer or a printer), one
@@ -15792,12 +15936,18 @@ class ComposerWindow(QMainWindow):
                 painter.end()
         return troubled
 
-    def print_sheets(self, sheets, parent=None, printer=None) -> bool:
+    def print_sheets(self, sheets, parent=None, printer=None,
+                     sheet_set=None) -> bool:
         """Print ``sheets`` — the printer dialog once, then one page per
         sheet at its own paper size and orientation, as the PDF atlas lays
         them out. ``printer`` skips the dialog (tests print to a PDF file).
         Without Qt's print module it says so and points at Export all,
-        which gives the same pages. True if anything went to print."""
+        which gives the same pages. True if anything went to print.
+        ``sheet_set`` prints that set instead (#1519), its pages numbered
+        within it."""
+        set_name = ""
+        if sheet_set is not None:
+            sheets, set_name = self._sheets_to_export(None, sheet_set)
         sheets = [c for c in sheets if c in self._scene().compositions]
         if not sheets:
             return False
@@ -15825,7 +15975,9 @@ class ComposerWindow(QMainWindow):
             if not dlg.exec():                   # cancelled
                 return False
         dpi = float(printer.resolution() or RENDER_DPI)
-        troubled = self._paint_atlas(printer, sheets, dpi)
+        with self.export_scope(sheets if sheet_set is not None else None,
+                               set_name):
+            troubled = self._paint_atlas(printer, sheets, dpi)
         if troubled:
             self.statusBar().showMessage(
                 tr("Printed — but a view would not render on {sheets}",
@@ -15833,11 +15985,20 @@ class ComposerWindow(QMainWindow):
         return True
 
     def _set_field_context(self, comp) -> None:
-        comps = list(getattr(self._scene(), "compositions", []) or [])
-        idx = comps.index(comp) if comp in comps else None
+        comps, set_name = self._counted_sheets()
+        idx = next((i for i, c in enumerate(comps) if c is comp), None)
         set_field_context(comp=comp, scene=self._scene(),
                           path=getattr(self._window, "_current_path", None),
-                          index=idx, total=len(comps))
+                          index=idx, total=len(comps), set_name=set_name)
+
+    def _counted_sheets(self) -> tuple:
+        """``(sheets, set name)`` that {hoja}, {total} and the sheet index
+        count in: the sheet set being printed (see :meth:`export_scope`),
+        else the document."""
+        scope = getattr(self, "_export_scope", None)
+        if scope is not None:
+            return scope
+        return list(getattr(self._scene(), "compositions", []) or []), ""
 
     def _paint_sheet(self, painter: QPainter, comp: Composicion,
                      small=None) -> None:

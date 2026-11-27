@@ -273,7 +273,13 @@ TOOLS = [
                            "format": {"type": "string",
                                       "enum": ["pdf", "png"]},
                            "dpi": {"type": "number",
-                                   "description": "png only (default 150)"}},
+                                   "description": "png only (default 150)"},
+                           "sheet_set": {"type": "string", "description": (
+                               "export this sheet set instead (name or id): "
+                               "its sheets with Print on, in the set's "
+                               "order; page numbers, counts and sheet "
+                               "indexes count within the set, {set} prints "
+                               "its name")}},
             "required": ["path"],
         },
     },
@@ -321,6 +327,11 @@ _SHEET = {"type": ["string", "integer"],
           "description": "the sheet's name, its number in the title block "
                          "(L-02) or its place (1 = first)"}
 _UNIT = {"type": "string", "enum": ["m", "cm", "mm", "in", "ft"]}
+#: Sheets for a sheet set (#1519), and whether it keeps the order given.
+_SHEETS = {"type": "array", "items": _SHEET}
+_ORDERED = {"type": "boolean",
+            "description": ("true: the set prints in the order given; "
+                            "false: in the sheet explorer's order")}
 
 #: Tools with a name and a schema — no code: a client that does not allow
 #: run_python works with these (Marco, 19-11). Each one is an order of the
@@ -422,6 +433,9 @@ TOOLS += [
                         "description": "instead of width"},
                 "path": {"type": "string",
                          "description": "absolute .png path to keep it"},
+                "sheet_set": {"type": "string", "description": (
+                    "render it as this sheet set prints it: page number, "
+                    "count and sheet index within the set")},
             },
             "required": ["sheet"],
         },
@@ -616,6 +630,56 @@ TOOLS += [
             "required": ["scene", "confirm"]},
     },
     {
+        "name": "list_sheet_sets",
+        "description": ("Sheet sets (plan sets): named, ordered selections "
+                        "of sheets for one audience (permit, roofer, "
+                        "client…), each with its sheets in its order "
+                        "(cover first) and those Print takes. 'All sheets' "
+                        "is implicit: what Print all takes."),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_sheet_set",
+        "description": "One sheet set by name or id.",
+        "inputSchema": {"type": "object", "properties": {"set": _STR},
+                        "required": ["set"]},
+    },
+    {
+        "name": "create_sheet_set",
+        "description": ("A new sheet set with `sheets`. They print in the "
+                        "sheet explorer's order, or in the order given "
+                        "with ordered=true; an optional cover sheet "
+                        "(printed first) and a description. One undo "
+                        "step."),
+        "inputSchema": {"type": "object", "properties": {
+            "name": _STR, "sheets": _SHEETS, "cover": _SHEET,
+            "description": _STR, "ordered": _ORDERED,
+            "expected_revision": EXPECTED},
+            "required": ["name"]},
+    },
+    {
+        "name": "update_sheet_set",
+        "description": ("Rename a set, replace its sheets (`sheets`, in that "
+                        "order) or `add` / `remove` some (added ones take "
+                        "their place in the explorer's order); set its "
+                        "`cover` ('' clears it) or description. Sets follow "
+                        "renamed and moved sheets."),
+        "inputSchema": {"type": "object", "properties": {
+            "set": _STR, "name": _STR, "sheets": _SHEETS, "add": _SHEETS,
+            "remove": _SHEETS, "cover": _SHEET, "description": _STR,
+            "ordered": _ORDERED, "expected_revision": EXPECTED},
+            "required": ["set"]},
+    },
+    {
+        "name": "delete_sheet_set",
+        "description": ("Delete a sheet set (needs confirm=true); its sheets "
+                        "stay."),
+        "inputSchema": {"type": "object", "properties": {
+            "set": _STR, "confirm": {"type": "boolean"},
+            "expected_revision": EXPECTED},
+            "required": ["set", "confirm"]},
+    },
+    {
         "name": "import_file",
         "description": ("Import a file into the document (one undo step): "
                         ".igz (as a component), .dae, .glb/.gltf, .skp, "
@@ -688,11 +752,11 @@ _READ_ONLY = ("list_documents", "query_model", "screenshot", "get_scene_info",
               "get_object_info", "list_layers", "list_scenes",
               "list_materials", "render_sheet", "document_info",
               "export_view", "list_sheets", "get_sheet",
-              "list_sheet_folders")
+              "list_sheet_folders", "list_sheet_sets", "get_sheet_set")
 # Opening another document, overwriting a file or ending the program can
 # lose work a client did not mean to lose (names as merged with #1494).
 _DESTRUCTIVE = ("run_python", "open_document", "save_document", "shutdown",
-                "delete_sheet", "delete_scene")
+                "delete_sheet", "delete_scene", "delete_sheet_set")
 for _tool in TOOLS:
     _name = _tool["name"]
     _tool["annotations"] = (

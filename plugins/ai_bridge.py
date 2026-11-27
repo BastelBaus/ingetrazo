@@ -568,12 +568,14 @@ class _Bridge(BridgeTools, QObject):
 
     def _tool_export_pdf(self, path: str = "", sheets=None,
                          format: str = "pdf",  # noqa: A002 — the tool's name
-                         dpi: float = 150.0) -> dict:
+                         dpi: float = 150.0, sheet_set=None) -> dict:
         """Every sheet (or the given ones: name, title-block number or
         place) as File ▸ Export all sheets does: ``format="pdf"`` writes
         one PDF, the atlas; ``format="png"`` one PNG per sheet,
         ``<stem>-<nn>-<sheet>.png`` beside ``path`` (a ``.png`` name) or
-        inside it (a folder), at ``dpi``."""
+        inside it (a folder), at ``dpi``. ``sheet_set`` (#1519) exports
+        that set instead: its sheets with Print on, in its order, their
+        pages numbered within it and ``{set}`` its name."""
         if not path:
             raise ValueError("give the path")
         fmt = str(format or "pdf").lower()
@@ -584,7 +586,17 @@ class _Bridge(BridgeTools, QObject):
         comps = list(getattr(scene, "compositions", []) or [])
         if not comps:
             raise ValueError("the document has no sheets")
-        if sheets:
+        set_name = None
+        if sheet_set:
+            if sheets:
+                raise ValueError("give sheets or sheet_set, not both")
+            found = self._sheets_api().sheet_set(sheet_set)
+            from core import sheet_sets as ss
+            comps, set_name = ss.export_list(scene, found), found.name
+            if not comps:
+                raise ValueError(f"the set {found.name!r} has no sheet "
+                                 f"that prints")
+        elif sheets:
             if isinstance(sheets, (str, int)):
                 sheets = [sheets]
             picked = []
@@ -595,38 +607,32 @@ class _Bridge(BridgeTools, QObject):
             # In the document's order, as the atlas prints them.
             comps = [c for c in comps if c in picked]
         composer = self._composer_for(comps)
-        if fmt == "png":
-            return self._export_pngs(composer, comps, out, dpi)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        troubled = composer.export_all_pdf(str(out), comps)
-        if not out.is_file():
-            raise RuntimeError(f"the PDF was not written: {out}")
-        return {"path": str(out), "sheets": len(comps),
-                "sheet_names": [c.name for c in comps],
-                "views_not_rendered": list(troubled or [])}
+        scope = composer.export_scope(
+            comps if set_name is not None else None, set_name or "")
+        with scope:
+            if fmt == "png":
+                reply = self._export_pngs(composer, comps, out, dpi)
+            else:
+                out.parent.mkdir(parents=True, exist_ok=True)
+                troubled = composer._paint_atlas_pdf(str(out), comps)
+                if not out.is_file():
+                    raise RuntimeError(f"the PDF was not written: {out}")
+                reply = {"path": str(out), "sheets": len(comps),
+                         "sheet_names": [c.name for c in comps],
+                         "views_not_rendered": list(troubled or [])}
+        if set_name is not None:
+            reply["sheet_set"] = set_name
+        return reply
 
     @staticmethod
     def _export_pngs(composer, comps, out: Path, dpi) -> dict:
-        import re
         dpi = max(20.0, min(600.0, float(dpi)))
-        if out.suffix.lower() == ".png":
-            folder, stem = out.parent, out.stem + "-"
-        else:
-            folder, stem = out, ""
-        folder.mkdir(parents=True, exist_ok=True)
-        files, troubled = [], {}
-        for i, c in enumerate(comps, 1):
-            image, blank = composer.render_sheet_image(c, dpi)
-            safe = re.sub(r"[^\w\-]+", "_", c.name).strip("_") or "sheet"
-            target = folder / f"{stem}{i:02d}-{safe}.png"
-            if not image.save(str(target)):
-                raise RuntimeError(f"could not write {target}")
-            files.append(str(target))
-            if blank:
-                troubled[c.name] = blank
-        return {"files": files, "sheets": len(comps),
+        if out.suffix and out.suffix.lower() != ".png":
+            raise ValueError("a PNG export goes to a .png name or a folder")
+        done = composer.export_sheet_files(comps, out, "png", dpi)
+        return {"files": done["files"], "sheets": len(comps),
                 "sheet_names": [c.name for c in comps], "dpi": dpi,
-                "views_not_rendered": troubled}
+                "views_not_rendered": done["errors"]}
 
     def _tool_export_view(self, view: str = "", path: str | None = None,
                           width: int = 1920, height: int = 1080) -> dict:
