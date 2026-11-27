@@ -14,9 +14,13 @@ jobs:
         with: {path: scratch}
       - name: Which branch
         id: cfg
-        run: echo "branch=$(cat scratch/scratch_shots/BRANCH)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "branch=$(cat scratch/scratch_shots/BRANCH)" >> "$GITHUB_OUTPUT"
+          echo "branch_a=$(cat scratch/scratch_shots/BRANCH_A)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with: {ref: "${{ steps.cfg.outputs.branch }}", path: src}
+      - uses: actions/checkout@v4
+        with: {ref: "${{ steps.cfg.outputs.branch_a }}", path: src_a}
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - run: |
@@ -28,9 +32,9 @@ jobs:
         env: {QT_QPA_PLATFORM: offscreen}
         run: |
           mkdir -p out
-          cd src
-          for s in ../scratch/scratch_shots/shots_*.py; do echo "== $s"; OUT=../out timeout 600 python "$s" || echo "FAILED $s"; done
-          ls -la ../out
+          (cd src && OUT=../out timeout 600 python ../scratch/scratch_shots/shots_b.py) || echo "FAILED b"
+          (cd src_a && OUT=../out timeout 600 python ../scratch/scratch_shots/shots_a.py) || echo "FAILED a"
+          ls -la out
       - name: Publish
         run: |
           cd out
@@ -38,4 +42,4 @@ jobs:
           git checkout -q -b pr-assets
           git add .
           git -c user.name=shots -c user.email=shots@users.noreply.github.com commit -qm "screenshots for ${{ steps.cfg.outputs.branch }}"
-          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" pr-assets:pr-assets-$(echo "${{ steps.cfg.outputs.branch }}" | tr / -)
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" pr-assets:pr-assets
