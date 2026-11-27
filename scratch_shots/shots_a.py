@@ -91,7 +91,7 @@ side([label(a, "Composer · Scenes"), label(b, "folded")], "a_composer_scenes.pn
 # Saved and reopened
 from formats import igz
 from core.scene import Scene
-path = os.path.join(OUT, "folds.igz"); igz.save_scene(scene, path)
+from pathlib import Path; path = Path(OUT) / "folds.igz"; igz.save_scene(scene, path)
 other = Scene(); igz.load_into(other, path)
 print("reopened tree_folds:", {k: sorted(v) for k, v in other.tree_folds.items()})
 os.remove(path)
