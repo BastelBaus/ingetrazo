@@ -4383,5 +4383,8 @@
  "Add the selected sheets to the plan set": "선택한 시트를 세트에 추가",
  "Take the selected sheets out of the plan set": "선택한 시트를 세트에서 빼기",
  "The sheets not in this plan set. Select some (Ctrl / Shift for several) and press ▲ to add them. Double-click a sheet to open it.": "이 세트에 없는 시트입니다. 몇 개를 선택하고(여러 개는 Ctrl / Shift) ▲를 누르면 추가됩니다. 시트를 두 번 클릭하면 열립니다.",
- "Not in «{name}»:": "«{name}»에 없음:"
+ "Not in «{name}»:": "«{name}»에 없음:",
+ "Back-to-index button in the PDF": "PDF의 «목차로 돌아가기» 버튼",
+ "Button size": "버튼 크기",
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "모든 시트의 PDF에서 각 행은 해당 시트를 엽니다. 다른 페이지의 이 버튼은 목차로 돌아갑니다."
 }

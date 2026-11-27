@@ -4383,5 +4383,8 @@
  "Add the selected sheets to the plan set": "Die ausgewählten Blätter zum Plansatz hinzufügen",
  "Take the selected sheets out of the plan set": "Die ausgewählten Blätter aus dem Plansatz nehmen",
  "The sheets not in this plan set. Select some (Ctrl / Shift for several) and press ▲ to add them. Double-click a sheet to open it.": "Die Blätter, die nicht in diesem Plansatz sind. Einige auswählen (Strg / Umschalt für mehrere) und ▲ drücken, um sie hinzuzufügen. Doppelklick auf ein Blatt öffnet es.",
- "Not in «{name}»:": "Nicht in „{name}“:"
+ "Not in «{name}»:": "Nicht in „{name}“:",
+ "Back-to-index button in the PDF": "Schaltfläche „Zum Inhaltsverzeichnis“ im PDF",
+ "Button size": "Größe der Schaltfläche",
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "Im PDF aller Blätter öffnet jede Zeile ihr Blatt; diese Schaltfläche auf allen anderen Seiten führt zurück zum Inhaltsverzeichnis."
 }

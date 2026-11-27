@@ -4383,5 +4383,8 @@
  "Add the selected sheets to the plan set": "選択したシートをセットに追加",
  "Take the selected sheets out of the plan set": "選択したシートをセットから外す",
  "The sheets not in this plan set. Select some (Ctrl / Shift for several) and press ▲ to add them. Double-click a sheet to open it.": "このセットに含まれないシートです。いくつか選択して(複数は Ctrl / Shift)▲を押すと追加されます。シートをダブルクリックすると開きます。",
- "Not in «{name}»:": "「{name}」以外:"
+ "Not in «{name}»:": "「{name}」以外:",
+ "Back-to-index button in the PDF": "PDFの「目次へ戻る」ボタン",
+ "Button size": "ボタンのサイズ",
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "全シートのPDFでは各行がそのシートを開きます。他のページにあるこのボタンで目次に戻ります。"
 }

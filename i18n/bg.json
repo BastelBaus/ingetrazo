@@ -4386,5 +4386,8 @@
  "Add the selected sheets to the plan set": "Добавяне на избраните листове към комплекта",
  "Take the selected sheets out of the plan set": "Изваждане на избраните листове от комплекта",
  "The sheets not in this plan set. Select some (Ctrl / Shift for several) and press ▲ to add them. Double-click a sheet to open it.": "Листовете извън този комплект. Изберете няколко (Ctrl / Shift за повече) и натиснете ▲, за да ги добавите. Щракнете двукратно върху лист, за да го отворите.",
- "Not in «{name}»:": "Извън „{name}“:"
+ "Not in «{name}»:": "Извън „{name}“:",
+ "Back-to-index button in the PDF": "Бутон „към съдържанието“ в PDF",
+ "Button size": "Размер на бутона",
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "В PDF с всички листове всеки ред отваря своя лист; този бутон на останалите страници води обратно към съдържанието."
 }

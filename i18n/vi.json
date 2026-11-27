@@ -4410,5 +4410,8 @@
  "Add the selected sheets to the plan set": "Thêm các tờ đã chọn vào bộ bản vẽ",
  "Take the selected sheets out of the plan set": "Đưa các tờ đã chọn ra khỏi bộ bản vẽ",
  "The sheets not in this plan set. Select some (Ctrl / Shift for several) and press ▲ to add them. Double-click a sheet to open it.": "Các tờ không thuộc bộ bản vẽ này. Chọn một số tờ (Ctrl / Shift để chọn nhiều) rồi nhấn ▲ để thêm. Nhấp đúp vào một tờ để mở.",
- "Not in «{name}»:": "Ngoài «{name}»:"
+ "Not in «{name}»:": "Ngoài «{name}»:",
+ "Back-to-index button in the PDF": "Nút «về mục lục» trong PDF",
+ "Button size": "Kích thước nút",
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "Trong PDF của tất cả các bản vẽ, mỗi dòng mở bản vẽ của nó; nút này trên các trang khác đưa về mục lục."
 }

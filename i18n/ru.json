@@ -4383,5 +4383,8 @@
  "Add the selected sheets to the plan set": "Добавить выбранные листы в комплект",
  "Take the selected sheets out of the plan set": "Убрать выбранные листы из комплекта",
  "The sheets not in this plan set. Select some (Ctrl / Shift for several) and press ▲ to add them. Double-click a sheet to open it.": "Листы, не входящие в этот комплект. Выберите несколько (Ctrl / Shift для нескольких) и нажмите ▲, чтобы добавить их. Дважды щёлкните лист, чтобы открыть его.",
- "Not in «{name}»:": "Не в «{name}»:"
+ "Not in «{name}»:": "Не в «{name}»:",
+ "Back-to-index button in the PDF": "Кнопка «к оглавлению» в PDF",
+ "Button size": "Размер кнопки",
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "В PDF со всеми листами каждая строка открывает свой лист; эта кнопка на остальных страницах возвращает к оглавлению."
 }

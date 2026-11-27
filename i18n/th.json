@@ -4386,5 +4386,8 @@
  "Add the selected sheets to the plan set": "เพิ่มแผ่นงานที่เลือกเข้าชุดแบบ",
  "Take the selected sheets out of the plan set": "นำแผ่นงานที่เลือกออกจากชุดแบบ",
  "The sheets not in this plan set. Select some (Ctrl / Shift for several) and press ▲ to add them. Double-click a sheet to open it.": "แผ่นงานที่ไม่อยู่ในชุดแบบนี้ เลือกบางแผ่น (Ctrl / Shift สำหรับหลายแผ่น) แล้วกด ▲ เพื่อเพิ่ม ดับเบิลคลิกที่แผ่นงานเพื่อเปิด",
- "Not in «{name}»:": "ไม่อยู่ใน «{name}»:"
+ "Not in «{name}»:": "ไม่อยู่ใน «{name}»:",
+ "Back-to-index button in the PDF": "ปุ่ม «กลับไปที่สารบัญ» ใน PDF",
+ "Button size": "ขนาดปุ่ม",
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "ใน PDF ของแผ่นงานทั้งหมด แต่ละแถวจะเปิดแผ่นงานของตน ปุ่มนี้ในหน้าอื่นๆ จะพากลับไปที่สารบัญ"
 }

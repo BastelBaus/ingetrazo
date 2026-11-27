@@ -4385,5 +4385,8 @@
  "Add the selected sheets to the plan set": "Afegeix les làmines seleccionades al joc de plànols",
  "Take the selected sheets out of the plan set": "Treu les làmines seleccionades del joc de plànols",
  "The sheets not in this plan set. Select some (Ctrl / Shift for several) and press ▲ to add them. Double-click a sheet to open it.": "Les làmines que no són en aquest joc de plànols. Selecciona'n algunes (Ctrl / Maj per a diverses) i prem ▲ per afegir-les. Fes doble clic en una làmina per obrir-la.",
- "Not in «{name}»:": "No són a «{name}»:"
+ "Not in «{name}»:": "No són a «{name}»:",
+ "Back-to-index button in the PDF": "Botó «tornar a l'índex» al PDF",
+ "Button size": "Mida del botó",
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "Al PDF de totes les làmines cada fila obre la seva làmina; aquest botó a les altres pàgines torna a l'índex."
 }

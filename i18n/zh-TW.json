@@ -4386,5 +4386,8 @@
  "Add the selected sheets to the plan set": "將所選圖紙加入圖紙集",
  "Take the selected sheets out of the plan set": "將所選圖紙移出圖紙集",
  "The sheets not in this plan set. Select some (Ctrl / Shift for several) and press ▲ to add them. Double-click a sheet to open it.": "不在此圖紙集中的圖紙。選取若干張(多選用 Ctrl / Shift)並按 ▲ 加入。按兩下圖紙即可開啟。",
- "Not in «{name}»:": "不在「{name}」中:"
+ "Not in «{name}»:": "不在「{name}」中:",
+ "Back-to-index button in the PDF": "PDF 中的「返回目錄」按鈕",
+ "Button size": "按鈕大小",
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "在所有圖紙的 PDF 中，每一列都會開啟對應的圖紙；其他頁面上的此按鈕可返回目錄。"
 }

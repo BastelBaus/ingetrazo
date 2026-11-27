@@ -4389,5 +4389,8 @@
  "Add the selected sheets to the plan set": "Adicionar as folhas selecionadas ao conjunto",
  "Take the selected sheets out of the plan set": "Tirar as folhas selecionadas do conjunto",
  "The sheets not in this plan set. Select some (Ctrl / Shift for several) and press ▲ to add them. Double-click a sheet to open it.": "As folhas que não estão neste conjunto. Selecione algumas (Ctrl / Shift para várias) e pressione ▲ para adicioná-las. Clique duas vezes numa folha para abri-la.",
- "Not in «{name}»:": "Fora de «{name}»:"
+ "Not in «{name}»:": "Fora de «{name}»:",
+ "Back-to-index button in the PDF": "Botão «voltar ao índice» no PDF",
+ "Button size": "Tamanho do botão",
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "No PDF de todas as pranchas cada linha abre sua prancha; este botão nas demais páginas leva de volta ao índice."
 }

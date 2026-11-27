@@ -4382,5 +4382,8 @@
  "Add the selected sheets to the plan set": "Añadir las láminas seleccionadas al juego de planos",
  "Take the selected sheets out of the plan set": "Sacar las láminas seleccionadas del juego de planos",
  "The sheets not in this plan set. Select some (Ctrl / Shift for several) and press ▲ to add them. Double-click a sheet to open it.": "Las láminas que no están en este juego de planos. Selecciona algunas (Ctrl / Mayús para varias) y pulsa ▲ para añadirlas. Doble clic en una lámina para abrirla.",
- "Not in «{name}»:": "Fuera de «{name}»:"
+ "Not in «{name}»:": "Fuera de «{name}»:",
+ "Back-to-index button in the PDF": "Botón «volver al índice» en el PDF",
+ "Button size": "Tamaño del botón",
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "En el PDF de todas las láminas cada fila abre su lámina; este botón en las demás páginas lleva de vuelta al índice."
 }

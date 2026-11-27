@@ -4419,5 +4419,8 @@
  "Add the selected sheets to the plan set": "إضافة الأوراق المحددة إلى المجموعة",
  "Take the selected sheets out of the plan set": "إخراج الأوراق المحددة من المجموعة",
  "The sheets not in this plan set. Select some (Ctrl / Shift for several) and press ▲ to add them. Double-click a sheet to open it.": "الأوراق التي ليست في هذه المجموعة. حدّد بعضها (Ctrl / Shift لعدة أوراق) واضغط ▲ لإضافتها. انقر نقرًا مزدوجًا على ورقة لفتحها.",
- "Not in «{name}»:": "خارج «{name}»:"
+ "Not in «{name}»:": "خارج «{name}»:",
+ "Back-to-index button in the PDF": "زر «العودة إلى الفهرس» في PDF",
+ "Button size": "حجم الزر",
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "في ملف PDF لجميع اللوحات يفتح كل سطر لوحته؛ وهذا الزر في الصفحات الأخرى يعيد إلى الفهرس."
 }

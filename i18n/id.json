@@ -4386,5 +4386,8 @@
  "Add the selected sheets to the plan set": "Tambahkan lembar terpilih ke set",
  "Take the selected sheets out of the plan set": "Keluarkan lembar terpilih dari set",
  "The sheets not in this plan set. Select some (Ctrl / Shift for several) and press ▲ to add them. Double-click a sheet to open it.": "Lembar yang tidak ada di set ini. Pilih beberapa (Ctrl / Shift untuk lebih dari satu) lalu tekan ▲ untuk menambahkannya. Klik ganda lembar untuk membukanya.",
- "Not in «{name}»:": "Tidak di «{name}»:"
+ "Not in «{name}»:": "Tidak di «{name}»:",
+ "Back-to-index button in the PDF": "Tombol «kembali ke indeks» di PDF",
+ "Button size": "Ukuran tombol",
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "Di PDF semua lembar, setiap baris membuka lembarnya; tombol ini di halaman lain membawa kembali ke indeks."
 }

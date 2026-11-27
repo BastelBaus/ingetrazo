@@ -4391,5 +4391,8 @@
  "Add the selected sheets to the plan set": "Dodaj zaznaczone arkusze do zestawu",
  "Take the selected sheets out of the plan set": "Usuń zaznaczone arkusze z zestawu",
  "The sheets not in this plan set. Select some (Ctrl / Shift for several) and press ▲ to add them. Double-click a sheet to open it.": "Arkusze spoza tego zestawu. Zaznacz kilka (Ctrl / Shift, aby wybrać więcej) i naciśnij ▲, aby je dodać. Kliknij dwukrotnie arkusz, aby go otworzyć.",
- "Not in «{name}»:": "Poza „{name}”:"
+ "Not in «{name}»:": "Poza „{name}”:",
+ "Back-to-index button in the PDF": "Przycisk „powrót do spisu” w PDF",
+ "Button size": "Rozmiar przycisku",
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "W PDF ze wszystkimi arkuszami każdy wiersz otwiera swój arkusz; ten przycisk na pozostałych stronach prowadzi z powrotem do spisu."
 }
