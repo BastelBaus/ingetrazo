@@ -4389,5 +4389,16 @@
  "Not in «{name}»:": "Извън „{name}“:",
  "Back-to-index button in the PDF": "Бутон „към съдържанието“ в PDF",
  "Button size": "Размер на бутона",
- "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "В PDF с всички листове всеки ред отваря своя лист; този бутон на останалите страници води обратно към съдържанието."
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "В PDF с всички листове всеки ред отваря своя лист; този бутон на останалите страници води обратно към съдържанието.",
+ "Title source": "Източник на заглавието",
+ "View name": "Име на изгледа",
+ "Full path": "Пълен път",
+ "Custom text": "Собствен текст",
+ "What the title says: the view's name, its full path through the folders of the Scenes tab, or the text typed below. Any title text can also use {vista}, {ruta} and {carpeta}.": "Какво казва заглавието: името на изгледа, пълния му път през папките на раздела Сцени или текста, въведен по-долу. Всеки текст на заглавие може да използва и {vista}, {ruta} и {carpeta}.",
+ "What goes between the folders and the view's name.": "Какво стои между папките и името на изгледа.",
+ "Path separator": "Разделител на пътя",
+ "How many of the innermost folders the path keeps; all = every folder from the top.": "Колко от най-вътрешните папки запазва пътят; всички = всяка папка отгоре.",
+ "Folder levels": "Нива на папки",
+ "Strip folder numbers": "Премахни номерата на папките",
+ "Leave out the numbers that sort the folders: «01 Plans» reads «Plans».": "Пропуска номерата, които подреждат папките: «01 Планове» се чете «Планове»."
 }

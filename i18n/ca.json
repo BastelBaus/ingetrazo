@@ -4388,5 +4388,16 @@
  "Not in «{name}»:": "No són a «{name}»:",
  "Back-to-index button in the PDF": "Botó «tornar a l'índex» al PDF",
  "Button size": "Mida del botó",
- "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "Al PDF de totes les làmines cada fila obre la seva làmina; aquest botó a les altres pàgines torna a l'índex."
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "Al PDF de totes les làmines cada fila obre la seva làmina; aquest botó a les altres pàgines torna a l'índex.",
+ "Title source": "Origen del títol",
+ "View name": "Nom de la vista",
+ "Full path": "Camí complet",
+ "Custom text": "Text propi",
+ "What the title says: the view's name, its full path through the folders of the Scenes tab, or the text typed below. Any title text can also use {vista}, {ruta} and {carpeta}.": "Què diu el títol: el nom de la vista, el seu camí complet per les carpetes de la pestanya Escenes, o el text escrit a sota. Qualsevol text de títol pot fer servir també {vista}, {ruta} i {carpeta}.",
+ "What goes between the folders and the view's name.": "El que va entre les carpetes i el nom de la vista.",
+ "Path separator": "Separador del camí",
+ "How many of the innermost folders the path keeps; all = every folder from the top.": "Quantes de les carpetes més internes conserva el camí; totes = cada carpeta des de dalt.",
+ "Folder levels": "Nivells de carpeta",
+ "Strip folder numbers": "Treure els números de carpeta",
+ "Leave out the numbers that sort the folders: «01 Plans» reads «Plans».": "Omet els números que ordenen les carpetes: «01 Plànols» es llegeix «Plànols»."
 }

@@ -4385,5 +4385,16 @@
  "Not in «{name}»:": "Fuera de «{name}»:",
  "Back-to-index button in the PDF": "Botón «volver al índice» en el PDF",
  "Button size": "Tamaño del botón",
- "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "En el PDF de todas las láminas cada fila abre su lámina; este botón en las demás páginas lleva de vuelta al índice."
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "En el PDF de todas las láminas cada fila abre su lámina; este botón en las demás páginas lleva de vuelta al índice.",
+ "Title source": "Origen del título",
+ "View name": "Nombre de la vista",
+ "Full path": "Ruta completa",
+ "Custom text": "Texto propio",
+ "What the title says: the view's name, its full path through the folders of the Scenes tab, or the text typed below. Any title text can also use {vista}, {ruta} and {carpeta}.": "Qué dice el título: el nombre de la vista, su ruta completa por las carpetas de la pestaña Escenas, o el texto escrito abajo. Cualquier texto de título puede usar también {vista}, {ruta} y {carpeta}.",
+ "What goes between the folders and the view's name.": "Lo que va entre las carpetas y el nombre de la vista.",
+ "Path separator": "Separador de ruta",
+ "How many of the innermost folders the path keeps; all = every folder from the top.": "Cuántas de las carpetas más internas conserva la ruta; todas = cada carpeta desde arriba.",
+ "Folder levels": "Niveles de carpeta",
+ "Strip folder numbers": "Quitar números de carpeta",
+ "Leave out the numbers that sort the folders: «01 Plans» reads «Plans».": "Omite los números que ordenan las carpetas: «01 Planos» se lee «Planos»."
 }

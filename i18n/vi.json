@@ -4413,5 +4413,16 @@
  "Not in «{name}»:": "Ngoài «{name}»:",
  "Back-to-index button in the PDF": "Nút «về mục lục» trong PDF",
  "Button size": "Kích thước nút",
- "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "Trong PDF của tất cả các bản vẽ, mỗi dòng mở bản vẽ của nó; nút này trên các trang khác đưa về mục lục."
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "Trong PDF của tất cả các bản vẽ, mỗi dòng mở bản vẽ của nó; nút này trên các trang khác đưa về mục lục.",
+ "Title source": "Nguồn tiêu đề",
+ "View name": "Tên chế độ xem",
+ "Full path": "Đường dẫn đầy đủ",
+ "Custom text": "Văn bản tùy chỉnh",
+ "What the title says: the view's name, its full path through the folders of the Scenes tab, or the text typed below. Any title text can also use {vista}, {ruta} and {carpeta}.": "Nội dung tiêu đề: tên chế độ xem, đường dẫn đầy đủ qua các thư mục của thẻ Cảnh, hoặc văn bản nhập bên dưới. Mọi văn bản tiêu đề cũng có thể dùng {vista}, {ruta} và {carpeta}.",
+ "What goes between the folders and the view's name.": "Ký tự đặt giữa các thư mục và tên chế độ xem.",
+ "Path separator": "Dấu phân cách đường dẫn",
+ "How many of the innermost folders the path keeps; all = every folder from the top.": "Số thư mục trong cùng mà đường dẫn giữ lại; tất cả = mọi thư mục từ trên xuống.",
+ "Folder levels": "Cấp thư mục",
+ "Strip folder numbers": "Bỏ số thư mục",
+ "Leave out the numbers that sort the folders: «01 Plans» reads «Plans».": "Bỏ các số dùng để sắp xếp thư mục: «01 Mặt bằng» thành «Mặt bằng»."
 }

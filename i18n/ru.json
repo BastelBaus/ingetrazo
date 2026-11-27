@@ -4386,5 +4386,16 @@
  "Not in «{name}»:": "Не в «{name}»:",
  "Back-to-index button in the PDF": "Кнопка «к оглавлению» в PDF",
  "Button size": "Размер кнопки",
- "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "В PDF со всеми листами каждая строка открывает свой лист; эта кнопка на остальных страницах возвращает к оглавлению."
+ "In the PDF of all the sheets every row opens its sheet; this button on every other page leads back to the index.": "В PDF со всеми листами каждая строка открывает свой лист; эта кнопка на остальных страницах возвращает к оглавлению.",
+ "Title source": "Источник заголовка",
+ "View name": "Имя вида",
+ "Full path": "Полный путь",
+ "Custom text": "Свой текст",
+ "What the title says: the view's name, its full path through the folders of the Scenes tab, or the text typed below. Any title text can also use {vista}, {ruta} and {carpeta}.": "Что пишет заголовок: имя вида, его полный путь по папкам вкладки «Сцены» или текст, введённый ниже. Любой текст заголовка может также использовать {vista}, {ruta} и {carpeta}.",
+ "What goes between the folders and the view's name.": "Что стоит между папками и именем вида.",
+ "Path separator": "Разделитель пути",
+ "How many of the innermost folders the path keeps; all = every folder from the top.": "Сколько самых внутренних папок оставляет путь; все = каждая папка сверху.",
+ "Folder levels": "Уровни папок",
+ "Strip folder numbers": "Убрать номера папок",
+ "Leave out the numbers that sort the folders: «01 Plans» reads «Plans».": "Опускает номера, сортирующие папки: «01 Планы» читается «Планы»."
 }
